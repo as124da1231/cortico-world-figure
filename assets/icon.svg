@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Coo 魔术人偶工坊">
+  <title>Coo Marionette Atelier</title>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="#f2efe6"/>
+  <path d="M19 13h26" stroke="#1b1a1e" stroke-width="3" stroke-linecap="round"/>
+  <path d="M24 13 28 23M40 13 36 23" stroke="#1b1a1e" stroke-width="1.8" stroke-linecap="round" opacity=".5"/>
+  <circle cx="32" cy="28" r="6.2" fill="#fbfbfb" stroke="#1b1a1e" stroke-width="3"/>
+  <path d="M32 35 23 54h18z" fill="#00a870" stroke="#00a870" stroke-width="3.4" stroke-linejoin="round"/>
+  <path d="M50 15.5 51.5 19.5 55.5 21 51.5 22.5 50 26.5 48.5 22.5 44.5 21 48.5 19.5z" fill="#e0a92c"/>
+</svg>

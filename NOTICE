@@ -1,0 +1,9 @@
+Coo 魔术人偶工坊 / Coo Marionette Atelier
+Copyright (C) 2026 as124da1231
+
+本包以 GNU Affero General Public License v3.0 or later 发布，完整文本见 LICENSE。
+随包附带的第三方组件（Live2D Cubism SDK for Web、Live2D Cubism Core、SoulLink Emotion
+Engine、Coopanion desktop-pet kit）的清单、许可边界与许可文本见 workbench/NOTICE 与
+workbench/pack/sdk/。
+
+本包作为 Coo 扩展分发时，同样适用以上边界；pack/sdk 下的 Live2D 文件不属于 AGPL。

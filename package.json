@@ -1,0 +1,68 @@
+{
+  "name": "cortico-world-figure",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "把 Live2D 模型整理成 Coo 能用的形象：扫描、打包、安装。只做装配，不含编辑。 / Turn a Live2D model into a Coo figure: scan, pack, install.",
+  "license": "AGPL-3.0-or-later",
+  "author": "as124da1231",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/as124da1231/cortico-world-figure.git"
+  },
+  "homepage": "https://github.com/as124da1231/cortico-world-figure#readme",
+  "bugs": {
+    "url": "https://github.com/as124da1231/cortico-world-figure/issues"
+  },
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "live2d",
+    "figure",
+    "avatar",
+    "marionette",
+    "vtuber",
+    "local-tool"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "Coo 魔术人偶工坊",
+    "icon": "assets/icon.svg",
+    "tags": [
+      "apps",
+      "experimental"
+    ],
+    "locales": {
+      "zh": {
+        "displayName": "Coo 魔术人偶工坊",
+        "description": "把 Live2D 模型整理成 Coo 能用的形象：扫描、打包、安装。只做装配，不含编辑。"
+      },
+      "en": {
+        "displayName": "Coo Marionette Atelier",
+        "description": "Turn a Live2D model into a Coo figure: scan, pack, install. Assembly only, no editing."
+      }
+    },
+    "webUiClient": "dist/webui.js",
+    "webUiStyle": "dist/webui.css",
+    "describe": "describe.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "assets",
+    "workbench",
+    "describe.json",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "dependencies": {},
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
