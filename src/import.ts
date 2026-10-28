@@ -6,7 +6,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
 import { unzipSync } from 'fflate';
@@ -267,6 +267,19 @@ export class PackImporter {
           bytes: await dirBytes(full).catch(() => 0),
           installed: null,
         });
+      }
+
+      if (!packs.length && models.length === 1 && models[0].dir === '') {
+        // 模型就摊在上传目录的根上：给它一个跟 .model3.json 同名的子目录，
+        // 这样打包出来的 id 是模型名，而不是临时目录的名字。
+        const title = models[0].title.replace(/[\\/:*?"<>|]+/g, '-').trim() || 'model';
+        const sub = join(root, title);
+        await mkdir(sub, { recursive: true });
+        for (const e of await readdir(root, { withFileTypes: true })) {
+          if (e.name === title) continue;
+          await rename(join(root, e.name), join(sub, e.name)).catch(() => {});
+        }
+        models[0].dir = title;
       }
 
       if (!packs.length && !models.length) {

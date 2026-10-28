@@ -530,23 +530,24 @@ export default {
                   info.appendChild(el('div', 'l2d-packrow-name', m.title));
                   info.appendChild(el('div', 'l2d-packrow-meta',
                     [m.dir || '.', t(`${m.files} 个文件`, `${m.files} files`), `${(m.bytes / 1048576).toFixed(1)} MB`].join(' · ')));
-                  info.appendChild(el('div', 'l2d-packrow-tag', t('先打包，再装进去', 'packed first, then installed')));
+                  info.appendChild(el('div', 'l2d-packrow-tag', t('打包后可以改名字和参数，再安装', 'pack first, edit, then install')));
                   row.appendChild(info);
-                  const go = el('button', 'l2d-btn sm primary', t('打包并安装', 'Pack + install'));
+                  const go = el('button', 'l2d-btn sm primary', t('打包', 'Pack'));
                   go.addEventListener('click', async () => {
                     go.disabled = true;
                     go.textContent = t('打包中…', 'Packing…');
                     try {
-                      const out = await ctx.invoke('importBuild', [r.token, m.dir, true]);
+                      const out = await ctx.invoke('importBuild', [r.token, m.dir, false]);
                       for (const line of out.log ?? []) log.append(line, 'dim');
                       log.append(t('导入模型 · ', 'Imported model · ') + m.title, 'dim');
-                      ui.toast(t('已打包并安装', 'Packed and installed'), 'ok');
+                      log.append(t('已排到「已打包」，可以点编辑改名或调参数', 'Packed; edit it from the pack card'), 'dim');
+                      ui.toast(t('已打包', 'Packed'), 'ok');
                       closeImport();
                       await refresh();
                     } catch (e) {
                       ui.toast(text(e), 'bad');
                       go.disabled = false;
-                      go.textContent = t('打包并安装', 'Pack + install');
+                      go.textContent = t('打包', 'Pack');
                     }
                   });
                   row.appendChild(go);
