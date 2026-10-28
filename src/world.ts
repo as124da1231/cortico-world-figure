@@ -278,6 +278,50 @@ export class Live2dWorld implements World {
       await this.importer.cancel();
       return { ok: true };
     }
+    if (method === 'importBuild') {
+      if (this.busy) throw new Error('上一个动作还没结束');
+      const token = String(args[0] ?? '');
+      const dir = String(args[1] ?? '');
+      const full = this.importer.resolve(token, dir);
+      if (!full || !existsSync(full)) throw new Error('这次导入已经过期，重新选一次');
+      const wantInstall = Boolean(args[2]);
+      const built = await this.doBuild(full, { remember: false }) as { log?: string[] };
+      const buildId = this.state.builds?.[0]?.id;
+      let installed: unknown = null;
+      if (wantInstall && buildId) installed = await this.doInstall(full, buildId);
+      return { ...built, buildId, installed, state: this.snapshot() };
+    }
+    if (method === 'importBegin') {
+      if (this.busy) throw new Error('上一个动作还没结束');
+      const token = await this.importer.beginUpload();
+      return { token };
+    }
+    if (method === 'importAppend') {
+      const token = String(args[0] ?? '');
+      const list = Array.isArray(args[1]) ? (args[1] as Array<Record<string, unknown>>) : [];
+      const files = list.map((f) => ({
+        path: String(f?.path ?? ''),
+        bytes: Buffer.from(String(f?.b64 ?? ''), 'base64'),
+      }));
+      const r = await this.importer.appendUpload(token, files);
+      if ('error' in r) throw new Error(r.error);
+      return r;
+    }
+    if (method === 'importFinish') {
+      if (this.busy) throw new Error('上一个动作还没结束');
+      const token = String(args[0] ?? '');
+      const fromFolders = Boolean(args[1]);
+      this.busy = true;
+      try {
+        const installed = await this.installedVersions();
+        const r = await this.importer.finishUpload(token, fromFolders, installed);
+        if ('error' in r) throw new Error(r.error);
+        this.say(`读到 ${r.models.length + r.packs.length} 个模型 / 模型包`);
+        return r;
+      } finally {
+        this.busy = false;
+      }
+    }
     if (method === 'detail') {
       const id = String(args[0] ?? '');
       const rec = (this.state.builds ?? []).find((b) => b.id === id) ?? this.state.build;
@@ -354,7 +398,7 @@ export class Live2dWorld implements World {
     }
   }
 
-  private async doBuild(dir: string): Promise<unknown> {
+  private async doBuild(dir: string, opts: { remember?: boolean } = {}): Promise<unknown> {
     this.guard(dir);
     if (this.busy) throw new Error('上一个动作还没结束');
     this.busy = true;
@@ -406,7 +450,7 @@ export class Live2dWorld implements World {
         + (shot.ok ? ' · 封面 ✓' : '')
         + (shot.fit ? ' · 已贴合' : '');
       this.steps.build = { phase: 'done', hint, at: Date.now() };
-      this.state.modelDir = dir;
+      if (opts.remember !== false) this.state.modelDir = dir;
       const rec: BuildRecord = {
         id: `${manifest.id || 'pack'}-${Date.now()}`,
         packDir: finalDir, bytes, words,

@@ -11,8 +11,10 @@ import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
 import { unzipSync } from 'fflate';
 
-/** 一次导入最多这么多（未解压），面板按 base64 传过来，留够余量。 */
+/** 一次 zip 导入最多这么多（未解压）。 */
 export const IMPORT_MAX = 32 * 1024 * 1024;
+/** 文件夹是分块传的，上限放宽得多。 */
+export const UPLOAD_MAX = 512 * 1024 * 1024;
 /** figure.json 最多在选中目录下面几层。 */
 export const PACK_DEPTH = 3;
 /** 面板自己拼的文件夹包（与桌宠同一套格式）：路径长度 + 路径 + 内容长度 + 内容。 */
@@ -41,9 +43,19 @@ export interface StagedPack {
   installed: string | null;
 }
 
+export interface StagedModel {
+  dir: string;
+  /** .model3.json 去掉后缀，当标题。 */
+  title: string;
+  files: number;
+  bytes: number;
+  installed: string | null;
+}
+
 export interface StageResult {
   token: string;
   packs: StagedPack[];
+  models: StagedModel[];
   problems: Array<{ dir: string; reason: string }>;
 }
 
@@ -103,6 +115,21 @@ async function findPacks(root: string, depth: number, rel = ''): Promise<string[
   return found;
 }
 
+/** root 下最多 depth 层里，含 .model3.json 的目录（不往打好的包里钻）。 */
+async function findModels(root: string, depth: number, rel = ''): Promise<string[]> {
+  const here = join(root, ...rel.split('/').filter(Boolean));
+  const entries = await readdir(here, { withFileTypes: true });
+  const files = entries.filter((e) => e.isFile()).map((e) => e.name.toLowerCase());
+  if (files.includes('figure.json')) return [];
+  if (files.some((n) => n.endsWith('.model3.json'))) return [rel];
+  if (depth === 0) return [];
+  const found: string[] = [];
+  for (const e of entries) {
+    if (e.isDirectory()) found.push(...await findModels(root, depth - 1, rel ? `${rel}/${e.name}` : e.name));
+  }
+  return found;
+}
+
 /** 目录体积，列卡片时给一句。 */
 async function dirBytes(dir: string): Promise<number> {
   let total = 0;
@@ -133,25 +160,74 @@ async function thumbOf(dir: string, file: unknown): Promise<string | null> {
  */
 export class PackImporter {
   private staged: { token: string; root: string } | null = null;
+  private uploads = new Map<string, { root: string; bytes: number }>();
 
-  /** 摊开文件、读包。`installed` 用来标出哪些已经装过（只用于显示）。 */
+  /** 摊开文件、读包；`installed` 用来标出哪些已经装过（只用于显示）。 */
   async stage(files: ImportFile[], fromFolders: boolean, installed: Map<string, string>): Promise<StageResult | { error: string }> {
     await this.cancel();
     if (files.reduce((n, f) => n + f.bytes.length, 0) > IMPORT_MAX) {
       return { error: `内容太大：超过 ${IMPORT_MAX / 1048576} MB` };
     }
     const root = await mkdtemp(join(tmpdir(), 'figure-import-'));
+    const written = await this.materialize(root, files);
+    if (typeof written === 'string') {
+      await rm(root, { recursive: true, force: true });
+      return { error: written };
+    }
+    return this.finish(root, fromFolders, installed);
+  }
+
+  /** 文件夹分批上传：先要一个临时目录，再一块块写，最后扫描。 */
+  async beginUpload(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), 'figure-upload-'));
+    const token = randomUUID();
+    this.uploads.set(token, { root, bytes: 0 });
+    return token;
+  }
+
+  /** 往临时目录里追加一批文件；超过上限就拒绝。 */
+  async appendUpload(token: string, files: ImportFile[]): Promise<{ files: number } | { error: string }> {
+    const up = this.uploads.get(token);
+    if (!up) return { error: '这次上传已经过期，重新选一次' };
+    for (const f of files) {
+      up.bytes += f.bytes.length;
+      if (up.bytes > UPLOAD_MAX) return { error: `内容太大：超过 ${UPLOAD_MAX / 1048576} MB` };
+    }
+    const written = await this.materialize(up.root, files);
+    if (typeof written === 'string') return { error: written };
+    return { files: files.length };
+  }
+
+  /** 上传完，扫描临时目录。 */
+  async finishUpload(token: string, fromFolders: boolean, installed: Map<string, string>): Promise<StageResult | { error: string }> {
+    const up = this.uploads.get(token);
+    if (!up) return { error: '这次上传已经过期，重新选一次' };
+    this.uploads.delete(token);
+    await this.cancel();
+    const result = await this.finish(up.root, fromFolders, installed);
+    if ('error' in result) return result;
+    if (this.staged) this.staged.token = token;
+    return { ...result, token };
+  }
+
+  private async materialize(root: string, files: ImportFile[]): Promise<string | null> {
+    for (const f of files) {
+      const parts = segments(f.path);
+      if (!parts) return `路径不合法：${f.path}`;
+      await mkdir(join(root, ...parts.slice(0, -1)), { recursive: true });
+      await writeFile(join(root, ...parts), f.bytes);
+    }
+    return null;
+  }
+
+  /** 扫描临时目录，登记成待装清单。 */
+  private async finish(root: string, fromFolders: boolean, installed: Map<string, string>): Promise<StageResult | { error: string }> {
     try {
-      for (const f of files) {
-        const parts = segments(f.path);
-        if (!parts) { await rm(root, { recursive: true, force: true }); return { error: `路径不合法：${f.path}` }; }
-        await mkdir(join(root, ...parts.slice(0, -1)), { recursive: true });
-        await writeFile(join(root, ...parts), f.bytes);
-      }
-      const dirs = await findPacks(root, PACK_DEPTH + (fromFolders ? 1 : 0));
       const packs: StagedPack[] = [];
+      const models: StagedModel[] = [];
       const problems: StageResult['problems'] = [];
-      for (const dir of dirs) {
+
+      for (const dir of await findPacks(root, PACK_DEPTH + (fromFolders ? 1 : 0))) {
         const full = join(root, ...dir.split('/').filter(Boolean));
         let manifest: Record<string, unknown>;
         try {
@@ -178,12 +254,28 @@ export class PackImporter {
           installed: installed.get(id) ?? null,
         });
       }
-      if (!packs.length) {
-        await rm(root, { recursive: true, force: true });
-        return { token: '', packs, problems };
+
+      for (const dir of await findModels(root, PACK_DEPTH + (fromFolders ? 1 : 0))) {
+        const full = join(root, ...dir.split('/').filter(Boolean));
+        const entries = await readdir(full, { withFileTypes: true });
+        const entry = entries.find((e) => e.isFile() && e.name.toLowerCase().endsWith('.model3.json'));
+        if (!entry) continue;
+        models.push({
+          dir,
+          title: entry.name.replace(/\.model3\.json$/i, ''),
+          files: entries.filter((e) => e.isFile()).length,
+          bytes: await dirBytes(full).catch(() => 0),
+          installed: null,
+        });
       }
-      this.staged = { token: randomUUID(), root };
-      return { token: this.staged.token, packs, problems };
+
+      if (!packs.length && !models.length) {
+        await rm(root, { recursive: true, force: true });
+        return { token: '', packs: [], models: [], problems };
+      }
+      const token = randomUUID();
+      this.staged = { token, root };
+      return { token, packs, models, problems };
     } catch (err) {
       await rm(root, { recursive: true, force: true });
       return { error: `解包失败：${(err as Error).message}` };
@@ -247,5 +339,17 @@ export class PackImporter {
     const staged = this.staged;
     this.staged = null;
     if (staged) await rm(staged.root, { recursive: true, force: true }).catch(() => {});
+    for (const up of this.uploads.values()) await rm(up.root, { recursive: true, force: true }).catch(() => {});
+    this.uploads.clear();
+  }
+
+  /** 待装清单里某个目录的绝对路径；token 不对就说没有。 */
+  resolve(token: string, dir: string): string | null {
+    const staged = this.staged;
+    if (!staged || staged.token !== token) return null;
+    if (!dir) return staged.root;
+    const parts = segments(dir);
+    if (!parts) return null;
+    return join(staged.root, ...parts);
   }
 }
