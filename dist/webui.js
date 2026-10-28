@@ -19,7 +19,7 @@ export default {
           return n;
         };
 
-        const state = { dir: '', busy: false, builds: [], installed: null, figuresDir: '' };
+        const state = { dir: '', busy: false, phase: '', builds: [], installed: null, figuresDir: '' };
 
         // ---- 首次打开的许可条 ----
         if (!ctx.memo.get('licenseAck', false)) {
@@ -123,8 +123,9 @@ export default {
           const ms = performance.now() - startedAt;
           say(hint ? `${base} · ${hint}` : `${base} ${(ms / 1000).toFixed(1)}s`);
         }
-        function setBusy(on, base, hint) {
+        function setBusy(on, base, hint, phase = '') {
           state.busy = on;
+          state.phase = on ? phase : '';
           for (const b of [scan, pack, importBtn, clearAll]) b.disabled = on;
           for (const b of grid.querySelectorAll('button')) b.disabled = on;
           status.classList.toggle('busy', on);
@@ -138,6 +139,7 @@ export default {
             clearInterval(ticker);
             status.classList.remove('busy');
             progress.classList.remove('on');
+            renderGrid();
           }
         }
 
@@ -154,7 +156,7 @@ export default {
         function renderGrid() {
           grid.replaceChildren();
           if (!state.builds.length) {
-            if (state.busy) {
+            if (state.busy && state.phase === 'build') {
               const ghost = el('div', 'l2d-card ghost');
               ghost.appendChild(el('div', 'empty shimmer'));
               ghost.appendChild(el('div', 'title shimmer'));
@@ -230,7 +232,7 @@ export default {
           if (state.busy) return;
           if (!state.dir) { ui.toast(t('先选模型目录', 'Pick a folder first'), 'bad'); return; }
           const label = kind === 'scan' ? t('扫描', 'Scan') : kind === 'build' ? t('打包', 'Pack') : t('安装', 'Install');
-          setBusy(true, label + '…');
+          setBusy(true, label + '…', undefined, kind);
           log.append(`→ ${label}`, 'dim');
           try {
             const args = kind === 'install' && id ? [state.dir, id] : [state.dir];
