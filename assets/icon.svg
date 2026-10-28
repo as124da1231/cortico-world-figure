@@ -1,10 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Coo 魔术人偶工坊">
-  <title>Coo 魔术人偶工坊</title>
-  <!-- 两个叠起来的纸面方块：桌面层 / 身体层 -->
-  <rect x="9" y="7" width="42" height="42" rx="12" fill="#eef0ef" stroke="#1b1a1e" stroke-width="2.6" opacity=".5"/>
-  <!-- 前面的方块：256 body box -->
-  <rect x="17" y="15" width="40" height="40" rx="11" fill="#fbfbfb" stroke="#1b1a1e" stroke-width="3.2"/>
-  <!-- 底脸：眼睛 + SoulLink 绿微笑 -->
-  <path d="M31 30v5M43 30v5" stroke="#1b1a1e" stroke-width="3.8" stroke-linecap="round"/>
-  <path d="M30 41c3 4 10 4 13 0" fill="none" stroke="#00a870" stroke-width="3.8" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Coo">
+  <title>Coo</title>
+  <!-- 工作台图标：Coo 的 C + 金色眼睛；C 用纯白，底是深墨色圆角方块 -->
+  <rect width="256" height="256" rx="56" fill="#1B1626"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="translate(128 128) scale(0.74) translate(-116 -128)">
+      <path stroke="#FFFFFF" stroke-width="36" d="M172.5 56.8A84 84 0 1 0 172.5 199.2"/>
+      <path stroke="#FFC83D" stroke-width="13" d="M98 123Q113 100 128 123"/>
+      <path stroke="#FFC83D" stroke-width="13" d="M148 123Q163 100 178 123"/>
+    </g>
+  </g>
 </svg>
