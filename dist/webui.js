@@ -66,7 +66,7 @@ export default {
         path.spellcheck = false;
         const scan = el('button', 'l2d-btn', t('扫描', 'Scan'));
         const pack = el('button', 'l2d-btn primary', t('打包', 'Pack'));
-        const importBtn = el('button', 'l2d-btn', t('导入…', 'Import…'));
+        const importBtn = el('button', 'l2d-btn', t('导入模型包…', 'Import pack…'));
         bar.append(importBtn, path, scan, pack);
         sheet.body.appendChild(bar);
 
@@ -416,7 +416,7 @@ export default {
 
         async function stageBytes(bytes, kind, view) {
           if (bytes.byteLength > MAX_MB * 1048576) {
-            view.note(t('文件太大', 'Too big'), t(`超过 ${MAX_MB} MB，换个更小的包`, `Over ${MAX_MB} MB`), true);
+            view.note(t('文件太大', 'Too big'), t(`超过 ${MAX_MB} MB，换个小一点的`, `Over ${MAX_MB} MB`), true);
             return;
           }
           view.loading(kind === 'zip' ? t('解包中…', 'Unpacking…') : t('读取文件夹…', 'Reading folder…'));
@@ -431,12 +431,12 @@ export default {
         async function stageFolder(files, view) {
           const picked = packFiles(files, 3);
           if (!picked.length) {
-            view.note(t('没找到形象包', 'No pack found'), t('选中的文件夹里没有 figure.json（最多往下 3 层）。', 'No figure.json within 3 levels.'), false);
+            view.note(t('这里没有模型包', 'No model pack here'), t('没有找到 figure.json。', 'No figure.json found.'), false);
             return;
           }
           const blob = bundle(picked);
           if (blob.size > MAX_MB * 1048576) {
-            view.note(t('文件太大', 'Too big'), t(`超过 ${MAX_MB} MB，换个更小的包`, `Over ${MAX_MB} MB`), true);
+            view.note(t('文件太大', 'Too big'), t(`超过 ${MAX_MB} MB，换个小一点的`, `Over ${MAX_MB} MB`), true);
             return;
           }
           view.loading(t('读取文件夹…', 'Reading folder…'));
@@ -456,11 +456,11 @@ export default {
           importModal = el('div', 'l2d-modal');
           const card = el('div', 'l2d-modal-card l2d-import');
           const head2 = el('div', 'l2d-modal-head');
-          head2.appendChild(el('div', 'l2d-modal-title', t('导入形象包', 'Import a figure pack')));
+          head2.appendChild(el('div', 'l2d-modal-title', t('导入模型包', 'Import a model pack')));
           card.appendChild(head2);
           card.appendChild(el('div', 'l2d-import-lead', t(
-            '选择 figure.json 所在的文件夹，或包含它的 zip 压缩文件。',
-            'Pick the folder that holds figure.json, or a zip that contains it.',
+            '选一个 zip，或选含有 figure.json 的文件夹。',
+            'Pick a zip, or a folder that holds figure.json.',
           )));
 
           const actions = el('div', 'l2d-import-actions');
@@ -468,7 +468,7 @@ export default {
           const dirBtn = el('button', 'l2d-btn', t('选择文件夹', 'Choose folder'));
           actions.append(zipBtn, dirBtn);
           card.appendChild(actions);
-          card.appendChild(el('div', 'l2d-import-hint', t('也可以直接拖入。', 'You can also drop it here.')));
+          card.appendChild(el('div', 'l2d-import-hint', t('也可以直接拖进来。', 'You can also drop it in.')));
 
           const body = el('div', 'l2d-import-body');
           card.appendChild(body);
@@ -505,11 +505,11 @@ export default {
               const packs = r.packs ?? [];
               const problems = r.problems ?? [];
               if (!packs.length) {
-                body.appendChild(el('div', 'l2d-import-note', t('没有找到能装的包', 'No installable pack')));
+                body.appendChild(el('div', 'l2d-import-note', t('没有可安装的模型包', 'No installable pack')));
                 for (const p of problems) body.appendChild(el('div', 'l2d-hint', `${p.dir || '.'} · ${p.reason}`));
                 return;
               }
-              body.appendChild(el('div', 'l2d-import-note', t(`找到 ${packs.length} 个形象包`, `${packs.length} pack(s) found`)));
+              body.appendChild(el('div', 'l2d-import-note', t(`找到 ${packs.length} 个模型包`, `${packs.length} pack(s) found`)));
               for (const p of packs) {
                 const row = el('div', 'l2d-packrow');
                 if (p.thumb) {

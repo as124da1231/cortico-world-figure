@@ -131,7 +131,7 @@ export class Live2dWorld implements World {
         try {
           const m = JSON.parse(await readFile(join(dir, e.name, 'figure.json'), 'utf8'));
           out.set(String(m.id ?? e.name), String(m.version ?? ''));
-        } catch { /* 不是形象包 */ }
+        } catch { /* 不是模型包 */ }
       }
     } catch { /* 目录还不存在 */ }
     return out;
@@ -238,7 +238,7 @@ export class Live2dWorld implements World {
         const installed = await this.installedVersions();
         const r = await this.importer.stage(files, kind === 'folder', installed);
         if ('error' in r) throw new Error(r.error);
-        this.say(`读到 ${r.packs.length} 个形象包`);
+        this.say(`读到 ${r.packs.length} 个模型包`);
         return r;
       } finally {
         this.busy = false;
