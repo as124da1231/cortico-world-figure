@@ -19,6 +19,7 @@ import type {
 } from 'cortico/core/types.ts';
 import type { ConfigGroup } from 'cortico/core/config-schema.ts';
 import { buildPack, dirSize, editPack, installPack, scanModel, type ScanSummary } from './pipeline.ts';
+import { PackImporter, filesFromBundle, filesFromZip } from './import.ts';
 import { captureCover } from './cover.ts';
 
 const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url));
@@ -80,6 +81,8 @@ export class Live2dWorld implements World {
   private log: string[] = [];
   private busy = false;
   private streams = new Set<WorldStreamSocket>();
+  /** 导入待装清单（zip / 文件夹）。 */
+  private importer = new PackImporter();
 
   constructor(opts: Live2dWorld['opts']) {
     this.opts = opts;
@@ -115,6 +118,23 @@ export class Live2dWorld implements World {
 
   async stop(): Promise<void> {
     this.streams.clear();
+    await this.importer.cancel();
+  }
+
+  /** figures/ 里已装的 id → 版本，导入时标「已装」。 */
+  private async installedVersions(): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const dir = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
+    try {
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        if (!e.isDirectory()) continue;
+        try {
+          const m = JSON.parse(await readFile(join(dir, e.name, 'figure.json'), 'utf8'));
+          out.set(String(m.id ?? e.name), String(m.version ?? ''));
+        } catch { /* 不是形象包 */ }
+      }
+    } catch { /* 目录还不存在 */ }
+    return out;
   }
 
   webUi(language?: string): WorldWebUiDecl {
@@ -180,7 +200,7 @@ export class Live2dWorld implements World {
       return {
         ...this.snapshot(),
         builds: await this.listBuilds(),
-        installed: this.state.install ?? null,
+        installed: this.state.install && existsSync(this.state.install.target) ? this.state.install : null,
         autoDelete: Boolean(this.opts.getConfig().autoDelete),
         figuresDir: await resolveFigures(this.opts.getConfig(), this.opts.dataDir),
       };
@@ -204,6 +224,59 @@ export class Live2dWorld implements World {
       let text = '';
       try { text = await readFile(join(WORKBENCH_DIR, 'pack', 'sdk', file), 'utf8'); } catch { /* ignore */ }
       return { file, text };
+    }
+    if (method === 'importStage') {
+      if (this.busy) throw new Error('上一个动作还没结束');
+      const b64 = String(args[0] ?? '');
+      const kind = String(args[1] ?? 'zip') === 'folder' ? 'folder' : 'zip';
+      if (!b64) throw new Error('没有收到文件');
+      const bytes = Buffer.from(b64, 'base64');
+      const files = kind === 'folder' ? filesFromBundle(bytes) : filesFromZip(bytes);
+      if (typeof files === 'string') throw new Error(files);
+      this.busy = true;
+      try {
+        const installed = await this.installedVersions();
+        const r = await this.importer.stage(files, kind === 'folder', installed);
+        if ('error' in r) throw new Error(r.error);
+        this.say(`读到 ${r.packs.length} 个形象包`);
+        return r;
+      } finally {
+        this.busy = false;
+      }
+    }
+    if (method === 'importInstall') {
+      if (this.busy) throw new Error('上一个动作还没结束');
+      const token = String(args[0] ?? '');
+      const dirs = Array.isArray(args[1]) ? (args[1] as unknown[]).map(String) : [];
+      const replace = Array.isArray(args[2]) ? (args[2] as unknown[]).map(String) : [];
+      const figures = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
+      this.busy = true;
+      this.steps.install = { phase: 'loading', hint: '导入安装中…' };
+      try {
+        const r = await this.importer.install(token, dirs, replace, {
+          figuresDir: figures,
+          backupRoot: join(dirname(figures), 'figure-backups'),
+          keep: 2,
+        });
+        if ('error' in r) throw new Error(r.error);
+        if ('conflicts' in r) return { conflicts: r.conflicts };
+        const last = r.installed[r.installed.length - 1];
+        this.state.install = { target: last.target, at: Date.now() };
+        this.steps.install = { phase: 'done', hint: last.target, at: Date.now() };
+        await this.save();
+        this.say(`导入完成 · ${r.installed.map((x) => x.id).join('、')}`);
+        return { installed: r.installed.map((x) => x.id), state: this.snapshot() };
+      } catch (e) {
+        this.steps.install = { phase: 'error', hint: errText(e) };
+        this.say(`导入失败 · ${errText(e)}`);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    }
+    if (method === 'importCancel') {
+      await this.importer.cancel();
+      return { ok: true };
     }
     if (method === 'detail') {
       const id = String(args[0] ?? '');

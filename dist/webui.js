@@ -1,5 +1,9 @@
 /**
  * Coo 魔术人偶工坊 面板（浏览器端，手写 ESM，不打 bundle）。
+ *
+ * 一行：[选择目录…][路径][扫描][打包][导入…]
+ * 卡片：[安装][编辑][删除]；编辑弹层直接改 figure.json / profile.js，不重新打包。
+ * 导入弹层：zip / 文件夹 / 直接拖入，照 Coopanion 桌宠的做法。
  */
 export default {
   panels: {
@@ -57,20 +61,27 @@ export default {
 
         // ---- 一行 ----
         const bar = el('div', 'l2d-bar');
-        const pick = el('button', 'l2d-btn', t('选择目录…', 'Choose folder…'));
         const path = el('input', 'l2d-path');
         path.placeholder = t('模型目录（含 .model3.json）', 'Model folder (.model3.json)');
         path.spellcheck = false;
         const scan = el('button', 'l2d-btn', t('扫描', 'Scan'));
         const pack = el('button', 'l2d-btn primary', t('打包', 'Pack'));
-        bar.append(pick, path, scan, pack);
+        const importBtn = el('button', 'l2d-btn', t('导入…', 'Import…'));
+        bar.append(importBtn, path, scan, pack);
         sheet.body.appendChild(bar);
 
+        // ---- 状态 + 进度 ----
         const status = el('div', 'l2d-status');
+        const spinner = el('span', 'l2d-spinner');
         const dot = el('span', 'dot');
         const statusText = el('span', null, t('就绪', 'Ready'));
-        status.append(dot, statusText);
+        status.append(dot, spinner, statusText);
         sheet.body.appendChild(status);
+
+        const progress = el('div', 'l2d-progress');
+        const progressBar = el('span');
+        progress.appendChild(progressBar);
+        sheet.body.appendChild(progress);
 
         // ---- 已打包 ----
         const head = el('div', 'l2d-head');
@@ -102,14 +113,32 @@ export default {
         // ---------------- 行为 ----------------
         function say(text, bad = false) {
           statusText.textContent = text;
-          status.className = 'l2d-status' + (bad ? ' bad' : '');
+          status.classList.toggle('bad', Boolean(bad));
         }
 
-        function setBusy(on, hint) {
+        /** 忙碌时：转圈 + 一条来回走的进度线 + 秒数。 */
+        let ticker = 0;
+        let startedAt = 0;
+        function busyLabel(base, hint) {
+          const ms = performance.now() - startedAt;
+          say(hint ? `${base} · ${hint}` : `${base} ${(ms / 1000).toFixed(1)}s`);
+        }
+        function setBusy(on, base, hint) {
           state.busy = on;
-          for (const b of [pick, scan, pack, clearAll]) b.disabled = on;
+          for (const b of [scan, pack, importBtn, clearAll]) b.disabled = on;
           for (const b of grid.querySelectorAll('button')) b.disabled = on;
-          if (hint) say(hint);
+          status.classList.toggle('busy', on);
+          progress.classList.toggle('on', on);
+          if (on) {
+            startedAt = performance.now();
+            if (base) busyLabel(base, hint);
+            clearInterval(ticker);
+            ticker = setInterval(() => { if (state.busy) busyLabel(base, hint); }, 120);
+          } else {
+            clearInterval(ticker);
+            status.classList.remove('busy');
+            progress.classList.remove('on');
+          }
         }
 
         function paint() {
@@ -125,6 +154,14 @@ export default {
         function renderGrid() {
           grid.replaceChildren();
           if (!state.builds.length) {
+            if (state.busy) {
+              const ghost = el('div', 'l2d-card ghost');
+              ghost.appendChild(el('div', 'empty shimmer'));
+              ghost.appendChild(el('div', 'title shimmer'));
+              ghost.appendChild(el('div', 'meta shimmer'));
+              grid.appendChild(ghost);
+              return;
+            }
             grid.appendChild(el('div', 'l2d-empty', t('还没有打包产物，先点「打包」', 'No packs yet — hit Pack')));
             return;
           }
@@ -193,15 +230,13 @@ export default {
           if (state.busy) return;
           if (!state.dir) { ui.toast(t('先选模型目录', 'Pick a folder first'), 'bad'); return; }
           const label = kind === 'scan' ? t('扫描', 'Scan') : kind === 'build' ? t('打包', 'Pack') : t('安装', 'Install');
-          setBusy(true, `${label}…`);
+          setBusy(true, label + '…');
           log.append(`→ ${label}`, 'dim');
-          const t0 = performance.now();
           try {
             const args = kind === 'install' && id ? [state.dir, id] : [state.dir];
             const r = await ctx.invoke(kind, args);
-            const ms = Math.round(performance.now() - t0);
             for (const line of r.log ?? []) log.append(line, 'dim');
-            log.append(`✓ ${label} · ${ms} ms`, 'plain');
+            log.append(`✓ ${label} · ${((performance.now() - startedAt) / 1000).toFixed(1)}s`, 'plain');
             ui.toast(`${label} ✓`, 'ok');
             if (r.warn) log.append('! ' + r.warn, 'warn');
             await refresh();
@@ -322,20 +357,279 @@ export default {
           fields.nameZh.focus();
         }
 
-        // ---------------- 绑定 ----------------
-        pick.addEventListener('click', async () => {
-          if (state.busy) return;
-          const picked = await ctx.pickPath({ kind: 'directory', title: t('选择 Live2D 模型目录', 'Pick a Live2D model folder') });
-          if (!picked) return;
-          state.dir = picked;
-          path.value = picked;
-          try {
-            await ctx.invoke('setDir', [picked]);
-            ui.toast(t('已记下目录', 'Folder saved'), 'ok');
-          } catch (e) {
-            ui.toast(text(e), 'bad');
+        // ---------------- 导入 ----------------
+        const MAX_MB = 32;
+
+        function toBase64(buffer) {
+          const bytes = new Uint8Array(buffer);
+          const parts = [];
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunk)));
           }
-        });
+          return btoa(parts.join(''));
+        }
+
+        /** 面板拼的文件夹包：与桌宠同一套格式（路径长度 + 路径 + 内容长度 + 内容）。 */
+        function bundle(files) {
+          const enc = new TextEncoder();
+          const u32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); return b; };
+          return new Blob(files.flatMap(({ path, file }) => {
+            const name = enc.encode(path);
+            return [u32(name.length), name, u32(file.size), file];
+          }));
+        }
+
+        /** 选中/拖进来的文件里，含 figure.json 的那些目录（最多 3 层，不往包里钻）。 */
+        function packFiles(files, depth = 3) {
+          const dirs = files
+            .map((f) => f.path.split('/'))
+            .filter((p) => p[p.length - 1] === 'figure.json' && p.length - 2 <= depth)
+            .map((p) => p.slice(0, -1).join('/'))
+            .sort((a, b) => a.length - b.length);
+          const roots = dirs.filter((d, i) => !dirs.slice(0, i).some((r) => d.startsWith(r + '/')));
+          if (!roots.length) return [];
+          return files.filter((f) => roots.some((r) => f.path.startsWith(r + '/')));
+        }
+
+        async function droppedFiles(entry, path, depth) {
+          const list = [];
+          const reader = entry.createReader();
+          for (let batch; (batch = await new Promise((ok, bad) => reader.readEntries(ok, bad))).length;) list.push(...batch);
+          const inPack = depth === Infinity || list.some((e) => e.isFile && e.name === 'figure.json');
+          const out = [];
+          for (const e of list) {
+            if (e.isFile && inPack) out.push({ path: `${path}/${e.name}`, file: await new Promise((ok, bad) => e.file(ok, bad)) });
+            else if (e.isDirectory && (inPack || depth > 0)) out.push(...await droppedFiles(e, `${path}/${e.name}`, inPack ? Infinity : depth - 1));
+          }
+          return out;
+        }
+
+        let importModal = null;
+
+        function closeImport() {
+          if (!importModal) return;
+          importModal.remove();
+          importModal = null;
+          ctx.invoke('importCancel', []).catch(() => {});
+        }
+
+        async function stageBytes(bytes, kind, view) {
+          if (bytes.byteLength > MAX_MB * 1048576) {
+            view.note(t('文件太大', 'Too big'), t(`超过 ${MAX_MB} MB，换个更小的包`, `Over ${MAX_MB} MB`), true);
+            return;
+          }
+          view.loading(kind === 'zip' ? t('解包中…', 'Unpacking…') : t('读取文件夹…', 'Reading folder…'));
+          try {
+            const r = await ctx.invoke('importStage', [toBase64(bytes), kind]);
+            view.result(r);
+          } catch (e) {
+            view.note(t('导入失败', 'Import failed'), text(e), true);
+          }
+        }
+
+        async function stageFolder(files, view) {
+          const picked = packFiles(files, 3);
+          if (!picked.length) {
+            view.note(t('没找到形象包', 'No pack found'), t('选中的文件夹里没有 figure.json（最多往下 3 层）。', 'No figure.json within 3 levels.'), false);
+            return;
+          }
+          const blob = bundle(picked);
+          if (blob.size > MAX_MB * 1048576) {
+            view.note(t('文件太大', 'Too big'), t(`超过 ${MAX_MB} MB，换个更小的包`, `Over ${MAX_MB} MB`), true);
+            return;
+          }
+          view.loading(t('读取文件夹…', 'Reading folder…'));
+          try {
+            const buffer = await blob.arrayBuffer();
+            const r = await ctx.invoke('importStage', [toBase64(buffer), 'folder']);
+            view.result(r);
+          } catch (e) {
+            view.note(t('导入失败', 'Import failed'), text(e), true);
+          }
+        }
+
+        function openImport() {
+          if (state.busy) return;
+          if (importModal) { importModal.remove(); importModal = null; }
+
+          importModal = el('div', 'l2d-modal');
+          const card = el('div', 'l2d-modal-card l2d-import');
+          const head2 = el('div', 'l2d-modal-head');
+          head2.appendChild(el('div', 'l2d-modal-title', t('导入形象包', 'Import a figure pack')));
+          card.appendChild(head2);
+          card.appendChild(el('div', 'l2d-import-lead', t(
+            '选择 figure.json 所在的文件夹，或包含它的 zip 压缩文件。',
+            'Pick the folder that holds figure.json, or a zip that contains it.',
+          )));
+
+          const actions = el('div', 'l2d-import-actions');
+          const zipBtn = el('button', 'l2d-btn primary', t('选择 zip 文件', 'Choose zip'));
+          const dirBtn = el('button', 'l2d-btn', t('选择文件夹', 'Choose folder'));
+          actions.append(zipBtn, dirBtn);
+          card.appendChild(actions);
+          card.appendChild(el('div', 'l2d-import-hint', t('也可以直接拖入。', 'You can also drop it here.')));
+
+          const body = el('div', 'l2d-import-body');
+          card.appendChild(body);
+
+          const foot2 = el('div', 'l2d-modal-actions');
+          const cancel = el('button', 'l2d-btn', t('取消', 'Cancel'));
+          foot2.appendChild(cancel);
+          card.appendChild(foot2);
+
+          const zipInput = document.createElement('input');
+          zipInput.type = 'file';
+          zipInput.accept = '.zip,application/zip';
+          zipInput.hidden = true;
+          const dirInput = document.createElement('input');
+          dirInput.type = 'file';
+          dirInput.webkitdirectory = true;
+          dirInput.hidden = true;
+          card.append(zipInput, dirInput);
+
+          const view = {
+            loading(label) {
+              body.replaceChildren();
+              const row = el('div', 'l2d-import-loading');
+              row.append(el('span', 'l2d-spinner on'), el('span', null, label));
+              body.appendChild(row);
+            },
+            note(title, detail, bad) {
+              body.replaceChildren();
+              body.appendChild(el('div', 'l2d-import-note' + (bad ? ' bad' : ''), title));
+              if (detail) body.appendChild(el('div', 'l2d-hint', detail));
+            },
+            result(r) {
+              body.replaceChildren();
+              const packs = r.packs ?? [];
+              const problems = r.problems ?? [];
+              if (!packs.length) {
+                body.appendChild(el('div', 'l2d-import-note', t('没有找到能装的包', 'No installable pack')));
+                for (const p of problems) body.appendChild(el('div', 'l2d-hint', `${p.dir || '.'} · ${p.reason}`));
+                return;
+              }
+              body.appendChild(el('div', 'l2d-import-note', t(`找到 ${packs.length} 个形象包`, `${packs.length} pack(s) found`)));
+              for (const p of packs) {
+                const row = el('div', 'l2d-packrow');
+                if (p.thumb) {
+                  const img = document.createElement('img');
+                  img.src = p.thumb;
+                  img.alt = '';
+                  row.appendChild(img);
+                } else {
+                  row.appendChild(el('div', 'l2d-packrow-empty'));
+                }
+                const info = el('div', 'l2d-packrow-info');
+                info.appendChild(el('div', 'l2d-packrow-name', zh ? p.nameZh : p.nameEn));
+                const meta = [
+                  p.id,
+                  p.version ? `v${p.version}` : '',
+                  `${(p.bytes / 1048576).toFixed(1)} MB`,
+                  t(`${p.axes} 选项`, `${p.axes} axes`),
+                  t(`${p.words} 词`, `${p.words} words`),
+                ].filter(Boolean).join(' · ');
+                info.appendChild(el('div', 'l2d-packrow-meta', meta));
+                if (p.installed) {
+                  info.appendChild(el('div', 'l2d-packrow-tag', t(`已装 ${p.installed}，安装会替换`, `installed ${p.installed}, will replace`)));
+                }
+                row.appendChild(info);
+                const go = el('button', 'l2d-btn sm primary', t('安装', 'Install'));
+                go.addEventListener('click', async () => {
+                  let replace = [];
+                  if (p.installed) {
+                    const ok = await ui.confirm({
+                      title: t('替换已装的这份？', 'Replace the installed pack?'),
+                      body: t(`「${zh ? p.nameZh : p.nameEn}」已经装过，安装会用新的覆盖它（旧的那份先备份）。`, 'A pack with this id is installed; the new one replaces it after a backup.'),
+                      danger: true,
+                    });
+                    if (!ok) return;
+                    replace = [p.id];
+                  }
+                  go.disabled = true;
+                  go.textContent = t('安装中…', 'Installing…');
+                  try {
+                    const out = await ctx.invoke('importInstall', [r.token, [p.dir], replace]);
+                    if (out && out.conflicts) {
+                      ui.toast(t('同名已存在', 'Id already installed'), 'bad');
+                      go.disabled = false;
+                      go.textContent = t('安装', 'Install');
+                      return;
+                    }
+                    ui.toast(t('已导入', 'Imported'), 'ok');
+                    log.append(t('导入 · ', 'Imported · ') + p.id, 'dim');
+                    closeImport();
+                    await refresh();
+                  } catch (e) {
+                    ui.toast(text(e), 'bad');
+                    go.disabled = false;
+                    go.textContent = t('安装', 'Install');
+                  }
+                });
+                row.appendChild(go);
+                body.appendChild(row);
+              }
+              for (const p of problems) body.appendChild(el('div', 'l2d-hint', `${p.dir || '.'} · ${p.reason}`));
+            },
+          };
+
+          zipBtn.addEventListener('click', () => zipInput.click());
+          dirBtn.addEventListener('click', () => dirInput.click());
+          zipInput.addEventListener('change', async () => {
+            const f = zipInput.files?.[0];
+            if (!f) return;
+            await stageBytes(await f.arrayBuffer(), 'zip', view);
+          });
+          dirInput.addEventListener('change', async () => {
+            const files = [...(dirInput.files ?? [])].map((f) => ({ path: f.webkitRelativePath || f.name, file: f }));
+            if (!files.length) return;
+            await stageFolder(files, view);
+          });
+
+          // 拖入
+          const over = (on) => card.classList.toggle('drop', on);
+          card.addEventListener('dragover', (e) => { e.preventDefault(); over(true); });
+          card.addEventListener('dragleave', (e) => { if (!card.contains(e.relatedTarget)) over(false); });
+          card.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            over(false);
+            const dt = e.dataTransfer;
+            if (!dt) return;
+            const entries = [...(dt.items ?? [])]
+              .filter((i) => i.kind === 'file')
+              .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
+              .filter(Boolean);
+            if (entries.length === 1 && entries[0].isFile) {
+              const f = await new Promise((ok, bad) => entries[0].file(ok, bad));
+              if (f.name.toLowerCase().endsWith('.zip')) {
+                await stageBytes(await f.arrayBuffer(), 'zip', view);
+                return;
+              }
+            }
+            const files = [];
+            for (const entry of entries) {
+              if (entry.isFile) files.push({ path: entry.name, file: await new Promise((ok, bad) => entry.file(ok, bad)) });
+              else if (entry.isDirectory) files.push(...await droppedFiles(entry, entry.name, 1));
+            }
+            if (!files.length) {
+              const plain = [...(dt.files ?? [])].map((f) => ({ path: f.name, file: f }));
+              if (plain.length === 1 && plain[0].file.name.toLowerCase().endsWith('.zip')) {
+                await stageBytes(await plain[0].file.arrayBuffer(), 'zip', view);
+                return;
+              }
+              view.note(t('没读到内容', 'Nothing to read'), t('换一个文件夹试试。', 'Try another folder.'), true);
+              return;
+            }
+            await stageFolder(files, view);
+          });
+
+          cancel.addEventListener('click', closeImport);
+          importModal.addEventListener('click', (e) => { if (e.target === importModal) closeImport(); });
+          importModal.appendChild(card);
+          document.body.appendChild(importModal);
+        }
+
+        // ---------------- 绑定 ----------------
         path.addEventListener('input', () => { state.dir = path.value.trim(); });
         path.addEventListener('keydown', (e) => {
           if (e.key === 'Enter' && state.dir) {
@@ -344,6 +638,7 @@ export default {
         });
         scan.addEventListener('click', () => run('scan'));
         pack.addEventListener('click', () => run('build'));
+        importBtn.addEventListener('click', openImport);
         clearAll.addEventListener('click', async () => {
           if (state.busy) return;
           const ok = await ui.confirm({
