@@ -1,9 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Coo 魔术人偶工坊">
-  <title>Coo Marionette Atelier</title>
-  <rect x="2" y="2" width="60" height="60" rx="15" fill="#f2efe6"/>
-  <path d="M19 13h26" stroke="#1b1a1e" stroke-width="3" stroke-linecap="round"/>
-  <path d="M24 13 28 23M40 13 36 23" stroke="#1b1a1e" stroke-width="1.8" stroke-linecap="round" opacity=".5"/>
-  <circle cx="32" cy="28" r="6.2" fill="#fbfbfb" stroke="#1b1a1e" stroke-width="3"/>
-  <path d="M32 35 23 54h18z" fill="#00a870" stroke="#00a870" stroke-width="3.4" stroke-linejoin="round"/>
-  <path d="M50 15.5 51.5 19.5 55.5 21 51.5 22.5 50 26.5 48.5 22.5 44.5 21 48.5 19.5z" fill="#e0a92c"/>
+  <title>Coo 魔术人偶工坊</title>
+  <!-- 两个叠起来的纸面方块：桌面层 / 身体层 -->
+  <rect x="9" y="7" width="42" height="42" rx="12" fill="#eef0ef" stroke="#1b1a1e" stroke-width="2.6" opacity=".5"/>
+  <!-- 前面的方块：256 body box -->
+  <rect x="17" y="15" width="40" height="40" rx="11" fill="#fbfbfb" stroke="#1b1a1e" stroke-width="3.2"/>
+  <!-- 底脸：眼睛 + SoulLink 绿微笑 -->
+  <path d="M31 30v5M43 30v5" stroke="#1b1a1e" stroke-width="3.8" stroke-linecap="round"/>
+  <path d="M30 41c3 4 10 4 13 0" fill="none" stroke="#00a870" stroke-width="3.8" stroke-linecap="round"/>
 </svg>
