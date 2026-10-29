@@ -143,7 +143,7 @@ export class Live2dWorld implements World {
     const zh = (language ?? 'zh').toLowerCase().startsWith('zh');
     const s = this.state;
     return {
-      label: zh ? 'Coo 魔术人偶工坊' : 'Coo Marionette Atelier',
+      label: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
       badges: [
         { label: zh ? '模型' : 'Model', value: s.scan ? `${s.scan.params}/${s.scan.roles}` : '—', tone: s.scan ? 'on' : 'plain' },
         { label: zh ? '包' : 'Pack', value: s.build ? `${(s.build.bytes / 1048576).toFixed(1)}M` : '—', tone: s.build ? 'on' : 'plain' },
@@ -163,7 +163,7 @@ export class Live2dWorld implements World {
       ],
       panels: [{
         id: 'workbench',
-        title: zh ? 'Coo 魔术人偶工坊' : 'Coo Marionette Atelier',
+        title: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
         description: zh ? '选目录、扫描、打包、安装' : 'Pick, scan, build, install',
       }],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
@@ -665,7 +665,7 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
     owner: 'world:figure',
     schema: {
       type: 'object',
-      title: zh ? 'Coo 魔术人偶工坊' : 'Coo Marionette Atelier',
+      title: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
       description: zh
         ? '面板里选目录、打包、安装；这里只放高级项。'
         : 'Use the panel for folder, pack and install; this tab keeps advanced options.',

@@ -50,8 +50,8 @@ export default {
         }
 
         const sheet = ui.sheet({
-          title: t('Coo 魔术人偶工坊', 'Coo Marionette Atelier'),
-          en: t('Live2D 模型一键安装', 'Live2D One-Click Install'),
+          title: t('Live2D 模型一键安装', 'Live2D One-Click Install'),
+          en: t('Coo 魔术人偶工坊', 'Coo Marionette Atelier'),
           desc: t(
             '把 Live2D 模型整理成 Coo 能用的形象：扫描、打包、安装。只做装配，不含编辑。',
             'Turn a Live2D model into a Coo figure: scan, pack, install.',

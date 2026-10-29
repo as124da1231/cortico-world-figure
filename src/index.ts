@@ -5,7 +5,7 @@ export type { Live2dSection };
 
 export const LIVE2D: WorldDefinition<Live2dSection> = {
   id: 'figure',
-  label: 'Coo 魔术人偶工坊',
+  label: 'Live2D 模型一键安装',
   defaults: () => ({
     enabled: false,
     modelDir: '',
