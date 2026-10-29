@@ -34,6 +34,8 @@ export interface Live2dSection {
   autoDelete?: boolean;
   /** 打包时拍封面（默认开）。 */
   cover?: boolean;
+  /** 贴图最长边：2048 / 1024 / 512 / 4096，original = 原精度不缩放。 */
+  texture?: string;
 }
 
 type Phase = 'idle' | 'loading' | 'done' | 'error';
@@ -410,7 +412,8 @@ export class Live2dWorld implements World {
       push(`打包 ${dir}`);
 
       let t0 = Date.now();
-      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot());
+      const maxTexture = textureLimit(this.opts.getConfig().texture);
+      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { maxTexture });
       push(`初版包就绪 · ${Date.now() - t0} ms`);
 
       this.steps.build = { phase: 'loading', hint: '量尺寸 / 拍封面…' };
@@ -425,7 +428,7 @@ export class Live2dWorld implements World {
       let finalDir = packDir;
       if (shot.fit) {
         t0 = Date.now();
-        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit });
+        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit, maxTexture });
         // 封面跟着走
         const thumb = join(packDir, 'thumb');
         if (existsSync(thumb)) {
@@ -674,6 +677,16 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           'x-hot': true,
           default: true,
         },
+        'worlds.figure.texture': {
+          type: 'string',
+          title: zh ? '贴图精度' : 'Texture size',
+          enum: ['original', '4096', '2048', '1024', '512'],
+          'x-hot': true,
+          default: 'original',
+          description: zh
+            ? '打包时把贴图最长边缩到多少。original 是默认，原精度不缩放；往下选越小包越小、越省显存'
+            : 'Longest texture edge when packing. 2048 is the default; smaller packs less VRAM; original keeps it untouched',
+        },
         'worlds.figure.autoDelete': {
           type: 'boolean',
           title: zh ? '安装后删除打包产物' : 'Delete the pack after install',
@@ -691,4 +704,12 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
       },
     },
   };
+}
+
+/** 配置里的贴图上限；original / 空 / 非法一律当原精度（0 = 不缩放）。 */
+function textureLimit(value: unknown): number {
+  const v = String(value ?? '').trim().toLowerCase();
+  if (!v || v === 'original') return 0;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
 }
