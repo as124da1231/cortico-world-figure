@@ -178,7 +178,10 @@ export default {
             } else {
               card.appendChild(el('div', 'empty', t('无封面', 'no cover')));
             }
-            card.appendChild(el('div', 'title', b.id.replace(/(-\d{6,})+$/, '')));
+            const shown = (zh ? b.nameZh : b.nameEn) || b.nameZh || b.nameEn || b.id.replace(/(-\d{6,})+$/, '');
+            const titleEl = el('div', 'title', shown);
+            titleEl.title = b.id;
+            card.appendChild(titleEl);
             card.appendChild(el('div', 'meta',
               `${(b.bytes / 1048576).toFixed(1)} MB · ${clock(b.at)}`));
             if (b.fit) card.appendChild(el('div', 'tagline', t('已贴合', 'fit')));
@@ -189,7 +192,7 @@ export default {
 
             const row = el('div', 'row');
             const edit = el('button', 'l2d-btn sm', t('编辑', 'Edit'));
-            edit.addEventListener('click', () => openEdit(b));
+            edit.addEventListener('click', () => openEdit(b, card));
             const del = el('button', 'l2d-btn sm danger', t('删除', 'Delete'));
             del.addEventListener('click', async () => {
               if (state.busy) return;
@@ -259,7 +262,7 @@ export default {
           if (modal) { modal.remove(); modal = null; }
         }
 
-        async function openEdit(b) {
+        async function openEdit(b, cardEl) {
           closeEdit();
           const d = await ctx.invoke('detail', [b.id]).catch(() => null);
           if (!d) { ui.toast(t('读不到这份打包的信息', 'Cannot read this pack'), 'bad'); return; }
@@ -272,21 +275,19 @@ export default {
           card.appendChild(head2);
 
           const fields = {};
-          const addField = (key, label, multiline) => {
+          const addField = (key, label, multiline, value) => {
             const wrap = el('div', 'l2d-field');
             wrap.appendChild(el('div', 'l2d-label', label));
             const input = multiline ? document.createElement('textarea') : document.createElement('input');
             input.className = 'l2d-input';
             if (multiline) input.rows = 2;
-            input.value = d[key] ?? '';
+            input.value = value ?? '';
             fields[key] = input;
             wrap.appendChild(input);
             card.appendChild(wrap);
           };
-          addField('nameZh', t('名字（中）', 'Name (zh)'));
-          addField('nameEn', t('名字（英）', 'Name (en)'));
-          addField('aboutZh', t('一句话（中）', 'About (zh)'), true);
-          addField('aboutEn', t('一句话（英）', 'About (en)'), true);
+          addField('name', t('名字', 'Name'), false, d.nameZh || d.nameEn || '');
+          addField('about', t('一句话', 'About'), true, d.aboutZh || d.aboutEn || '');
 
           const gainWrap = el('div', 'l2d-field');
           const gainTop = el('div', 'l2d-label-row');
@@ -336,18 +337,25 @@ export default {
           save.addEventListener('click', async () => {
             save.disabled = true;
             try {
+              const name = fields.name.value.trim();
+              const about = fields.about.value.trim();
               await ctx.invoke('edit', [b.id, {
-                nameZh: fields.nameZh.value.trim(),
-                nameEn: fields.nameEn.value.trim(),
-                aboutZh: fields.aboutZh.value.trim(),
-                aboutEn: fields.aboutEn.value.trim(),
+                nameZh: name, nameEn: name,
+                aboutZh: about, aboutEn: about,
                 bodyGain: Number(gain.value),
                 style: style.value,
               }]);
+              // 先就地更新卡片，再拉一次完整列表
+              if (cardEl && name) {
+                const titleEl = cardEl.querySelector('.title');
+                if (titleEl) titleEl.textContent = name;
+              }
+              b.nameZh = name;
+              b.nameEn = name;
               closeEdit();
               ui.toast(t('已保存', 'Saved'), 'ok');
               log.append(t('编辑 · ', 'Edited · ') + b.id, 'dim');
-              await refresh();
+              refresh().catch(() => {});
             } catch (e) {
               ui.toast(text(e), 'bad');
               save.disabled = false;
@@ -356,7 +364,7 @@ export default {
 
           modal.appendChild(card);
           document.body.appendChild(modal);
-          fields.nameZh.focus();
+          fields.name.focus();
         }
 
         // ---------------- 导入 ----------------

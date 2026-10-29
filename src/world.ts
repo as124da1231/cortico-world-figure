@@ -520,8 +520,15 @@ export class Live2dWorld implements World {
         const png = await readFile(join(b.packDir, 'thumb', 'opt-model.png'));
         thumb = 'data:image/png;base64,' + png.toString('base64');
       } catch { /* 没封面就不给图 */ }
+      let nameZh = '';
+      let nameEn = '';
+      try {
+        const m = JSON.parse(await readFile(join(b.packDir, 'figure.json'), 'utf8'));
+        nameZh = typeof m.name?.zh === 'string' ? m.name.zh : '';
+        nameEn = typeof m.name?.en === 'string' ? m.name.en : '';
+      } catch { /* 读不到就用 id */ }
       out.push({
-        id: b.id, bytes: b.bytes, words: b.words, cover: b.cover, fit: b.fit, at: b.at,
+        id: b.id, nameZh, nameEn, bytes: b.bytes, words: b.words, cover: b.cover, fit: b.fit, at: b.at,
         exists: true, thumb,
       });
     }

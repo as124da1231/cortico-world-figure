@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-figure",
-  "version": "1.2.4",
+  "version": "1.2.6",
   "type": "module",
   "description": "把 Live2D 模型整理成 Coo 能用的形象：扫描、打包、安装。只做装配，不含编辑。 / Turn a Live2D model into a Coo figure: scan, pack, install.",
   "license": "AGPL-3.0-or-later",
