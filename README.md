@@ -63,6 +63,17 @@ npm install cortico-world-figure
 
 扫描、打包、安装、导入时，状态行换成转圈 + 计时（`打包… 12.4s`），下面走一条进度线；打包还没出结果时，卡片区先摆一张占位卡。
 
+## 包格式
+
+产出的包就是 Coo 的 figure pack：`figure.json` 描述形象，`figure.js` 导出 `createFigureBody`，
+`models/` 放数据，`sdk/` 放 Live2D 运行时。
+
+包里的 `figure.js` **不携带**渲染引擎，只调用宿主传进来的 `opts.kit.createBody`——和 Coo 自带的形象、
+鲸鱼包、酒狐包用的是同一套公共 puppet 引擎。因此包只有几 MB，引擎升级跟着 Coo 走，不用重打包。
+
+`workbench/vendor/coo-kit/` 里的 `body.js`、`rig.js` 只服务于工作台在浏览器里的单独预览，不进产物；
+它们来自 Coopanion 的桌宠 World，许可为 AGPL-3.0-or-later，见 `NOTICE`。
+
 ## 封面与贴合
 
 打包后会起一个临时本地服务，用系统里的 Chrome / Edge 无头打开渲染页：
