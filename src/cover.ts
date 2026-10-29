@@ -44,7 +44,8 @@ try {
     img.onerror = () => bad(new Error('image failed: ' + u));
     img.src = String(u);
   });
-  const body = await mod.createFigureBody(new URL('/pack/', location.origin), { kit, host, loadImage, scheme: '', model: undefined });
+  const asset = (p) => new URL(p, new URL('/pack/', location.origin));
+  const body = await mod.createFigureBody(new URL('/pack/', location.origin), { kit, host, loadImage, asset, scheme: '', model: undefined });
   body.do?.('neutral');
   body.set?.({ roam: 'off' });
   await new Promise((r) => setTimeout(r, 1200));

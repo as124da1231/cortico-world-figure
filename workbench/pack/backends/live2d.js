@@ -105,9 +105,32 @@ export async function createLive2DBody(base, opts, entry, kit) {
   });
   if (!gl) throw new Error('这个环境无法启用 WebGL');
 
-  // ---------- 模型 ----------
-  const mocMod = await import(new URL(`models/${entry.id}/${entry.moc}`, base));
-  const mocBuf = b64ToBuffer(mocMod.default);
+  // ---------- 模型（官方双轨回退：优先 fetch 原生 moc3，失败回退到 base64 模块） ----------
+  const resolveAsset = (rel) => {
+    if (typeof opts?.asset === 'function') {
+      const u = opts.asset(rel);
+      return u instanceof URL ? u : new URL(String(u), base);
+    }
+    return new URL(rel, base);
+  };
+
+  const mocName = entry.moc || 'model.moc3';
+  const fallbackName = entry.mocFallback || (mocName.endsWith('.js') ? mocName : 'moc3.js');
+  let mocBuf;
+  if (!mocName.endsWith('.js')) {
+    try {
+      const res = await fetch(resolveAsset(`models/${entry.id}/${mocName}`));
+      if (res.ok) {
+        mocBuf = await res.arrayBuffer();
+      }
+    } catch {
+      // 旧版宿主（0.2.13 及更早）CSP 拒绝 fetch，回退读取 base64 模块
+    }
+  }
+  if (!mocBuf) {
+    const mocMod = await import(resolveAsset(`models/${entry.id}/${fallbackName}`).href);
+    mocBuf = b64ToBuffer(mocMod.default);
+  }
 
   const m3 = (await import(new URL(`models/${entry.id}/${entry.model}`, base))).default;
   const m3Bytes = new TextEncoder().encode(JSON.stringify(m3));

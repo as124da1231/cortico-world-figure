@@ -500,8 +500,9 @@ window.addEventListener('message', (e) => {
   try {
     const kit = await import('/kit/body.js');
     const mod = await import('/pack/figure.js');
+    const asset = (p) => new URL(p, new URL('/pack/', location.origin));
     state.body = await mod.createFigureBody(new URL('/pack/', location.origin), {
-      kit, host, loadImage, scheme: '', model: undefined,
+      kit, host, loadImage, asset, scheme: '', model: undefined,
     });
     state.body.set?.({ roam: 'free' });
     state.motion = 'free';

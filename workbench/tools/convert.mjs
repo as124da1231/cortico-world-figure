@@ -517,10 +517,11 @@ if (existsSync(OUT)) {
 if (!SIMPLE) await mkdir(join(OUT, 'models', id, 'motions'), { recursive: true });
 await mkdir(join(OUT, 'models', id, 'textures'), { recursive: true });
 
-// 1) moc3 → base64 模块
+// 1) moc3 原始文件（供 Coopanion 0.2.14+ 原生 fetch） + base64 模块（旧版本回退）
+await copyFile(mocPath, join(OUT, 'models', id, 'model.moc3'));
 await writeFile(
   join(OUT, 'models', id, 'moc3.js'),
-  `// ${basename(mocPath)}（base64：沙箱里不能 fetch 二进制）\nexport default "${(await readFile(mocPath)).toString('base64')}";\n`,
+  `// ${basename(mocPath)}（base64：旧版本沙箱不能 fetch 二进制时的回退兜底）\nexport default "${(await readFile(mocPath)).toString('base64')}";\n`,
   'utf8',
 );
 
@@ -655,7 +656,8 @@ const registry = {
   [optionId]: {
     id,
     model: 'model3.js',
-    moc: 'moc3.js',
+    moc: 'model.moc3',
+    mocFallback: 'moc3.js',
     ...(physicsPath ? { physics: 'physics.js' } : {}),
     ...(!SIMPLE && posePath ? { pose: 'pose.js' } : {}),
     ...(!SIMPLE && idleMotions.length
