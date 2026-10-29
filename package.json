@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-figure",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "type": "module",
-  "description": "把 Live2D 模型整理成 Coo 能用的形象：扫描、打包、安装。只做装配，不含编辑。 / Turn a Live2D model into a Coo figure: scan, pack, install.",
+  "description": "把 Live2D 模型一键装进 Coo：扫描、打包、安装。 / Install a Live2D model into Coo: scan, pack, install.",
   "license": "AGPL-3.0-or-later",
   "author": "as124da1231",
   "repository": {
@@ -30,7 +30,7 @@
   "cortico": {
     "kind": "world",
     "api": 6,
-    "displayName": "Coo 魔术人偶工坊",
+    "displayName": "Live2D 模型一键安装",
     "icon": "assets/icon.svg",
     "tags": [
       "apps",
@@ -38,12 +38,12 @@
     ],
     "locales": {
       "zh": {
-        "displayName": "Coo 魔术人偶工坊",
-        "description": "把 Live2D 模型整理成 Coo 能用的形象：扫描、打包、安装。只做装配，不含编辑。"
+        "displayName": "Live2D 模型一键安装",
+        "description": "把 Live2D 模型一键装进 Coo：扫描、打包、安装。"
       },
       "en": {
-        "displayName": "Coo Marionette Atelier",
-        "description": "Turn a Live2D model into a Coo figure: scan, pack, install. Assembly only, no editing."
+        "displayName": "Live2D One-Click Install",
+        "description": "Install a Live2D model into Coo: scan, pack, install."
       }
     },
     "webUiClient": "dist/webui.js",

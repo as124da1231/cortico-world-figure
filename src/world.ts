@@ -1,5 +1,5 @@
 /**
- * Coo 魔术人偶工坊 World。
+ * Live2D 模型一键安装 World。
  *
  * 交互全在面板里（dist/webui.js，手写 ESM，不打 bundle）：
  *   选择目录 → 扫描 → 打包 → 安装
