@@ -76,6 +76,14 @@ npm install cortico-world-figure
 
 ## SoulLink Emotion Engine：连续表演层
 
+<p align="center">
+  <img src="assets/soullink-emotion-banner.jpg" alt="SoulLink Emotion SDK — VAD · FACS · Procedural Animation" width="100%" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/nanlingyin/soullink-emotion-sdk">SoulLink GitHub Repository</a> · <a href="https://soullink.lynngnan.top">Official Website / 在线体验</a>
+</p>
+
 本扩展在生成的 Live2D figure pack 中集成了 [SoulLink Emotion SDK](https://github.com/nanlingyin/soullink-emotion-sdk) 的 **`@soullink-emotion/engine`**（随包版本 `0.2.0-beta.1`）。它是角色的**连续情绪与程序化表演层**，而非模型扫描、打包或安装工具。
 
 ```text
