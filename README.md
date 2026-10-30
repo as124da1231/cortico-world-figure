@@ -74,6 +74,36 @@ npm install cortico-world-figure
 `workbench/vendor/coo-kit/` 里的 `body.js`、`rig.js` 只服务于工作台在浏览器里的单独预览，不进产物；
 它们来自 Coopanion 的桌宠 World，许可为 AGPL-3.0-or-later，见 `NOTICE`。
 
+## SoulLink Emotion Engine：连续表演层
+
+本扩展在生成的 Live2D figure pack 中集成了 [SoulLink Emotion SDK](https://github.com/nanlingyin/soullink-emotion-sdk) 的 **`@soullink-emotion/engine`**（随包版本 `0.2.0-beta.1`）。它是角色的**连续情绪与程序化表演层**，而非模型扫描、打包或安装工具。
+
+```text
+Coo 表情词（happy / shy / sad / ...）
+  → SoulLink：VAD 情绪目标与连续更新 → FACS/AU + Idle 微动
+  → 本扩展适配层：FACS/动作通道 → 语义 role
+  → profile.roles：语义 role → 模型实际 Cubism 参数
+  → Live2D 渲染
+```
+
+SoulLink 在本项目中的具体作用：
+
+- **连续情绪与表情**：将 Coo 的表情词映射到 VAD 预设，使用 `SoullinkRuntime` 每帧更新情绪状态与 FACS/AU 参数；模型的通用表情配方作为平滑叠加的风格层，减少固定表情之间的生硬切换。
+- **程序化细微动作**：负责头部、身体、视线、呼吸和待机微动等表演信号，并支持不同的动作风格与情绪反应配置。
+- **跨模型语义适配**：构建器从模型参数生成 `profile.roles`，`backends/soullink.js` 将引擎通道映射为 `angleX`、`browY`、`mouthForm`、`eyeBallX` 等语义 role，再由渲染器映射到实际参数。不存在的通道会跳过；非标准参数可能仍需人工校准。
+- **可配置、可降级**：`profile.performance` 提供 `style`、`bodyGain`、`reactivity` 等调节入口；表演层加载失败或运行异常时，回退到原有的离散表情配方。
+
+**与宿主的分工**：SoulLink 不接管 Coo Kit 的行走、跑跳、坐下或拖拽，也不接管宿主的说话口型。本集成主动使用 `setLipSyncEnabled(false)`，避免双重口型驱动；当前也没有接入 SoulLink 的独立 LLM 情绪识别、TTS 或语音动作规划服务。这里使用的 Emotion Engine 为纯计算模块，不需要额外的在线服务。
+
+实现位置：
+
+- [SoulLink 表演层适配](workbench/pack/backends/soullink.js)：VAD 预设、FACS → role、强度与动作风格配置
+- [Live2D 渲染接入](workbench/pack/backends/live2d.js)：逐帧调用、role → Cubism 参数及降级
+- [模型转换脚本](workbench/tools/convert.mjs)：扫描 role、生成 `profile.performance`、随形象包复制引擎
+- [随包 SoulLink 版本说明](workbench/pack/vendor/soullink/README.md)
+
+SoulLink Emotion Engine 按 **Apache-2.0** 许可随包分发；上游仓库、版权及第三方许可边界见 [`NOTICE`](NOTICE) 与 [`workbench/NOTICE`](workbench/NOTICE)。
+
 ## 封面与贴合
 
 打包后会起一个临时本地服务，用系统里的 Chrome / Edge 无头打开渲染页：
