@@ -73,7 +73,7 @@ const pngSize = (file) => {
   } catch { return null; }
 };
 const fmtMB = (n) => `${(n / 1048576).toFixed(1)} MB`;
-const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'model';
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
 
 // ---------------------------------------------------------------- 找模型文件
 async function findModel3(dir) {
@@ -99,7 +99,12 @@ const model3 = await readJson(model3Path);
 const ref = model3.FileReferences ?? {};
 const files = ref.FileReferences ?? ref;   // VTS 有时多包一层
 
-const id = slug(arg('id', basename(modelDir).replace(/_vts$/i, '')));
+// 纯中文目录名 slug 后为空：给个短的稳定后缀，免得所有中文模型都装成同一个 "model"
+const _rawName = basename(modelDir).replace(/_vts$/i, '');
+const _explicitId = arg('id');
+const id = (_explicitId ? slug(_explicitId) : '')
+  || slug(_rawName)
+  || `model-${createHash('sha1').update(_rawName).digest('hex').slice(0, 6)}`;
 // Coo 的 axis option id 不能带连字符（scheme 用 '-' 拼多轴），模型/包 id 可以
 const optionId = id.replace(/-/g, '').slice(0, 24);
 const OUT = resolve(arg('out', join(HERE, '..', 'build', id)));
@@ -440,7 +445,7 @@ const performance = {
 };
 
 /* ---- 名片 / 运动：工作台传进来的构建参数 ---- */
-const title = model3.Meta?.Name ?? id;
+const title = model3.Meta?.Name || basename(modelDir) || id;
 const pickText = (v, fallback) => (typeof v === 'string' && v.trim() ? v.trim() : fallback);
 const expressionCount = Object.keys(expressions).length;
 const identity = {

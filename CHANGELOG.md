@@ -1,5 +1,9 @@
 # 更新记录
 
+## 1.4.1
+
+- 修复纯中文目录名模型的命名：包 id 加短后缀不再全撞成 model，显示名改用模型目录名
+
 ## 1.4.0
 
 - **不再随包分发 Live2D Cubism Core**：`live2dcubismcore.min.js` 从扩展与 npm 包里移除
