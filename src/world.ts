@@ -36,6 +36,8 @@ export interface Live2dSection {
   cover?: boolean;
   /** 贴图最长边：2048 / 1024 / 512 / 4096，original = 原精度不缩放。 */
   texture?: string;
+  /** 清理水印 / 文字类部件与参数（默认关）。 */
+  clean?: boolean;
 }
 
 type Phase = 'idle' | 'loading' | 'done' | 'error';
@@ -413,7 +415,8 @@ export class Live2dWorld implements World {
 
       let t0 = Date.now();
       const maxTexture = textureLimit(this.opts.getConfig().texture);
-      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { maxTexture });
+      const clean = this.opts.getConfig().clean === true;
+      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { maxTexture, clean });
       push(`初版包就绪 · ${Date.now() - t0} ms`);
 
       this.steps.build = { phase: 'loading', hint: '量尺寸 / 拍封面…' };
@@ -428,7 +431,7 @@ export class Live2dWorld implements World {
       let finalDir = packDir;
       if (shot.fit) {
         t0 = Date.now();
-        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit, maxTexture });
+        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit, maxTexture, clean });
         // 封面跟着走
         const thumb = join(packDir, 'thumb');
         if (existsSync(thumb)) {
@@ -686,6 +689,12 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           description: zh
             ? '打包时把贴图最长边缩到多少。original 是默认，原精度不缩放；往下选越小包越小、越省显存'
             : 'Longest texture edge when packing. 2048 is the default; smaller packs less VRAM; original keeps it untouched',
+        },
+        'worlds.figure.clean': {
+          type: 'boolean',
+          title: zh ? '清理' : 'Clean',
+          'x-hot': true,
+          default: false,
         },
         'worlds.figure.autoDelete': {
           type: 'boolean',

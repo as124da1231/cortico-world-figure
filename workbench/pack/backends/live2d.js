@@ -401,8 +401,25 @@ export async function createLive2DBody(base, opts, entry, kit) {
   const partTargets = new Map((entry.motions ?? []).map((m) => [m.id, m.partOpacity ?? null]));
   const baseParts = profile.parts?.base ?? { PartArmA: 1, PartArmB: 0 };
 
+  // ---------- 清理：水印 / 文字类部件与参数 ----------
+  // profile.clean 是打包时（设置里打开「清理」）写进来的：部件一律透明，
+  // 参数固定成作者“关掉水印”表情里的值。这里每帧最后写一次，压过表情 / 物理。
+  const cleanParts = profile.clean?.parts ?? {};
+  const cleanParams = profile.clean?.params ?? {};
+  const cleanParamIdx = new Map();
+  for (const name of Object.keys(cleanParams)) {
+    for (let i = 0; i < model._model.getParameterCount(); i++) {
+      if (model._model.getParameterId(i).getString() === name) { cleanParamIdx.set(name, i); break; }
+    }
+  }
+  function applyCleanParams() {
+    for (const [name, i] of cleanParamIdx) {
+      model._model.setParameterValueByIndex(i, cleanParams[name]);
+    }
+  }
+
   function applyPartOpacity(id) {
-    const want = (id && partTargets.get(id)) || baseParts;
+    const want = { ...((id && partTargets.get(id)) || baseParts), ...cleanParts };
     for (const name of Object.keys(want)) {
       const i = partIndex.get(name);
       if (i !== undefined) model._model.setPartOpacityByIndex(i, want[name]);
@@ -599,6 +616,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       try { model._physics?.evaluate(model._model, 1 / 60); } catch { /* 物理失败不致命 */ }
       try { model._pose?.updateParameters(model._model, 1 / 60); } catch { /* 姿势失败不致命 */ }
     }
+    applyCleanParams();
     model._model.update();
     render();
     return true;
@@ -886,6 +904,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       model._model.saveParameters();            // ← 必须在 physics 之前
       try { model._physics?.evaluate(model._model, dt); } catch { /* 物理失败不致命 */ }
       try { model._pose?.updateParameters(model._model, dt); } catch { /* 姿势失败不致命 */ }
+      applyCleanParams();
       model._model.update();
       render();
 

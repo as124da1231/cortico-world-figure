@@ -52,6 +52,8 @@ const OVERRIDES_PATH = arg('overrides');
  * 6 张就是 1.5 GB，还会拖慢首帧。2048² 仍有 8~10 倍过采样，肉眼无损。
  */
 const MAX_TEX = Math.max(0, Number(arg('max-texture', 2048)) || 0);
+/** 清理：打包时把水印 / 文字类部件和参数按作者给的“关掉”状态固定住。 */
+const CLEAN = flag('clean');
 /** 生成器配方版本：写进 build.json；工作台用它判断包是否过期 */
 const GENERATOR_VERSION = 'rt-2026-10-27.4';
 /** 简易模式：只做 role + 通用配方，不产出/不引用任何原生 exp3 / motion / pose 绑定。 */
@@ -133,6 +135,43 @@ const paramMeta = new Map((display.Parameters ?? []).map((p) => [
   p.Id,
   { label: p.Name ?? p.Id, group: groups.get(p.GroupId) ?? '' },
 ]));
+
+// ---------------------------------------------------------------- 清理（水印 / 文字类）
+const CLEAN_KEYS = ['水印', 'watermark', '版权', '须知', '说明', 'readme', '署名', '公告', 'logo'];
+const isCleanKey = (text) => {
+  const t = String(text ?? '').toLowerCase();
+  return CLEAN_KEYS.some((k) => t.includes(k));
+};
+const cleanParts = {};
+const cleanParams = {};
+if (CLEAN) {
+  // 1) 部件名命中 → 不透明度 0
+  for (const p of display.Parts ?? []) {
+    if (p?.Id && isCleanKey(p.Name)) cleanParts[p.Id] = 0;
+  }
+  // 2) 表情 / 热键命中 → 读作者设好的参数值（这就是“关掉水印”的状态）
+  for (const e of await collectExpressions()) {
+    if (!isCleanKey(e.name) && !isCleanKey(basename(e.path))) continue;
+    const raw = await readJson(e.path).catch(() => null);
+    for (const p of raw?.Parameters ?? []) {
+      if (typeof p?.Id === 'string' && Number.isFinite(Number(p.Value))) cleanParams[p.Id] = Number(p.Value);
+    }
+  }
+  // 3) VTS 热键名命中 → 读它指向的 exp3
+  for (const f of await readdir(modelDir).catch(() => [])) {
+    if (!f.toLowerCase().endsWith('.vtube.json')) continue;
+    const vd = await readJson(join(modelDir, f)).catch(() => null);
+    for (const hk of vd?.Hotkeys ?? []) {
+      if (!isCleanKey(hk?.Name)) continue;
+      const file = hk.File ? resolveAsset(hk.File) : null;
+      if (!file) continue;
+      const raw = await readJson(file).catch(() => null);
+      for (const p of raw?.Parameters ?? []) {
+        if (typeof p?.Id === 'string' && Number.isFinite(Number(p.Value))) cleanParams[p.Id] = Number(p.Value);
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------- 动作
 async function collectMotions() {
@@ -622,7 +661,9 @@ ${overrides.anchors ? `  anchors: ${JSON.stringify(overrides.anchors)},` : ''}
   // 简易模式不播 motion，但 motion 里的 PartOpacity 是“中性姿势”的一部分：
   // 少了它，hiyori 这类模型会同时显示 PartArmA / PartArmB（四只手）。
   parts: { base: ${JSON.stringify(guessBaseParts(motions))} },
-  roles: {
+${Object.keys(cleanParts).length || Object.keys(cleanParams).length
+    ? `  // 清理：水印 / 文字类部件与参数（打包时 --clean 写入，运行时每帧固定）\n  clean: { parts: ${JSON.stringify(cleanParts)}, params: ${JSON.stringify(cleanParams)} },\n`
+    : ''}  roles: {
 ${Object.entries(roles).map(([n, r]) => `    ${n}: ${JSON.stringify(r)},`).join('\n')}
   },
   expression: {

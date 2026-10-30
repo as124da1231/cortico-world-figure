@@ -13,6 +13,7 @@ export const LIVE2D: WorldDefinition<Live2dSection> = {
     workDir: '',
     cover: true,
     texture: 'original',
+    clean: false,
     autoDelete: false,
   }),
   describe: { tools: [], events: [] },
