@@ -63,7 +63,7 @@ export async function buildPack(
   workbenchDir: string,
   modelDir: string,
   workDir: string,
-  opts: { fit?: unknown; maxTexture?: number; clean?: boolean } = {},
+  opts: { fit?: unknown; maxTexture?: number; clean?: boolean; corePath?: string } = {},
 ): Promise<string> {
   const builds = join(workDir, 'builds');
   await mkdir(builds, { recursive: true });
@@ -75,6 +75,7 @@ export async function buildPack(
     '--force',
     '--max-texture', String(Math.max(0, Math.trunc(opts.maxTexture ?? 2048))),
   ];
+  if (opts.corePath) args.push('--core', opts.corePath);
   if (opts.clean) args.push('--clean');
   let overrideFile = '';
   if (opts.fit) {

@@ -13,6 +13,12 @@
   color: #8a6a12; text-decoration: underline; font: inherit; font-size: 12px;
 }
 .l2d-link:hover { color: #5f4a0c; }
+/* 核心组件就绪后转成一条安静的绿条 */
+.l2d-license.ok {
+  border-color: #cde7d6; background: #f2faf5; color: #2f6b47;
+}
+.l2d-license.ok .l2d-link { color: #3d7a58; }
+.l2d-license .l2d-btn[hidden] { display: none; }
 
 /* 一行 */
 .l2d-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; }

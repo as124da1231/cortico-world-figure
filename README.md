@@ -97,7 +97,7 @@ __l2dCover()    → 512×512 主封面 + 128×128 选项小图
 
 面板上只放模型目录和动作按钮，不重复这些开关；底部常显当前安装目标。
 
-首次打开面板会有一条黄色许可提示（Core 许可 / SDK 许可 / 知道了），点过「知道了」就不再出现。
+首次打开面板会显示「Live2D 核心组件」一栏：本扩展不附带 Core，点「同意并获取」后从 Live2D Inc. 的官方托管地址下载同一份文件并校验 SHA-256，就绪后这一栏变成绿色的「已校验」。想先读许可，点旁边的「Core 许可 / SDK 许可」。
 
 ## 开发
 
@@ -130,7 +130,7 @@ node test/import.mjs <打包产物的目录>   # zip 导入：解包 / 冲突 / 
 `workbench/` 里附带第三方组件，各自的边界与许可文本见 `NOTICE` 和 `workbench/pack/sdk/`：
 
 - Live2D Cubism SDK for Web —— Live2D Open Software License
-- Live2D Cubism Core —— Live2D Proprietary Software License（Redistributable Code，原样分发，未修改）
+- Live2D Cubism Core —— Live2D Proprietary Software License（**不随包分发**，用户同意许可后从官方地址获取并校验 SHA-256）
 - SoulLink Emotion Engine —— Apache-2.0
 - Coopanion desktop-pet kit —— AGPL-3.0-or-later
 

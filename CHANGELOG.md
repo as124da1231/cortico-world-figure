@@ -1,5 +1,15 @@
 # 更新记录
 
+## 1.4.0
+
+- **不再随包分发 Live2D Cubism Core**：`live2dcubismcore.min.js` 从扩展与 npm 包里移除
+  - 面板新增「Live2D 核心组件」一栏：需先同意 Live2D 两份许可，再从 Live2D Inc. 官方托管地址
+    （`cubism.live2d.com/sdk-web/core/06/`，下载页「Cubism Core for Web — for hosting use」）下载
+  - 下载后校验长度（228042）与 SHA-256，不一致即停：不安装、也不打包，避免版本漂移产出跑不起来的包
+  - 核心缓存在 `<工作目录>/sdk/`，清空旧打包不会删到它；打包时从这里拷进每个形象包
+  - `convert.mjs` 新增 `--core <file>`；缺核心时直接报错退出（不再静默产出）
+  - Framework / 着色器仍随包分发（Live2D Open Software License）
+
 ## 1.3.1
 
 - 设置里新增「清理」（默认关）：打包时把水印 / 文字类部件设为透明，并按作者表情里给的值固定对应参数

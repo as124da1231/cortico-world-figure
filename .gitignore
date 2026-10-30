@@ -9,3 +9,7 @@ workbench.config.json
 .workbench/
 builds/
 figures/
+
+# Live2D Cubism Core：不随包分发，用户同意许可后从官方地址获取
+workbench/pack/sdk/live2dcubismcore.min.js
+*.part

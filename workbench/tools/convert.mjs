@@ -38,10 +38,12 @@ const flag = (n) => ARGS.includes('--' + n);
 // ---------------------------------------------------------------- 参数
 const MODEL_DIR = arg('model');
 if (!MODEL_DIR || !existsSync(MODEL_DIR)) {
-  console.error('用法: node tools/convert.mjs --model "<模型目录>" [--out build/<id>] [--id <id>] [--runtime pack] [--max-texture 2048] [--force] [--dry-run] [--json] [--overrides <json>]');
+  console.error('用法: node tools/convert.mjs --model "<模型目录>" [--out build/<id>] [--id <id>] [--runtime pack] [--core <live2dcubismcore.min.js>] [--max-texture 2048] [--force] [--dry-run] [--json] [--overrides <json>]');
   process.exit(2);
 }
 const RUNTIME = resolve(arg('runtime', join(HERE, '..', 'pack')));
+/** 用户同意 Live2D 许可后由扩展下载并校验过的 Cubism Core；扩展不随包分发它。 */
+const CORE_PATH = arg('core');
 const DRY = flag('dry-run');
 const JSON_OUT = flag('json');
 const FORCE = flag('force');
@@ -726,11 +728,26 @@ for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js']) {
   await copyFile(src, join(OUT, rel));
 }
 for (const rel of await readdir(join(RUNTIME, 'sdk'))) {
+  // Core 单独处理：它不随扩展分发
+  if (rel === 'live2dcubismcore.min.js') continue;
   const src = join(RUNTIME, 'sdk', rel);
   if ((await stat(src)).isFile()) {
     await mkdir(join(OUT, 'sdk'), { recursive: true });
     await copyFile(src, join(OUT, 'sdk', rel));
   }
+}
+// Cubism Core：优先用 --core（扩展下载并校验过的那份）；没有就报错，绝不静默产出跑不起来的包
+{
+  const out = join(OUT, 'sdk', 'live2dcubismcore.min.js');
+  const src = CORE_PATH || join(RUNTIME, 'sdk', 'live2dcubismcore.min.js');
+  if (!existsSync(src)) {
+    console.error(CORE_PATH
+      ? `--core 指向的文件不存在：${CORE_PATH}`
+      : '缺少 Live2D 核心组件：先用 --core 指定已校验的 live2dcubismcore.min.js');
+    process.exit(3);
+  }
+  await mkdir(join(OUT, 'sdk'), { recursive: true });
+  await copyFile(src, out);
 }
 // SoulLink 表演引擎（Apache-2.0，随包分发，含许可证）
 const vendorDir = join(RUNTIME, 'vendor', 'soullink');

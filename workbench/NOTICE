@@ -36,20 +36,20 @@ or (at your option) any later version. See LICENSE for the full text.
    Copyright (C) Live2D Inc.
 
 4. Live2D Cubism Core
-   文件：pack/sdk/live2dcubismcore.min.js
+   文件：pack/sdk/live2dcubismcore.min.js（**不随本发布包分发**）
    许可证：Live2D Proprietary Software License
    完整文本：pack/sdk/LICENSE-live2d-core.txt
    https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html
    Copyright (C) Live2D Inc.
 
-   这个文件的头部自带声明："This file corresponds to the Redistributable Code in
-   the agreement." 即它属于该许可第 5 条定义的 Redistributable Code，允许随衍生
-   作品一起原样分发。本包未对该文件做任何修改。
+   本发布包**不包含**这个文件。首次使用前，扩展会在用户明确同意 Live2D 许可后，
+   从 Live2D Inc. 的官方托管地址（下载页「Cubism Core for Web — for hosting use」）
+   取同一份文件，校验长度与 SHA-256 后写入本地缓存，打包时再放入形象包。
 
-   按该许可第 5.2.2 条，最终用户须同意等效的保护条款。因此：
+   因此分发链上没有本项目的再次分发行为：文件由 Live2D 的服务器直接交给用户的机器。
    - 许可原文随包提供，见 pack/sdk/LICENSE-live2d-core.txt；
-   - 首次打开工作台会显示一次许可提示；
-   - 继续使用、构建或分发本包，即表示同意 Live2D Inc. 的上述许可。
+   - 扩展界面在下载前显示许可确认，用户可先阅读两份许可全文；
+   - 校验失败（版本漂移）时不会安装，也不会产出跑不起来的形象包。
 
    Live2D 的 SDK / Core 不是 AGPL 代码，也不会因为本项目的 AGPL 声明而改变许可。
    它们独立存放在 pack/sdk/，各自带有许可文本，不与本项目的 AGPL 部分混同。

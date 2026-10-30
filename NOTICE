@@ -7,8 +7,10 @@ opts.kit.createBody，和 Coo 自带的形象、鲸鱼包、酒狐包走同一�
 本仓库 workbench/vendor/coo-kit/ 只是工作台在浏览器里单独预览时用的副本，
 不进入安装产物。
 
-随包附带的第三方组件（Live2D Cubism SDK for Web、Live2D Cubism Core、SoulLink Emotion
-Engine、Coopanion desktop-pet kit）的清单、许可边界与许可文本见 workbench/NOTICE 与
-workbench/pack/sdk/。
+随包附带的第三方组件（Live2D Cubism SDK for Web、SoulLink Emotion Engine、Coopanion
+desktop-pet kit）的清单、许可边界与许可文本见 workbench/NOTICE 与 workbench/pack/sdk/。
+
+Live2D Cubism Core（live2dcubismcore.min.js）**不随本包分发**：首次使用前由扩展在用户
+同意 Live2D 许可后，从 Live2D Inc. 的官方托管地址获取并校验 SHA-256，存到本地缓存。
 
 本包作为 Coo 扩展分发时，同样适用以上边界；pack/sdk 下的 Live2D 文件不属于 AGPL。

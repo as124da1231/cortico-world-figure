@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-figure",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "type": "module",
   "description": "把 Live2D 模型一键装进 Coo：扫描、打包、安装。 / Install a Live2D model into Coo: scan, pack, install.",
   "license": "AGPL-3.0-or-later",

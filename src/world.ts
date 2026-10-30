@@ -21,6 +21,10 @@ import type { ConfigGroup } from 'cortico/core/config-schema.ts';
 import { buildPack, dirSize, editPack, installPack, scanModel, type ScanSummary } from './pipeline.ts';
 import { PackImporter, filesFromBundle, filesFromZip } from './import.ts';
 import { captureCover } from './cover.ts';
+import {
+  CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
+  coreState, ensureCore,
+} from './core.ts';
 
 const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url));
 const WORKBENCH_DIR = join(PACKAGE_DIR, 'workbench');
@@ -69,6 +73,8 @@ interface Persisted {
   /** 历史打包，最新在前，最多 20 份。 */
   builds?: BuildRecord[];
   install?: { target: string; at: number };
+  /** 用户同意 Live2D 许可、并取到核心组件的时间。 */
+  coreConsentAt?: number;
 }
 
 const IDLE: StepState = { phase: 'idle', hint: '未执行' };
@@ -85,6 +91,8 @@ export class Live2dWorld implements World {
   private log: string[] = [];
   private busy = false;
   private streams = new Set<WorldStreamSocket>();
+  /** 核心组件是否就绪（start 时探一次，取到后更新）。 */
+  private coreReady = false;
   /** 导入待装清单（zip / 文件夹）。 */
   private importer = new PackImporter();
 
@@ -118,6 +126,7 @@ export class Live2dWorld implements World {
       const dir = (this.opts.getConfig().modelDir ?? '').trim();
       if (dir) this.state.modelDir = dir;
     }
+    this.coreReady = (await coreState(this.coreDir())).ok;
   }
 
   async stop(): Promise<void> {
@@ -157,6 +166,9 @@ export class Live2dWorld implements World {
               tone: (s.build.cover ? 'on' : 'off') as 'on' | 'off',
             }]
           : []),
+        ...(this.coreReady
+          ? []
+          : [{ label: zh ? '核心' : 'Core', value: zh ? '待获取' : 'missing', tone: 'off' as const }]),
       ],
       lamps: [
         { label: zh ? '扫描' : 'Scan', state: lamp(this.steps.scan), hint: this.steps.scan.hint },
@@ -224,10 +236,28 @@ export class Live2dWorld implements World {
     }
     if (method === 'license') {
       const which = String(args[0] ?? 'core');
-      const file = which === 'sdk' ? 'LICENSE-live2d-components.txt' : 'LICENSE-live2d-core.txt';
+      const file = which === 'sdk' ? LICENSE_FILES.sdk : LICENSE_FILES.core;
       let text = '';
       try { text = await readFile(join(WORKBENCH_DIR, 'pack', 'sdk', file), 'utf8'); } catch { /* ignore */ }
       return { file, text };
+    }
+    if (method === 'core') {
+      return this.corePayload();
+    }
+    if (method === 'coreAccept') {
+      if (args[0] !== true) throw new Error('需要先同意 Live2D 许可');
+      if (this.busy) throw new Error('上一个动作还没结束');
+      this.busy = true;
+      try {
+        this.say('获取 Live2D 核心组件…');
+        await ensureCore(this.coreDir(), (line) => this.say(line));
+        this.state.coreConsentAt = Date.now();
+        this.coreReady = true;
+        await this.save();
+        return this.corePayload();
+      } finally {
+        this.busy = false;
+      }
     }
     if (method === 'importStage') {
       if (this.busy) throw new Error('上一个动作还没结束');
@@ -405,6 +435,9 @@ export class Live2dWorld implements World {
   private async doBuild(dir: string, opts: { remember?: boolean } = {}): Promise<unknown> {
     this.guard(dir);
     if (this.busy) throw new Error('上一个动作还没结束');
+    // Core 不随包分发：没下载/没校验过就不打包，别产出跑不起来的形象包
+    const core = await coreState(this.coreDir());
+    if (!core.ok) throw new Error('缺少 Live2D 核心组件：先在面板上方同意许可并获取');
     this.busy = true;
     const logs: string[] = [];
     const push = (line: string) => { logs.push(line); this.say(line); };
@@ -416,7 +449,7 @@ export class Live2dWorld implements World {
       let t0 = Date.now();
       const maxTexture = textureLimit(this.opts.getConfig().texture);
       const clean = this.opts.getConfig().clean === true;
-      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { maxTexture, clean });
+      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { maxTexture, clean, corePath: core.file });
       push(`初版包就绪 · ${Date.now() - t0} ms`);
 
       this.steps.build = { phase: 'loading', hint: '量尺寸 / 拍封面…' };
@@ -431,7 +464,7 @@ export class Live2dWorld implements World {
       let finalDir = packDir;
       if (shot.fit) {
         t0 = Date.now();
-        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit, maxTexture, clean });
+        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit, maxTexture, clean, corePath: core.file });
         // 封面跟着走
         const thumb = join(packDir, 'thumb');
         if (existsSync(thumb)) {
@@ -575,6 +608,7 @@ export class Live2dWorld implements World {
       install: s.install ? { target: s.install.target } : null,
       builds: (s.builds ?? []).map((b) => ({ id: b.id, bytes: b.bytes, at: b.at })),
       autoDelete: Boolean(this.opts.getConfig().autoDelete),
+      coreReady: this.coreReady,
       steps: {
         scan: this.steps.scan, build: this.steps.build, install: this.steps.install,
       },
@@ -596,6 +630,24 @@ export class Live2dWorld implements World {
 
   private workRoot(): string {
     return this.opts.getConfig().workDir?.trim() || join(this.opts.dataDir, 'figure');
+  }
+
+  /** 核心组件的缓存目录；清旧打包只删 builds/，不会碰到它。 */
+  private coreDir(): string {
+    return join(this.workRoot(), 'sdk');
+  }
+
+  /** 面板要的核心状态：文件是否就绪、版本、官方地址、同意时间。 */
+  private async corePayload(): Promise<Record<string, unknown>> {
+    const state = await coreState(this.coreDir());
+    return {
+      ...state,
+      file: CORE_FILE,
+      version: CORE_VERSION,
+      urls: CORE_URLS,
+      home: CORE_HOME,
+      consentAt: this.state.coreConsentAt ?? null,
+    };
   }
 
   private stateFile(): string {

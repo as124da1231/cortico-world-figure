@@ -21,33 +21,77 @@ export default {
 
         const state = { dir: '', busy: false, phase: '', builds: [], installed: null, figuresDir: '' };
 
-        // ---- 首次打开的许可条 ----
-        if (!ctx.memo.get('licenseAck', false)) {
-          const bar = el('div', 'l2d-license');
-          bar.appendChild(el('span', 'l2d-license-text', t(
-            '本扩展随包附带 Live2D Cubism 运行时，按 Live2D Inc. 的许可分发。',
-            'This extension ships the Live2D Cubism runtime under the Live2D Inc. license.',
-          )));
-          const core = el('button', 'l2d-link', t('Core 许可', 'Core license'));
-          const sdk = el('button', 'l2d-link', t('SDK 许可', 'SDK license'));
-          const ack = el('button', 'l2d-btn sm', t('知道了', 'Got it'));
-          const openLicense = async (which) => {
-            try {
-              const r = await ctx.invoke('license', [which]);
-              ui.drawer(r.file, r.text || t('（读不到许可文本）', '(license text missing)'));
-            } catch (e) {
-              ui.toast(text(e), 'bad');
-            }
-          };
-          core.addEventListener('click', () => openLicense('core'));
-          sdk.addEventListener('click', () => openLicense('sdk'));
-          ack.addEventListener('click', () => {
-            ctx.memo.set('licenseAck', true);
-            bar.remove();
-          });
-          bar.append(core, sdk, ack);
-          ctx.root.appendChild(bar);
+        // ---- Live2D 核心组件：不随扩展分发，同意许可后从官方地址取 ----
+        const coreCard = el('div', 'l2d-license');
+        const coreText = el('span', 'l2d-license-text');
+        const coreLicA = el('button', 'l2d-link', t('Core 许可', 'Core license'));
+        const coreLicB = el('button', 'l2d-link', t('SDK 许可', 'SDK license'));
+        const coreHome = el('button', 'l2d-link', t('打开官网', 'Download page'));
+        const coreGet = el('button', 'l2d-btn sm primary', t('同意并获取', 'Agree & fetch'));
+        coreCard.append(coreText, coreLicA, coreLicB, coreHome, coreGet);
+        ctx.root.appendChild(coreCard);
+
+        let core = { ok: false };
+        const coreReady = () => core.ok === true;
+
+        const openLicense = async (which) => {
+          try {
+            const r = await ctx.invoke('license', [which]);
+            ui.drawer(r.file, r.text || t('（读不到许可文本）', '(license text missing)'));
+          } catch (e) {
+            ui.toast(text(e), 'bad');
+          }
+        };
+        coreLicA.addEventListener('click', () => openLicense('core'));
+        coreLicB.addEventListener('click', () => openLicense('sdk'));
+        coreHome.addEventListener('click', () => {
+          if (core.home) window.open(core.home, '_blank', 'noreferrer');
+        });
+
+        function paintCore() {
+          coreCard.classList.toggle('ok', coreReady());
+          if (coreReady()) {
+            const kb = Math.round((core.bytes || 0) / 1024);
+            coreText.textContent = t(
+              `Live2D 核心已就绪 · ${core.version || ''} · ${kb} KB · 已校验`,
+              `Live2D core ready · ${core.version || ''} · ${kb} KB · verified`,
+            );
+            coreGet.hidden = true;
+          } else {
+            coreText.textContent = t(
+              '本扩展不附带 Live2D 核心组件。点「同意并获取」后，从 Live2D Inc. 官方服务器取同一份文件并校验 SHA-256；核心不随扩展分发。',
+              'This extension does not ship the Live2D core. "Agree & fetch" downloads the same file from Live2D Inc. and verifies its SHA-256.',
+            );
+            coreGet.hidden = false;
+          }
         }
+
+        async function loadCore() {
+          try {
+            core = await ctx.invoke('core', []);
+            paintCore();
+          } catch (e) {
+            ui.toast(text(e), 'bad');
+          }
+        }
+
+        coreGet.addEventListener('click', async () => {
+          if (state.busy) return;
+          setBusy(true, t('获取核心…', 'Fetching core…'), undefined, 'core');
+          try {
+            core = await ctx.invoke('coreAccept', [true]);
+            paintCore();
+            log.append(t('已获取 Live2D 核心并校验', 'Live2D core fetched and verified'), 'dim');
+            ui.toast(t('核心已就绪', 'Core ready'), 'ok');
+          } catch (e) {
+            ui.toast(text(e), 'bad');
+            log.append('! ' + text(e), 'warn');
+          } finally {
+            setBusy(false);
+          }
+        });
+
+        loadCore();
 
         const sheet = ui.sheet({
           title: t('Live2D 模型一键安装', 'Live2D One-Click Install'),
@@ -234,6 +278,11 @@ export default {
         async function run(kind, id) {
           if (state.busy) return;
           if (!state.dir) { ui.toast(t('先选模型目录', 'Pick a folder first'), 'bad'); return; }
+          if (kind === 'build' && !coreReady()) {
+            ui.toast(t('先获取 Live2D 核心组件', 'Fetch the Live2D core first'), 'bad');
+            coreCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            return;
+          }
           const label = kind === 'scan' ? t('扫描', 'Scan') : kind === 'build' ? t('打包', 'Pack') : t('安装', 'Install');
           setBusy(true, label + '…', undefined, kind);
           log.append(`→ ${label}`, 'dim');

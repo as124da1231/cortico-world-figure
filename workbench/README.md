@@ -260,7 +260,7 @@ workbench.config.json    本机 Coo 路径（运行时生成，不提交）
 - Coopanion desktop-pet kit：AGPL-3.0-or-later
 - SoulLink Emotion Engine：Apache-2.0
 - Live2D Cubism SDK for Web：Live2D Open Software License
-- Live2D Cubism Core：Live2D Proprietary Software License
+- Live2D Cubism Core：**不随包分发**
 
 Live2D SDK / Core 不是 AGPL，使用和分发时仍需遵守 Live2D Inc. 的许可。详见 [NOTICE](NOTICE) 和 [pack/sdk/README.md](pack/sdk/README.md)。
 
@@ -271,8 +271,6 @@ pack/sdk/LICENSE-live2d-core.txt          Live2D Proprietary Software License
 pack/sdk/LICENSE-live2d-components.txt    Live2D Open Software License
 ```
 
-`live2dcubismcore.min.js` 的文件头自带声明，它属于 Live2D 许可第 5 条的 **Redistributable Code**，允许随本工具原样分发；本包未修改该文件。
-
-按该许可第 5.2.2 条，最终用户需要同意等效的保护条款。**首次打开工作台会显示一次许可提示；继续使用、构建或分发本包，即表示同意 Live2D Inc. 的上述许可。**
+**`live2dcubismcore.min.js` 不随本发布包分发。** 首次打包前，扩展会在面板里请用户先同意 Live2D 的两份许可，然后从 Live2D Inc. 的官方托管地址（下载页「Cubism Core for Web — for hosting use」）取同一份文件，校验长度与 SHA-256 后写进本地缓存，打包时再放进形象包。校验不通过时不安装、也不产出形象包，避免版本漂移导致跑不起来。
 
 本仓库不包含任何 Live2D 模型、moc3、贴图或表情文件。导入的模型版权归原作者，使用前请确认授权。本工具可以加载任意模型，属于 Live2D 许可所称的「可扩展性应用」；用它发布内容前，请自行确认你与 Live2D 之间的授权安排。
