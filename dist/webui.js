@@ -5,8 +5,35 @@
  * 卡片：[安装][编辑][删除]；编辑弹层直接改 figure.json / profile.js，不重新打包。
  * 导入弹层：zip / 文件夹 / 直接拖入，照 Coopanion 桌宠的做法。
  */
+const NOTICE_TEXT = {
+  zh: '本功能生成的形象包包含 Live2D Cubism Core。请仅在本机使用，不要将这些形象包上传、分享或再次分发给他人。模型、贴图和第三方组件仍各自受原许可约束。',
+  en: 'Generated figure packs contain Live2D Cubism Core. Use these packs locally; do not upload, share or redistribute them. Models, textures and third-party components remain subject to their respective licenses.',
+};
+
 export default {
   panels: {
+    'config-notice': {
+      mount(ctx) {
+        const doc = ctx.root.ownerDocument;
+        const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
+        const details = doc.createElement('details');
+        details.className = 'l2d-notice l2d-config-notice';
+        details.hidden = true;
+        const summary = doc.createElement('summary');
+        summary.textContent = zh ? '须知' : 'Notice';
+        const content = doc.createElement('p');
+        content.textContent = zh ? NOTICE_TEXT.zh : NOTICE_TEXT.en;
+        details.append(summary, content);
+        ctx.root.appendChild(details);
+        let disposed = false;
+        ctx.invoke('state', []).then((state) => {
+          if (!disposed) details.hidden = state.notice?.acknowledged !== true;
+        }).catch((error) => {
+          if (!disposed) ctx.ui.toast(error?.message || String(error), 'bad');
+        });
+        return { dispose() { disposed = true; details.remove(); } };
+      },
+    },
     workbench: {
       mount(ctx) {
         const ui = ctx.ui;
@@ -56,7 +83,7 @@ export default {
           if (disposed) return;
           coreCard.classList.toggle('ok', coreReady());
           if (coreReady()) noticeDetails.appendChild(coreCard);
-          else sheet.body.insertBefore(coreCard, noticeDetails.nextSibling);
+          else noticeTop.appendChild(coreCard);
           if (coreReady()) {
             const kb = Math.round((core.bytes || 0) / 1024);
             coreText.textContent = t(
@@ -107,7 +134,9 @@ export default {
           ),
         });
         ctx.root.appendChild(sheet.el);
-        const versionCorner = el('button', 'l2d-version-corner', '…');
+        const noticeTop = el('div', 'l2d-notice-top');
+        sheet.body.appendChild(noticeTop);
+        let versionCorner = el('button', 'l2d-version-corner', '…');
         versionCorner.type = 'button';
         versionCorner.disabled = true;
         versionCorner.setAttribute('aria-controls', 'l2d-distribution-notice');
@@ -115,28 +144,38 @@ export default {
         sheet.el.appendChild(versionCorner);
         const noticeDetails = el('details', 'l2d-notice');
         noticeDetails.id = 'l2d-distribution-notice';
-        const noticeSummary = el('summary', null, t('形象包分发须知 / 核心组件', 'Pack distribution notice / Core'));
+        const noticeSummary = el('summary', null, t('须知', 'Notice'));
         noticeDetails.appendChild(noticeSummary);
-        noticeDetails.appendChild(el('p', null, t(
-          '本功能生成的形象包包含 Live2D Cubism Core。请仅在本机使用，不要将这些形象包上传、分享或再次分发给他人。模型、贴图和第三方组件仍各自受原许可约束。',
-          'Generated figure packs contain Live2D Cubism Core. Use these packs locally; do not upload, share or redistribute them. Models, textures and third-party components remain subject to their respective licenses.',
-        )));
+        noticeDetails.appendChild(el('p', null, t(NOTICE_TEXT.zh, NOTICE_TEXT.en)));
         const acknowledge = el('button', 'l2d-btn sm primary', t('我已知晓，不再分发', 'I understand — no redistribution'));
         noticeDetails.appendChild(acknowledge);
-        sheet.body.appendChild(noticeDetails);
+        noticeTop.appendChild(noticeDetails);
         function paintNotice() {
           if (disposed) return;
           const ack = notice?.acknowledged === true;
-          versionCorner.textContent = ack ? `v${version}` : '!';
+          if (ack) {
+            noticeDetails.open = false;
+            noticeDetails.remove();
+            if (versionCorner.tagName === 'BUTTON') {
+              const label = el('span', 'l2d-version-corner');
+              versionCorner.replaceWith(label);
+              versionCorner = label;
+            }
+          }
+          versionCorner.textContent = version ? `v${version}` : '…';
           versionCorner.classList.toggle('unack', !ack);
-          versionCorner.title = t('形象包含 Cubism Core，请勿再分发。点击重看须知。', 'Packs contain Cubism Core. Do not redistribute. Click to review.');
-          versionCorner.setAttribute('aria-label', ack ? `v${version} · ${noticeSummary.textContent}` : t('请阅读形象包分发须知', 'Read the distribution notice'));
+          versionCorner.classList.toggle('ack', ack);
+          versionCorner.title = ack ? '' : t('请阅读并确认须知', 'Read and acknowledge the notice');
+          versionCorner.setAttribute('aria-label', `${versionCorner.textContent} · ${ack ? t('已确认', 'Acknowledged') : t('未确认', 'Not acknowledged')}`);
           acknowledge.hidden = ack;
           acknowledge.disabled = !notice || state.busy;
-          versionCorner.disabled = !notice;
-          versionCorner.setAttribute('aria-expanded', String(noticeDetails.open));
+          if (!ack) {
+            versionCorner.disabled = !notice;
+            versionCorner.setAttribute('aria-expanded', String(noticeDetails.open));
+          }
         }
         versionCorner.addEventListener('click', () => {
+          if (notice?.acknowledged) return;
           noticeDetails.open = !noticeDetails.open;
           noticeDetails.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
           paintNotice();
@@ -148,8 +187,13 @@ export default {
           try {
             notice = await ctx.invoke('noticeAccept', [notice.revision]);
             noticeDetails.open = false;
+            paintNotice();
           } catch (e) { ui.toast(text(e), 'bad'); }
-          finally { setBusy(false); paintNotice(); }
+          finally {
+            setBusy(false);
+            paintNotice();
+            if (notice?.acknowledged) path.focus({ preventScroll: true });
+          }
         });
         function ensureNotice() {
           if (notice?.acknowledged) return true;
@@ -182,6 +226,40 @@ export default {
         status.setAttribute('aria-live', 'polite');
         status.append(dot, spinner, statusText);
         sheet.body.appendChild(status);
+        const adaptationNote = el('div');
+        sheet.body.appendChild(adaptationNote);
+
+        function adaptationDetails(info) {
+          if (!info) return null;
+          const corrected = Array.isArray(info.corrected) ? info.corrected : [];
+          const limited = Array.isArray(info.limited) ? info.limited : [];
+          const warnings = Array.isArray(info.warnings) ? info.warnings : [];
+          if (!corrected.length && !limited.length && !warnings.length) return null;
+          const names = {
+            eyeOpen: t('眨眼', 'Blink'), eyeSmile: t('笑眼', 'Eye smile'),
+            browY: t('眉毛升降', 'Brow height'), browAngle: t('眉毛角度', 'Brow angle'),
+            mouthOpen: t('张嘴', 'Mouth opening'), mouthForm: t('嘴形', 'Mouth shape'),
+            cheek: t('脸红', 'Blush'), eyeBallX: t('横向视线', 'Horizontal gaze'), eyeBallY: t('纵向视线', 'Vertical gaze'),
+            angleX: t('左右转头', 'Head turn'), angleY: t('抬头低头', 'Head pitch'), angleZ: t('歪头', 'Head tilt'),
+            bodyX: t('身体跟随', 'Body follow'), breath: t('呼吸', 'Breathing'),
+            step: t('腿部步态', 'Leg gait'), armA: t('手臂动作', 'Arm motion'), armB: t('手臂姿势', 'Arm pose'),
+          };
+          const show = roles => [...new Set(roles.map(r => names[r] || r))].join('、');
+          const detail = el('details', 'l2d-adaptation');
+          detail.appendChild(el('summary', null, limited.length || warnings.length
+            ? t('已自动适配 · 部分效果简化', 'Adapted · some effects simplified')
+            : t('已自动修正适配', 'Adaptation corrected automatically')));
+          if (corrected.length) detail.appendChild(el('p', null, t('自动识别：', 'Detected: ') + show(corrected)));
+          if (limited.length) detail.appendChild(el('p', null, t('沿用基础表现，独立控制受限：', 'Basic behavior retained; independent controls limited: ') + show(limited)));
+          if (warnings.length) detail.appendChild(el('p', null, t('部分配置不可用，已自动使用基础识别。', 'Some configuration is unavailable; basic detection is used.')));
+          detail.appendChild(el('p', null, t('继续使用已识别的通用动作和表情，无需手动配置参数。', 'Detected generic motions and expressions remain available; no manual parameter setup is needed.')));
+          return detail;
+        }
+
+        function showAdaptation(info) {
+          const detail = adaptationDetails(info);
+          adaptationNote.replaceChildren(...(detail ? [detail] : []));
+        }
 
         const progress = el('div', 'l2d-progress');
         const progressBar = el('span');
@@ -298,6 +376,8 @@ export default {
             card.appendChild(el('div', 'meta',
               `${(b.bytes / 1048576).toFixed(1)} MB · ${clock(b.at)}`));
             if (b.fit) card.appendChild(el('div', 'tagline', t('已贴合', 'fit')));
+            const adaptation = adaptationDetails(b.adaptation);
+            if (adaptation) card.appendChild(adaptation);
 
             const install = el('button', 'l2d-btn sm primary l2d-wide', t('安装', 'Install'));
             install.addEventListener('click', () => run('install', b.id));
@@ -363,6 +443,7 @@ export default {
           try {
             const args = kind === 'install' && id ? [state.dir, id] : [state.dir];
             const r = await ctx.invoke(kind, args);
+            if (r.state?.scan) showAdaptation(r.state.scan.adaptation);
             for (const line of r.log ?? []) log.append(line, 'dim');
             log.append(`✓ ${label} · ${((performance.now() - startedAt) / 1000).toFixed(1)}s`, 'plain');
             ui.toast(`${label} ✓`, 'ok');
@@ -864,7 +945,7 @@ export default {
         }
 
         // ---------------- 绑定 ----------------
-        path.addEventListener('input', () => { state.dir = path.value.trim(); });
+        path.addEventListener('input', () => { state.dir = path.value.trim(); showAdaptation(null); });
         path.addEventListener('keydown', (e) => {
           if (e.key === 'Enter' && state.dir) {
             if (state.busy) return;
@@ -900,6 +981,7 @@ export default {
           if (disposed) return;
           notice = initial.notice;
           version = initial.version;
+          showAdaptation(initial.scan?.adaptation);
           noticeDetails.open = !notice?.acknowledged;
           paintNotice();
           for (const line of initial.log ?? []) log.append(line, 'dim');

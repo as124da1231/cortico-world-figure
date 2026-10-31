@@ -5,17 +5,23 @@
   position: absolute; top: 14px; right: 18px; border-radius: 999px;
   border: 1px solid var(--line-2, #d0d2d0); padding: 5px 10px;
   background: var(--sheet, #fbfbfb); color: var(--ink-soft, #5c5c60);
-  font: 600 12px/1.2 ui-monospace, Consolas, monospace; cursor: pointer;
+  font: 400 12px/1.2 ui-monospace, Consolas, monospace;
 }
-.l2d-version-corner.unack { color: #cf222e; border-color: #cf222e; background: #fff0f0; }
+.l2d-version-corner.unack { background: #ffe2e2; cursor: pointer; }
+.l2d-version-corner.ack { background: #def3e6; }
 .l2d-notice { margin-bottom: 12px; font-size: 12px; line-height: 1.65; color: var(--ink-soft, #5c5c60); }
 .l2d-notice summary { cursor: pointer; }
 .l2d-notice[open] { padding: 10px 12px; border: 1px solid #ecdfba; border-radius: 10px; }
 .l2d-notice p { margin: 8px 0; }
 .l2d-notice .l2d-license { margin: 10px 0 0; }
 .l2d-notice > [hidden] { display: none; }
-/* Once acknowledged, the version button is the quiet entry point. */
-.l2d-notice:not([open]) { display: none; }
+.l2d-notice-top .l2d-notice:not([open]) { display: none; }
+.l2d-config-notice { margin: 16px 0 0; }
+.l2d-config-notice[hidden] { display: none; }
+.l2d-config-notice summary { width: fit-content; list-style: none; color: var(--ink-dim, #8b8b8f); font-weight: 400; }
+.l2d-config-notice summary::-webkit-details-marker { display: none; }
+.l2d-config-notice summary:hover { color: var(--ink-soft, #5c5c60); }
+.l2d-config-notice[open] { padding: 0; border: 0; }
 .l2d-btn:focus-visible, .l2d-version-corner:focus-visible, .l2d-notice summary:focus-visible {
   outline: 2px solid var(--accent, #00a870); outline-offset: 3px;
 }
@@ -219,3 +225,6 @@ textarea.l2d-input { height: auto; padding: 7px 10px; line-height: 1.5; resize: 
 @media (prefers-reduced-motion: reduce) {
   .l2d-spinner, .l2d-progress.on span, .l2d-card .shimmer { animation: none; }
 }
+.l2d-adaptation { margin: 6px 0; font-size: 11px; line-height: 1.6; color: var(--ink-dim, #777); overflow-wrap: anywhere; }
+.l2d-adaptation summary { cursor: pointer; color: #85611e; }
+.l2d-adaptation p { margin: 5px 0; }

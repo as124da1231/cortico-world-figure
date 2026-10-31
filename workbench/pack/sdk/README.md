@@ -11,7 +11,7 @@
   - 完整文本：本目录 `LICENSE-live2d-components.txt`
 
 使用、复制、分发这些文件时，必须同时遵守 Live2D Inc. 的许可。完整第三方说明见根目录 `NOTICE`。
-如果你要换成自己从 live2d.com 下载的 SDK，把其中的 `Core/live2dcubismcore.min.js` 覆盖到本地缓存即可。
+Core 的版本与完整性由扩展校验，不应以其他 SDK 文件直接覆盖缓存。
 
 ## 沙箱约束（Coo 侧）
 

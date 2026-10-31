@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-figure",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "type": "module",
-  "description": "把 Live2D 模型一键装进 Coo：扫描、打包、安装。 / Install a Live2D model into Coo: scan, pack, install.",
+  "description": "自动适配 Live2D 模型的通用动作与表情，生成封面并打包安装到 Coo。 / Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo.",
   "license": "AGPL-3.0-or-later",
   "author": "as124da1231",
   "repository": {
@@ -38,20 +38,21 @@
     "locales": {
       "zh": {
         "displayName": "Live2D 模型一键安装",
-        "description": "把 Live2D 模型一键装进 Coo：扫描、打包、安装。"
+        "description": "自动适配 Live2D 模型的通用动作与表情，生成封面并打包安装到 Coo。"
       },
       "en": {
         "displayName": "Live2D One-Click Install",
-        "description": "Install a Live2D model into Coo: scan, pack, install."
+        "description": "Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo."
       }
     },
-    "webUiClient": "dist/webui.js",
-    "webUiStyle": "dist/webui.css",
+    "webUiClient": "dist/webui-74b1a7e0d21d.js",
+    "webUiStyle": "dist/webui-e74ba7c0339e.css",
     "describe": "describe.json"
   },
   "files": [
     "src",
     "dist",
+    "scripts/build-webui.mjs",
     "assets",
     "workbench",
     "describe.json",
@@ -72,6 +73,8 @@
     "typescript": "^5.9.3"
   },
   "scripts": {
+    "build:ui": "node scripts/build-webui.mjs",
+    "prepack": "npm run build:ui",
     "test": "node --experimental-strip-types --test test/*.test.mjs",
     "check": "node --check dist/webui.js && tsc --noEmit -p tsconfig.check.json"
   }

@@ -17,12 +17,13 @@
  *     sdk/                   Cubism core + framework + 内联着色器（复制）
  *     models/index.js        注册表（模型 + 动作元数据）
  *     models/<id>/
- *       profile.js           ★ role 表 / 表情配方 / 取景（探测草稿 + TODO 注释）
+ *       profile.js           role 表 / 通用表情配方 / 取景 / 自动适配说明
  *       moc3.js              base64 模块
  *       model3.js  physics.js  cdi3.js
  *       motions/*.js         每段动作（含 partOpacity / owns / seconds）
- *       textures/*.png       复制后按 --max-texture 降采样（默认 2048）
+ *       textures/*.png       复制后按 --max-texture 可选降采样
  */
+import { inferRoles, ROLE_RULES } from './parameter-mapping.mjs';
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -57,7 +58,7 @@ const MAX_TEX = Math.max(0, Number(arg('max-texture', 2048)) || 0);
 /** 清理：打包时把水印 / 文字类部件和参数按作者给的“关掉”状态固定住。 */
 const CLEAN = flag('clean');
 /** 生成器配方版本：写进 build.json；工作台用它判断包是否过期 */
-const GENERATOR_VERSION = 'rt-2026-10-27.4';
+const GENERATOR_VERSION = 'rt-2026-10-31.mapping.1';
 /** 简易模式：只做 role + 通用配方，不产出/不引用任何原生 exp3 / motion / pose 绑定。 */
 const SIMPLE = true;
 
@@ -294,40 +295,19 @@ function partTargetsOf(json) {
 }
 
 // ---------------------------------------------------------------- role 探测
-const ROLE_RULES = [
-  ['eyeOpen', ['ParamEyeLOpen', 'ParamEyeROpen'], [0, 1], 1],
-  ['eyeSmile', ['ParamEyeLSmile', 'ParamEyeRSmile'], [0, 1], 0],
-  ['browY', ['ParamBrowLY', 'ParamBrowRY'], [-1, 1], 0],
-  ['browAngle', ['ParamBrowLAngle', 'ParamBrowRAngle'], [-1, 1], 0],
-  ['mouthOpen', ['ParamMouthOpenY', 'ParamMouthOpen'], [0, 1], 0],
-  ['mouthForm', ['ParamMouthForm'], [-1, 1], 0],
-  ['cheek', ['ParamCheek'], [0, 1], 0],
-  ['eyeBallX', ['ParamEyeBallX'], [-1, 1], 0],
-  ['eyeBallY', ['ParamEyeBallY'], [-1, 1], 0],
-  ['angleX', ['ParamAngleX'], [-1, 1], 0],
-  ['angleY', ['ParamAngleY'], [-1, 1], 0],
-  ['angleZ', ['ParamAngleZ'], [-1, 1], 0],
-  ['bodyX', ['ParamBodyAngleX'], [-1, 1], 0],
-  ['breath', ['ParamBreath'], [0, 1], 0],
-  ['step', ['ParamStep', 'ParamLeg'], [0, 1], 0],
-  ['armA', ['ParamArmLA', 'ParamArmRA', 'ParamArmLeftA', 'ParamArmRightA'], [-1, 1], 0],
-  ['armB', ['ParamArmLB', 'ParamArmRB', 'ParamArmLeftB', 'ParamArmRightB'], [-1, 1], 0],
-];
-
-const have = new Set(params);
-/** 参数 id 归一化：PARAM_ANGLE_X 和 ParamAngleX 视为同一个。 */
-const normId = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
-const normMap = new Map();
-for (const id of params) if (!normMap.has(normId(id))) normMap.set(normId(id), id);
-const roles = {};
-const unmapped = [];
-for (const [name, candidates, space, def] of ROLE_RULES) {
-  const targets = candidates
-    .map((c) => (have.has(c) ? c : normMap.get(normId(c))))
-    .filter(Boolean);
-  if (targets.length) roles[name] = { targets, space, default: def };
-  else if (candidates.some((c) => /^Param/i.test(c))) unmapped.push(name);
+const physics = physicsPath ? await readJson(physicsPath) : null;
+// Prefer the matching model's VTS config; do not merge unrelated models in the folder.
+const vtsNames = (await readdir(modelDir)).filter((n) => n.toLowerCase().endsWith('.vtube.json')).sort();
+const expectedVts = basename(model3Path).replace(/\.model3\.json$/i, '.vtube.json');
+const vtsName = vtsNames.find((n) => n.toLowerCase() === expectedVts.toLowerCase())
+  ?? (vtsNames.length === 1 ? vtsNames[0] : null);
+let vts = null;
+const mappingWarnings = [];
+if (vtsName) {
+  try { vts = await readJson(join(modelDir, vtsName)); }
+  catch { mappingWarnings.push('VTS 配置无法解析，使用模型参数与物理关系识别'); }
 }
+const { roles, unmapped, diagnostics: mappingDiagnostics } = inferRoles(display, physics, vts);
 
 /** 没映射上的「值得看一眼」的参数，写进 profile.js 的 TODO 注释。 */
 const mapped = new Set(Object.values(roles).flatMap((r) => r.targets));
@@ -489,6 +469,7 @@ for (const r of resources) {
 const sha = (buf) => createHash('sha1').update(buf).digest('hex');
 const hashParts = [`model3:${sha(JSON.stringify(model3))}`, `moc3:${sha(await readFile(mocPath))}`];
 if (physicsPath) hashParts.push(`physics:${sha(JSON.stringify(await readJson(physicsPath)))}`);
+if (vts) hashParts.push(`vts:${sha(JSON.stringify(vts.ParameterSettings ?? []))}`);
 if (cdiPath) hashParts.push(`cdi3:${sha(JSON.stringify(display))}`);
 if (posePath) hashParts.push(`pose:${sha(JSON.stringify(await readJson(posePath)))}`);
 for (const p of textures) hashParts.push(`tex:${basename(p)}:${sha(await readFile(p))}`);
@@ -524,6 +505,8 @@ const plan = {
   paramsList: params,
   roles: Object.keys(roles),
   roleTable: roles,
+  mappingDiagnostics,
+  mappingWarnings,
   unmapped,
   expressions: Object.keys(expressions),
   recipes: expressions,
@@ -638,7 +621,9 @@ for (const m of (SIMPLE ? [] : motions)) {
 }
 
 // 5) profile.js（草稿 + TODO）
-const todo = [];
+const todo = [...mappingWarnings];
+for (const d of mappingDiagnostics) if (d.kind === 'physics-output') todo.push(`${d.role}: ${d.target} 由物理计算控制，保留原映射，未猜测独立入口`);
+for (const d of mappingDiagnostics) if (d.kind === 'unverified-control') todo.push(`${d.role}: ${d.targets.join(', ')} 未确认连续语义，自动省略，保留其他通用表情通道`);
 if (unmapped.length) todo.push(`没映射上的 role：${unmapped.join(', ')}`);
 if (interesting.length) todo.push(`值得看一眼的参数：${interesting.join(', ')}`);
 if (!textures.length) todo.push('没有找到贴图（model3.json 的 FileReferences.Textures）');
@@ -649,16 +634,16 @@ if (!SIMPLE && expressionFiles.length && !Object.keys(nativeExpressions).length)
 }
 if (!SIMPLE && idleMotions.length) todo.push(`原生 Idle 动作 ${idleMotions.length} 段：运行时自动循环，不用写词`);
 if (!SIMPLE && posePath) todo.push('有 pose3：已随包加载，换装/手臂分组由它接管');
-todo.push('extent 由运行时实测（贴图就绪第 3 帧读 alpha 包围盒）；只有实测不准时才在 profile.extent 覆盖');
+todo.push('extent 由运行时自动测量（贴图就绪后读 alpha 包围盒）');
 
 const profileJs = `/**
  * ${id} 的模型数据（tools/convert.mjs 生成的草稿）。
  *
  * 格式与运行时约定见 README「数据驱动」一节：
  *   role = 语义位 → targets 是真实参数；模型没有的参数自动跳过
- *   space/default 是语义输入，真实取值范围从 moc3 读（不要写进这里）
+ *   space/default 是语义输入；真实范围从 moc3 读取，ranges 仅用于已确认输入的校准
  *
- * TODO（人工过一遍）：
+ * 自动适配记录（供调试查阅）：
 ${todo.length ? todo.map((t) => ` *   - ${t}`).join('\n') : ' *   - 无'}
  */
 export default {
@@ -725,7 +710,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js']) {
+for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js']) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);
@@ -864,7 +849,11 @@ await writeFile(join(OUT, 'build.json'), JSON.stringify({
   at: new Date().toISOString(),
   maxTexture: MAX_TEX,
   ...(textureShrink ? { textureShrink } : {}),
+  mappingDiagnostics,
+  mappingWarnings,
   resourceRoles: Object.fromEntries(resources.filter((r) => r.custom).map((r) => [r.file, r.cls])),
+  unmapped,
+  renderPolicy: 'adaptive',
 }, null, 2) + '\n', 'utf8');
 
 // ---------------------------------------------------------------- 报告
@@ -872,6 +861,6 @@ console.log(`模型 ${basename(modelDir)} → ${OUT}`);
 console.log(`  参数 ${params.length}  role 命中 ${Object.keys(roles).length}/${ROLE_RULES.length}  贴图 ${textureFiles.length}  动作 ${motions.length}`);
 console.log(`  原生：Idle ${idleMotions.length} 段  表情 ${expressionFiles.length} 个  pose3 ${posePath ? '有' : '无'}`);
 console.log(`  role: ${Object.keys(roles).join(', ') || '（无）'}`);
-if (todo.length) console.log('  TODO:\n' + todo.map((t) => '    - ' + t).join('\n'));
+if (todo.length) console.log('  适配说明:\n' + todo.map((t) => '    - ' + t).join('\n'));
 console.log(`  vocab: 表情 ${vocabExpressions.length} + 动作 ${vocabMotions.length}`);
-console.log('下一步：verify-pack 校验 → live2d-harness 出图看姿势 → 人工补 profile.js 的 TODO');
+console.log('已按通用规则完成适配；未确认的通道自动省略，其余通用动作与表情继续可用。');

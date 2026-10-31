@@ -10,7 +10,7 @@
  */
 import { existsSync } from 'node:fs';
 import {
-  cp, mkdir, readFile, readdir, rename, rm, stat, writeFile,
+  cp, mkdir, readFile, readdir, rename, rm, writeFile,
 } from 'node:fs/promises';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +18,7 @@ import type {
   World, WorldHost, WorldWebUiDecl, ToolDef, WorldStreamSocket,
 } from 'cortico/core/types.ts';
 import type { ConfigGroup } from 'cortico/core/config-schema.ts';
-import { buildPack, dirSize, editPack, installPack, scanModel, type ScanSummary } from './pipeline.ts';
+import { adaptationSummary, buildPack, dirSize, editPack, installPack, scanModel, type ScanSummary } from './pipeline.ts';
 import { PackImporter, filesFromBundle, filesFromZip } from './import.ts';
 import { captureCover } from './cover.ts';
 import {
@@ -164,6 +164,10 @@ export class Live2dWorld implements World {
   webUi(language?: string): WorldWebUiDecl {
     const zh = (language ?? 'zh').toLowerCase().startsWith('zh');
     const s = this.state;
+    // Hosts without footer support expose this as a normal notice tab.
+    const noticePanel = {
+      id: 'config-notice', title: zh ? '须知' : 'Notice', slot: 'config-footer',
+    };
     return {
       label: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
       badges: [
@@ -191,7 +195,7 @@ export class Live2dWorld implements World {
         id: 'workbench',
         title: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
         description: zh ? '选目录、扫描、打包、安装' : 'Pick, scan, build, install',
-      }],
+      }, noticePanel],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
       stream: (panel, socket) => {
         if (panel !== 'workbench') return;
@@ -216,6 +220,7 @@ export class Live2dWorld implements World {
   }
 
   private async dispatch(panel: string, method: string, args: unknown[]): Promise<unknown> {
+    if (panel === 'config-notice' && method === 'state') return { notice: this.noticePayload() };
     if (panel !== 'workbench') throw new Error(`未知面板：${panel}`);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();
 
@@ -563,6 +568,9 @@ export class Live2dWorld implements World {
       let packId = '';
       let nameZh = '';
       let nameEn = '';
+      let adaptation;
+      try { adaptation = adaptationSummary(JSON.parse(await readFile(join(b.packDir, 'build.json'), 'utf8'))); }
+      catch { /* older or imported packs may not include a build report */ }
       try {
         const m = JSON.parse(await readFile(join(b.packDir, 'figure.json'), 'utf8'));
         packId = typeof m.id === 'string' ? m.id : '';
@@ -572,6 +580,7 @@ export class Live2dWorld implements World {
       out.push({
         id: b.id, packId, nameZh, nameEn, bytes: b.bytes, words: b.words, cover: b.cover, fit: b.fit, at: b.at,
         exists: true, thumb,
+        adaptation,
       });
     }
     if (dropped) {
@@ -605,6 +614,7 @@ export class Live2dWorld implements World {
         title: s.scan.title, id: s.scan.id,
         params: s.scan.params, roles: s.scan.roles,
         unmapped: s.scan.unmapped ?? [],
+        adaptation: s.scan.adaptation,
       } : null,
       build: s.build ? {
         bytes: s.build.bytes, words: s.build.words, cover: s.build.cover, fit: s.build.fit,
@@ -756,14 +766,12 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           title: zh ? '打包时拍封面' : 'Capture a cover when packing',
           description: zh ? '关掉就不启动无头浏览器，也不量尺寸' : 'Off: skip headless render',
           'x-hot': true,
-          default: true,
         },
         'worlds.figure.texture': {
           type: 'string',
           title: zh ? '贴图精度' : 'Texture size',
           enum: ['original', '4096', '2048', '1024', '512'],
           'x-hot': true,
-          default: 'original',
           description: zh
             ? '打包时把贴图最长边缩到多少。original 是默认，原精度不缩放；往下选越小包越小、越省显存'
             : 'Longest texture edge when packing. original is the default; smaller sizes use less VRAM',
@@ -773,14 +781,12 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           title: zh ? '清理' : 'Clean',
           description: zh ? '隐藏水印 / 文字类部件，按作者提供的状态固定相关参数' : 'Hide watermark / text parts using author-provided parameter states',
           'x-hot': true,
-          default: false,
         },
         'worlds.figure.autoDelete': {
           type: 'boolean',
           title: zh ? '安装后删除打包产物' : 'Delete the pack after install',
           description: zh ? '装完只留 figures 那一份，省一半磁盘' : 'Keep only the installed copy',
           'x-hot': true,
-          default: false,
         },
         'worlds.figure.figuresDir': {
           type: 'string',

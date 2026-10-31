@@ -26,6 +26,8 @@ import {
   CubismUserModel,
 } from '../sdk/framework.js';
 import { SHADERS } from '../sdk/shaders.js';
+import { roleValue } from './role-values.js';
+import { createAdaptiveRenderer } from './render-config.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
@@ -164,11 +166,20 @@ export async function createLive2DBody(base, opts, entry, kit) {
     model.loadPose(bytes.buffer, bytes.length);
   }
 
-  model.createRenderer(canvas.width, canvas.height);
-  const renderer = model.getRenderer();
-  renderer.setClippingMaskBufferSize(512);
-  renderer.startUp(gl);
-  renderer.setIsPremultipliedAlpha(true);
+  // Complex models exceed the SDK's single-buffer limit (36 clipping groups).
+  // Overflow aliases masks onto one region, corrupting faces/eyes/clothing.
+  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height);
+  const { renderer, maskBuffers } = renderConfig;
+  let renderNotice = null;
+  if (renderConfig.warning) {
+    console.warn('[l2d]', renderConfig.warning);
+    renderNotice = doc.createElement('div');
+    renderNotice.setAttribute('role', 'status');
+    renderNotice.textContent = '兼容渲染 / Compatibility mode';
+    renderNotice.title = renderConfig.warning;
+    renderNotice.style.cssText = 'position:absolute;bottom:0;left:0;right:0;text-align:center;font:11px/1.5 sans-serif;color:#805500;background:#fff4d9dd;pointer-events:none';
+    host.root.appendChild(renderNotice);
+  }
 
   // 着色器内联
   const shader = CubismShaderManager_WebGL.getInstance().getShader(gl);
@@ -341,6 +352,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
         min: model._model.getParameterMinimumValue(index),
         max: model._model.getParameterMaximumValue(index),
         def: model._model.getParameterDefaultValue(index),
+        endpoints: r.ranges?.[target],
       });
     }
     if (!items.length) continue;
@@ -379,14 +391,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
   function writeRole(name, semantic) {
     const role = roles.get(name);
     if (!role) return;
-    const [lo, hi] = role.space;
-    const d = role.def;
-    const v = clamp(semantic, lo, hi);
     for (const it of role.items) {
-      const mv = v >= d
-        ? it.def + (hi === d ? 0 : ((v - d) / (hi - d)) * (it.max - it.def))
-        : it.def - (d === lo ? 0 : ((d - v) / (d - lo)) * (it.def - it.min));
-      model._model.setParameterValueById(it.handle, clamp(mv, it.min, it.max));
+      model._model.setParameterValueById(it.handle, roleValue(semantic, role.space, role.def, it, it.endpoints));
     }
   }
 
@@ -518,7 +524,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
     const gap = face.gap?.[0] ?? 50;
     const talk = neutralPose ? 0 : clamp(frame.talk ?? 0, 0, 1);
     const talkOpen = clamp((gap - 44) / 22 + talk * 0.35, 0, 1);
-    writeRole('mouthOpen', neutralPose ? 0 : clamp(Math.max(talkOpen, (engine?.mouthOpen ?? 0) * 0.85), 0, 1));
+    const expressionOpen = engine ? (engine.mouthOpen ?? 0) * 0.85 : (recipe?.mouthOpen ?? 0);
+    writeRole('mouthOpen', neutralPose ? 0 : clamp(Math.max(talkOpen, expressionOpen), 0, 1));
 
     // 5) 视线 + 头身跟随（表演层的待机动作叠在宿主跟随之上）
     const look = neutralPose ? [0, 0] : (Array.isArray(frame.look) ? frame.look : [0, 0]);
@@ -793,6 +800,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
       anchors: currentAnchors(),
       hits: currentHits(),
       roles: [...roles.keys()],
+      maskBuffers,
+      renderMode: renderConfig.mode,
+      renderWarning: renderConfig.warning,
       expressions: [...expressions.keys()],
       idle: idleIds,
       motion: profile.motion?.kind === 'stand' ? 'stand' : 'roam',
@@ -936,6 +946,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     },
 
     dispose() {
+      renderNotice?.remove();
       fo.remove();
       try { performance?.dispose(); } catch { /* 忽略 */ }
       try { model.release?.(); } catch { /* 忽略 */ }

@@ -40,6 +40,26 @@ export interface ScanSummary {
   unmapped: string[];
   expressions: number;
   textures: number;
+  adaptation?: AdaptationSummary;
+}
+
+export interface AdaptationSummary {
+  corrected: string[];
+  limited: string[];
+  warnings: string[];
+}
+
+/** Explain the existing automatic fallback without exposing parameter editing. */
+export function adaptationSummary(plan: { mappingDiagnostics?: unknown; mappingWarnings?: unknown; unmapped?: unknown }): AdaptationSummary {
+  const corrected = new Set<string>(); const limited = new Set<string>();
+  for (const d of Array.isArray(plan.mappingDiagnostics) ? plan.mappingDiagnostics : []) {
+    if (!d || typeof d.role !== 'string') continue;
+    if (d.kind === 'physics-input' || d.kind === 'semantic-alias') corrected.add(d.role);
+    if (d.kind === 'physics-output' || d.kind === 'unverified-control') limited.add(d.role);
+  }
+  for (const role of Array.isArray(plan.unmapped) ? plan.unmapped : []) if (typeof role === 'string') limited.add(role);
+  return { corrected: [...corrected], limited: [...limited],
+    warnings: (Array.isArray(plan.mappingWarnings) ? plan.mappingWarnings : []).filter((v): v is string => typeof v === 'string') };
 }
 
 /** `convert.mjs --json`：只读模型，不产出包。 */
@@ -57,6 +77,7 @@ export async function scanModel(workbenchDir: string, modelDir: string): Promise
     unmapped: Array.isArray(plan.unmapped) ? plan.unmapped : [],
     expressions: Array.isArray(plan.expressions) ? plan.expressions.length : 0,
     textures: Array.isArray(plan.textures) ? plan.textures.length : 0,
+    adaptation: adaptationSummary(plan),
   };
 }
 
