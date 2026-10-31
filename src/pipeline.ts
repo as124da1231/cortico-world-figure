@@ -2,10 +2,12 @@
  * 构建流水线：调工作台自带的 convert.mjs，不做任何渲染相关的增强。
  * 只依赖 Node + 文件系统，不需要浏览器、不需要 Coo 的 figure-frame。
  */
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, join, relative, resolve, sep } from 'node:path';
+import { childPath, packId } from './paths.ts';
 
 export interface RunResult {
   code: number;
@@ -26,7 +28,7 @@ export function runNode(args: string[], cwd: string): Promise<RunResult> {
     child.stdout?.on('data', (b: Buffer) => { out += b.toString(); });
     child.stderr?.on('data', (b: Buffer) => { err += b.toString(); });
     child.once('error', (e) => resolve({ code: -1, out, err: String(e?.message ?? e) }));
-    child.once('exit', (code) => resolve({ code: code ?? -1, out, err }));
+    child.once('close', (code) => resolve({ code: code ?? -1, out, err }));
   });
 }
 
@@ -67,7 +69,7 @@ export async function buildPack(
 ): Promise<string> {
   const builds = join(workDir, 'builds');
   await mkdir(builds, { recursive: true });
-  const out = join(builds, `${basename(modelDir).replace(/[^a-z0-9-]+/gi, '-').toLowerCase()}-${Date.now()}`);
+  const out = join(builds, `${basename(modelDir).replace(/[^a-z0-9-]+/gi, '-').toLowerCase()}-${Date.now()}-${randomUUID().slice(0, 8)}`);
   const args = [
     join(workbenchDir, 'tools', 'convert.mjs'),
     '--model', modelDir,
@@ -86,42 +88,70 @@ export async function buildPack(
   try {
     const r = await runNode(args, workbenchDir);
     if (r.code !== 0) throw new Error((r.err || r.out || '构建失败').trim().slice(0, 400));
+    if (!existsSync(join(out, 'figure.json'))) throw new Error('构建没有产出 figure.json');
+  } catch (e) {
+    await rm(out, { recursive: true, force: true });
+    throw e;
   } finally {
     if (overrideFile) await rm(overrideFile, { force: true }).catch(() => {});
   }
-  if (!existsSync(join(out, 'figure.json'))) throw new Error('构建没有产出 figure.json');
   return out;
 }
 
-/** 把一个构建目录装进 figures/：同名先备份，再删旧、复制。 */
+/** 先复制到同级临时目录，同名先备份，再交换目录；失败恢复旧安装。 */
 export async function installPack(
   packDir: string,
   figuresDir: string,
   opts: { backupRoot?: string; keep?: number } = {},
 ): Promise<string> {
   const manifest = JSON.parse(await readFile(join(packDir, 'figure.json'), 'utf8'));
-  const id = String(manifest.id ?? '').toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-  if (!id) throw new Error('figure.json 里没有可用的 id');
+  const id = packId(manifest.id);
+  const target = childPath(figuresDir, id);
+  const source = resolve(packDir);
+  const inside = (a: string, b: string): boolean => {
+    const rel = relative(a, b);
+    return !rel || (rel.split(sep)[0] !== '..' && !rel.includes(':'));
+  };
+  if (inside(source, target) || inside(target, source)) throw new Error('安装目录不能与打包目录重叠');
   await mkdir(figuresDir, { recursive: true });
-  const target = join(figuresDir, id);
-
-  if (existsSync(target) && opts.backupRoot) {
-    await mkdir(opts.backupRoot, { recursive: true });
-    const backup = join(opts.backupRoot, `${id}.bak-${Date.now()}`);
-    await cp(target, backup, { recursive: true });
-    const keep = Math.max(1, opts.keep ?? 2);
-    try {
-      const olds = (await readdir(opts.backupRoot))
-        .filter((n) => n.startsWith(`${id}.bak-`))
-        .sort();
-      for (const n of olds.slice(0, Math.max(0, olds.length - keep))) {
-        await rm(join(opts.backupRoot, n), { recursive: true, force: true });
+  const nonce = randomUUID();
+  const pending = childPath(figuresDir, `.${id}-install-${nonce}`);
+  const previous = childPath(figuresDir, `.${id}-previous-${nonce}`);
+  let moved = false;
+  try {
+    // Copy and verify before touching the installed figure.
+    await cp(source, pending, { recursive: true, dereference: false });
+    const copied = JSON.parse(await readFile(join(pending, 'figure.json'), 'utf8'));
+    if (copied.id !== id) throw new Error('复制后的形象包校验失败');
+    if (existsSync(target)) {
+      if ((await lstat(target)).isSymbolicLink()) throw new Error('安装目标不能是符号链接');
+      if (opts.backupRoot) {
+        const backup = childPath(opts.backupRoot, `${id}.bak-${Date.now()}-${nonce}`);
+        if (inside(target, resolve(opts.backupRoot))) throw new Error('备份目录不能位于安装目标内部');
+        await mkdir(opts.backupRoot, { recursive: true });
+        await cp(target, backup, { recursive: true });
       }
-    } catch { /* 清理失败不影响安装 */ }
+      await rename(target, previous);
+      moved = true;
+    }
+    try {
+      await rename(pending, target);
+    } catch (e) {
+      if (moved) { await rename(previous, target); moved = false; }
+      throw e;
+    }
+  } finally {
+    await rm(pending, { recursive: true, force: true }).catch(() => {});
   }
-
-  await rm(target, { recursive: true, force: true });
-  await cp(packDir, target, { recursive: true });
+  if (moved) await rm(previous, { recursive: true, force: true }).catch(() => {});
+  if (opts.backupRoot) {
+    const keep = Math.max(1, opts.keep ?? 2);
+    const olds = (await readdir(opts.backupRoot).catch(() => []))
+      .filter((n) => n.startsWith(`${id}.bak-`)).sort();
+    for (const n of olds.slice(0, Math.max(0, olds.length - keep))) {
+      await rm(childPath(opts.backupRoot, n), { recursive: true, force: true }).catch(() => {});
+    }
+  }
   return target;
 }
 
@@ -139,18 +169,29 @@ export interface PackEdit {
  * 不重新打包，秒级生效。
  */
 export async function editPack(packDir: string, patch: PackEdit): Promise<void> {
+  for (const key of ['nameZh', 'nameEn', 'aboutZh', 'aboutEn'] as const) {
+    const value = patch[key];
+    if (value !== undefined && (typeof value !== 'string' || (key.startsWith('name') ? /[\u0000-\u001f]/ : /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/).test(value) || value.length > (key.startsWith('name') ? 120 : 1000))) {
+      throw new Error('名字或一句话包含无效字符，或内容过长');
+    }
+    if (key.startsWith('name') && value !== undefined && !value.trim()) throw new Error('名字不能为空');
+  }
+  if (patch.bodyGain !== undefined && (!Number.isFinite(patch.bodyGain) || patch.bodyGain < 0.5 || patch.bodyGain > 3)) throw new Error('身体幅度应为 0.5–3');
+  if (patch.style !== undefined && !['natural', 'lively', 'calm', 'shy'].includes(patch.style)) throw new Error('动作风格无效');
   const file = join(packDir, 'figure.json');
-  const manifest = JSON.parse(await readFile(file, 'utf8'));
+  const original = await readFile(file, 'utf8');
+  const manifest = JSON.parse(original);
+  const writes: Array<{ file: string; before: string; after: string }> = [];
 
   if (patch.nameZh || patch.nameEn) {
     manifest.name = { ...(manifest.name ?? {}) };
     if (patch.nameZh) manifest.name.zh = patch.nameZh;
     if (patch.nameEn) manifest.name.en = patch.nameEn;
   }
-  if (patch.aboutZh || patch.aboutEn) {
+  if (patch.aboutZh !== undefined || patch.aboutEn !== undefined) {
     manifest.about = { ...(manifest.about ?? {}) };
-    if (patch.aboutZh) manifest.about.zh = patch.aboutZh;
-    if (patch.aboutEn) manifest.about.en = patch.aboutEn;
+    if (patch.aboutZh !== undefined) manifest.about.zh = patch.aboutZh;
+    if (patch.aboutEn !== undefined) manifest.about.en = patch.aboutEn;
   }
   const opt = Array.isArray(manifest.axes) ? manifest.axes[0]?.options?.[0] : null;
   if (opt && (patch.nameZh || patch.nameEn)) {
@@ -158,22 +199,35 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
     if (patch.nameZh) opt.name.zh = patch.nameZh;
     if (patch.nameEn) opt.name.en = patch.nameEn;
   }
-  await writeFile(file, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  writes.push({ file, before: original, after: JSON.stringify(manifest, null, 2) + '\n' });
 
   if (Number.isFinite(patch.bodyGain) || patch.style) {
     const models = join(packDir, 'models');
     for (const dir of await readdir(models)) {
       const prof = join(models, dir, 'profile.js');
       if (!existsSync(prof)) continue;
-      let s = await readFile(prof, 'utf8');
+      const before = await readFile(prof, 'utf8');
+      let s = before;
       if (Number.isFinite(patch.bodyGain)) {
         s = s.replace(/"bodyGain":\s*[-\d.]+/g, `"bodyGain": ${patch.bodyGain}`);
       }
       if (patch.style) {
         s = s.replace(/"style":\s*"[^"]*"/g, `"style": "${patch.style}"`);
       }
-      await writeFile(prof, s, 'utf8');
+      writes.push({ file: prof, before, after: s });
     }
+  }
+  const applied: typeof writes = [];
+  const atomicWrite = async (file: string, data: string) => {
+    const tmp = `${file}.edit-${randomUUID()}`;
+    try { await writeFile(tmp, data, 'utf8'); await rename(tmp, file); }
+    finally { await rm(tmp, { force: true }).catch(() => {}); }
+  };
+  try {
+    for (const edit of writes) { await atomicWrite(edit.file, edit.after); applied.push(edit); }
+  } catch (e) {
+    for (const edit of applied.reverse()) await atomicWrite(edit.file, edit.before);
+    throw e;
   }
 }
 

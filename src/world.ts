@@ -10,7 +10,7 @@
  */
 import { existsSync } from 'node:fs';
 import {
-  cp, mkdir, readFile, readdir, rm, stat, writeFile,
+  cp, mkdir, readFile, readdir, rename, rm, stat, writeFile,
 } from 'node:fs/promises';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +28,9 @@ import {
 
 const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url));
 const WORKBENCH_DIR = join(PACKAGE_DIR, 'workbench');
+const VERSION = JSON.parse(await readFile(join(PACKAGE_DIR, 'package.json'), 'utf8')).version as string;
+// Bump only when the notice changes, independently of the package version.
+const NOTICE_REVISION = 1;
 
 export interface Live2dSection {
   enabled: boolean;
@@ -70,11 +73,12 @@ interface Persisted {
   modelDir: string;
   scan?: ScanSummary & { at: number };
   build?: BuildState;
-  /** 历史打包，最新在前，最多 20 份。 */
+  /** 历史打包，最新在前，手动清理前保留。 */
   builds?: BuildRecord[];
-  install?: { target: string; at: number };
+  install?: { target: string; at: number; buildId?: string };
   /** 用户同意 Live2D 许可、并取到核心组件的时间。 */
   coreConsentAt?: number;
+  distributionNotice?: { revision: number; at: number };
 }
 
 const IDLE: StepState = { phase: 'idle', hint: '未执行' };
@@ -90,6 +94,9 @@ export class Live2dWorld implements World {
   private steps = { scan: { ...IDLE }, build: { ...IDLE }, install: { ...IDLE } };
   private log: string[] = [];
   private busy = false;
+  private activeAction: Promise<unknown> | null = null;
+  private stopping = false;
+  private saveQueue: Promise<void> = Promise.resolve();
   private streams = new Set<WorldStreamSocket>();
   /** 核心组件是否就绪（start 时探一次，取到后更新）。 */
   private coreReady = false;
@@ -109,6 +116,7 @@ export class Live2dWorld implements World {
   }
 
   async start(_host: WorldHost): Promise<void> {
+    this.stopping = false;
     const saved = await this.readState();
     if (saved) {
       this.state = saved;
@@ -130,6 +138,9 @@ export class Live2dWorld implements World {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
+    await this.activeAction?.catch(() => {});
+    await this.saveQueue.catch(() => {});
     this.streams.clear();
     await this.importer.cancel();
   }
@@ -156,6 +167,7 @@ export class Live2dWorld implements World {
     return {
       label: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
       badges: [
+        { label: zh ? '版本' : 'Version', value: `v${VERSION}`, tone: 'plain' },
         { label: zh ? '模型' : 'Model', value: s.scan ? `${s.scan.params}/${s.scan.roles}` : '—', tone: s.scan ? 'on' : 'plain' },
         { label: zh ? '包' : 'Pack', value: s.build ? `${(s.build.bytes / 1048576).toFixed(1)}M` : '—', tone: s.build ? 'on' : 'plain' },
         ...(s.build?.words ? [{ label: zh ? '词' : 'Words', value: s.build.words, tone: 'plain' as const }] : []),
@@ -192,11 +204,31 @@ export class Live2dWorld implements World {
   }
 
   private async invoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
+    const readOnly = ['state', 'list', 'license', 'core', 'detail'].includes(method);
+    if (this.stopping) throw new Error('扩展正在停止');
+    if (readOnly) return this.dispatch(panel, method, args);
+    if (this.busy) throw new Error('上一个动作还没结束');
+    this.busy = true;
+    const action = this.dispatch(panel, method, args);
+    this.activeAction = action;
+    try { return await action; }
+    finally { this.busy = false; this.activeAction = null; }
+  }
+
+  private async dispatch(panel: string, method: string, args: unknown[]): Promise<unknown> {
     if (panel !== 'workbench') throw new Error(`未知面板：${panel}`);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();
 
     if (method === 'state') {
       return { ...this.snapshot(), log: this.log.slice(-20) };
+    }
+
+    if (method === 'noticeAccept') {
+      if (args[0] !== NOTICE_REVISION) throw new Error('须知已更新，请重新阅读');
+      const previous = this.state.distributionNotice;
+      this.state.distributionNotice = { revision: NOTICE_REVISION, at: Date.now() };
+      try { await this.save(); } catch (e) { this.state.distributionNotice = previous; throw e; }
+      return this.noticePayload();
     }
 
     if (method === 'setDir') {
@@ -222,10 +254,11 @@ export class Live2dWorld implements World {
       };
     }
     if (method === 'clearAll') {
+      await this.listBuilds();
       const list = this.state.builds ?? [];
       const keep = list.slice(0, 1);
       const drop = list.slice(1);
-      for (const b of drop) await rm(b.packDir, { recursive: true, force: true }).catch(() => {});
+      for (const b of drop) await rm(b.packDir, { recursive: true, force: true });
       this.state.builds = keep;
       if (this.state.build && !keep.some((b) => b.packDir === this.state.build!.packDir)) {
         delete this.state.build;
@@ -246,45 +279,32 @@ export class Live2dWorld implements World {
     }
     if (method === 'coreAccept') {
       if (args[0] !== true) throw new Error('需要先同意 Live2D 许可');
-      if (this.busy) throw new Error('上一个动作还没结束');
-      this.busy = true;
-      try {
-        this.say('获取 Live2D 核心组件…');
-        await ensureCore(this.coreDir(), (line) => this.say(line));
-        this.state.coreConsentAt = Date.now();
-        this.coreReady = true;
-        await this.save();
-        return this.corePayload();
-      } finally {
-        this.busy = false;
-      }
+      this.say('获取 Live2D 核心组件…');
+      await ensureCore(this.coreDir(), (line) => this.say(line));
+      this.state.coreConsentAt = Date.now();
+      this.coreReady = true;
+      await this.save();
+      return this.corePayload();
     }
     if (method === 'importStage') {
-      if (this.busy) throw new Error('上一个动作还没结束');
       const b64 = String(args[0] ?? '');
       const kind = String(args[1] ?? 'zip') === 'folder' ? 'folder' : 'zip';
       if (!b64) throw new Error('没有收到文件');
       const bytes = Buffer.from(b64, 'base64');
       const files = kind === 'folder' ? filesFromBundle(bytes) : filesFromZip(bytes);
       if (typeof files === 'string') throw new Error(files);
-      this.busy = true;
-      try {
-        const installed = await this.installedVersions();
-        const r = await this.importer.stage(files, kind === 'folder', installed);
-        if ('error' in r) throw new Error(r.error);
-        this.say(`读到 ${r.packs.length} 个模型包`);
-        return r;
-      } finally {
-        this.busy = false;
-      }
+      const installed = await this.installedVersions();
+      const r = await this.importer.stage(files, kind === 'folder', installed);
+      if ('error' in r) throw new Error(r.error);
+      this.say(`读到 ${r.packs.length} 个模型包`);
+      return r;
     }
     if (method === 'importInstall') {
-      if (this.busy) throw new Error('上一个动作还没结束');
+      this.requireNotice();
       const token = String(args[0] ?? '');
       const dirs = Array.isArray(args[1]) ? (args[1] as unknown[]).map(String) : [];
       const replace = Array.isArray(args[2]) ? (args[2] as unknown[]).map(String) : [];
       const figures = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
-      this.busy = true;
       this.steps.install = { phase: 'loading', hint: '导入安装中…' };
       try {
         const r = await this.importer.install(token, dirs, replace, {
@@ -293,7 +313,7 @@ export class Live2dWorld implements World {
           keep: 2,
         });
         if ('error' in r) throw new Error(r.error);
-        if ('conflicts' in r) return { conflicts: r.conflicts };
+        if ('conflicts' in r) { this.steps.install = { ...IDLE, hint: '同名形象需要确认替换' }; return { conflicts: r.conflicts }; }
         const last = r.installed[r.installed.length - 1];
         this.state.install = { target: last.target, at: Date.now() };
         this.steps.install = { phase: 'done', hint: last.target, at: Date.now() };
@@ -304,8 +324,6 @@ export class Live2dWorld implements World {
         this.steps.install = { phase: 'error', hint: errText(e) };
         this.say(`导入失败 · ${errText(e)}`);
         throw e;
-      } finally {
-        this.busy = false;
       }
     }
     if (method === 'importCancel') {
@@ -313,7 +331,6 @@ export class Live2dWorld implements World {
       return { ok: true };
     }
     if (method === 'importBuild') {
-      if (this.busy) throw new Error('上一个动作还没结束');
       const token = String(args[0] ?? '');
       const dir = String(args[1] ?? '');
       const full = this.importer.resolve(token, dir);
@@ -326,7 +343,6 @@ export class Live2dWorld implements World {
       return { ...built, buildId, installed, state: this.snapshot() };
     }
     if (method === 'importBegin') {
-      if (this.busy) throw new Error('上一个动作还没结束');
       const token = await this.importer.beginUpload();
       return { token };
     }
@@ -342,23 +358,17 @@ export class Live2dWorld implements World {
       return r;
     }
     if (method === 'importFinish') {
-      if (this.busy) throw new Error('上一个动作还没结束');
       const token = String(args[0] ?? '');
       const fromFolders = Boolean(args[1]);
-      this.busy = true;
-      try {
-        const installed = await this.installedVersions();
-        const r = await this.importer.finishUpload(token, fromFolders, installed);
-        if ('error' in r) throw new Error(r.error);
-        this.say(`读到 ${r.models.length + r.packs.length} 个模型 / 模型包`);
-        return r;
-      } finally {
-        this.busy = false;
-      }
+      const installed = await this.installedVersions();
+      const r = await this.importer.finishUpload(token, fromFolders, installed);
+      if ('error' in r) throw new Error(r.error);
+      this.say(`读到 ${r.models.length + r.packs.length} 个模型 / 模型包`);
+      return r;
     }
     if (method === 'detail') {
       const id = String(args[0] ?? '');
-      const rec = (this.state.builds ?? []).find((b) => b.id === id) ?? this.state.build;
+      const rec = (this.state.builds ?? []).find((b) => b.id === id);
       if (!rec || !existsSync(rec.packDir)) throw new Error('没有这份打包产物');
       const m = JSON.parse(await readFile(join(rec.packDir, 'figure.json'), 'utf8'));
       let bodyGain = 1.8;
@@ -382,9 +392,10 @@ export class Live2dWorld implements World {
         bodyGain, style,
       };
     }
-    if (method === 'edit') {      const id = String(args[0] ?? '');
+    if (method === 'edit') {
+      const id = String(args[0] ?? '');
       const patch = (args[1] ?? {}) as Record<string, unknown>;
-      const rec = (this.state.builds ?? []).find((b) => b.id === id) ?? this.state.build;
+      const rec = (this.state.builds ?? []).find((b) => b.id === id);
       if (!rec || !existsSync(rec.packDir)) throw new Error('没有这份打包产物');
       await editPack(rec.packDir, patch as never);
       this.say(`改名 / 调参 · ${id}`);
@@ -399,14 +410,11 @@ export class Live2dWorld implements World {
       await this.removeBuild(String(args[0] ?? ''));
       return { state: this.snapshot(), builds: await this.listBuilds() };
     }
-    if (method === 'detail') return this.buildDetail(String(args[0] ?? ''));
-    if (method === 'edit') return this.editBuild(String(args[0] ?? ''), (args[1] ?? {}) as Record<string, unknown>);
     throw new Error(`未知方法：${panel}.${method}`);
   }
 
   private async doScan(dir: string): Promise<unknown> {
     this.guard(dir);
-    this.busy = true;
     this.steps.scan = { phase: 'loading', hint: '扫描中…' };
     this.say(`扫描 ${dir}`);
     try {
@@ -427,18 +435,15 @@ export class Live2dWorld implements World {
       this.steps.scan = { phase: 'error', hint: errText(e) };
       this.say(`扫描失败 · ${errText(e)}`);
       throw e;
-    } finally {
-      this.busy = false;
     }
   }
 
   private async doBuild(dir: string, opts: { remember?: boolean } = {}): Promise<unknown> {
     this.guard(dir);
-    if (this.busy) throw new Error('上一个动作还没结束');
+    this.requireNotice();
     // Core 不随包分发：没下载/没校验过就不打包，别产出跑不起来的形象包
     const core = await coreState(this.coreDir());
     if (!core.ok) throw new Error('缺少 Live2D 核心组件：先在面板上方同意许可并获取');
-    this.busy = true;
     const logs: string[] = [];
     const push = (line: string) => { logs.push(line); this.say(line); };
     try {
@@ -495,7 +500,7 @@ export class Live2dWorld implements World {
         packDir: finalDir, bytes, words,
         cover: shot.ok, fit: Boolean(shot.fit), at: Date.now(),
       };
-      this.state.builds = [rec, ...(this.state.builds ?? [])].slice(0, 20);
+      this.state.builds = [rec, ...(this.state.builds ?? [])];
       this.state.build = {
         packDir: finalDir, bytes, words, cover: shot.ok, fit: Boolean(shot.fit), at: Date.now(),
       };
@@ -506,19 +511,15 @@ export class Live2dWorld implements World {
       this.steps.build = { phase: 'error', hint: errText(e) };
       push(`打包失败 · ${errText(e)}`);
       throw e;
-    } finally {
-      this.busy = false;
     }
   }
 
   private async doInstall(dir: string, buildId?: string): Promise<unknown> {
-    this.guard(dir);
-    if (this.busy) throw new Error('上一个动作还没结束');
+    this.requireNotice();
     const chosen = buildId
       ? (this.state.builds ?? []).find((b) => b.id === buildId)
       : this.state.build;
     if (!chosen || !existsSync(chosen.packDir)) throw new Error('先打包，再安装');
-    this.busy = true;
     this.steps.install = { phase: 'loading', hint: '安装中…' };
     try {
       const figures = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
@@ -527,12 +528,14 @@ export class Live2dWorld implements World {
         keep: 2,
       });
       this.steps.install = { phase: 'done', hint: target, at: Date.now() };
-      this.state.install = { target, at: Date.now() };
+      this.state.install = { target, at: Date.now(), buildId };
       // 装完就删掉这份打包产物（开关打开时）
       if (this.opts.getConfig().autoDelete) {
         const rec = (this.state.builds ?? []).find((b) => b.packDir === chosen.packDir);
-        if (rec) await this.removeBuild(rec.id, { quiet: true });
-        this.say('已按开关删除打包产物');
+        if (rec) {
+          try { await this.removeBuild(rec.id, { quiet: true }); this.say('已按开关删除打包产物'); }
+          catch (e) { this.say(`! 安装已完成，清理打包产物失败：${errText(e)}`); }
+        }
       }
       await this.save();
       this.say(`安装完成 · ${target}`);
@@ -541,8 +544,6 @@ export class Live2dWorld implements World {
       this.steps.install = { phase: 'error', hint: errText(e) };
       this.say(`安装失败 · ${errText(e)}`);
       throw e;
-    } finally {
-      this.busy = false;
     }
   }
 
@@ -559,15 +560,17 @@ export class Live2dWorld implements World {
         const png = await readFile(join(b.packDir, 'thumb', 'opt-model.png'));
         thumb = 'data:image/png;base64,' + png.toString('base64');
       } catch { /* 没封面就不给图 */ }
+      let packId = '';
       let nameZh = '';
       let nameEn = '';
       try {
         const m = JSON.parse(await readFile(join(b.packDir, 'figure.json'), 'utf8'));
+        packId = typeof m.id === 'string' ? m.id : '';
         nameZh = typeof m.name?.zh === 'string' ? m.name.zh : '';
         nameEn = typeof m.name?.en === 'string' ? m.name.en : '';
       } catch { /* 读不到就用 id */ }
       out.push({
-        id: b.id, nameZh, nameEn, bytes: b.bytes, words: b.words, cover: b.cover, fit: b.fit, at: b.at,
+        id: b.id, packId, nameZh, nameEn, bytes: b.bytes, words: b.words, cover: b.cover, fit: b.fit, at: b.at,
         exists: true, thumb,
       });
     }
@@ -576,7 +579,7 @@ export class Live2dWorld implements World {
       if (this.state.build && !alive.some((b) => b.packDir === this.state.build!.packDir)) {
         delete this.state.build;
       }
-      await this.save().catch(() => {});
+      await this.save();
     }
     return out;
   }
@@ -585,10 +588,11 @@ export class Live2dWorld implements World {
     const list = this.state.builds ?? [];
     const idx = list.findIndex((b) => b.id === id);
     if (idx < 0) throw new Error('没有这份打包产物');
-    const [rec] = list.splice(idx, 1);
+    const rec = list[idx];
+    await rm(rec.packDir, { recursive: true, force: true });
+    list.splice(idx, 1);
     this.state.builds = list;
     if (this.state.build?.packDir === rec.packDir) delete this.state.build;
-    await rm(rec.packDir, { recursive: true, force: true }).catch(() => {});
     if (!opts.quiet) this.say(`删除打包产物 · ${id}`);
     await this.save();
   }
@@ -609,6 +613,9 @@ export class Live2dWorld implements World {
       builds: (s.builds ?? []).map((b) => ({ id: b.id, bytes: b.bytes, at: b.at })),
       autoDelete: Boolean(this.opts.getConfig().autoDelete),
       coreReady: this.coreReady,
+      version: VERSION,
+      notice: this.noticePayload(),
+      busy: this.busy,
       steps: {
         scan: this.steps.scan, build: this.steps.build, install: this.steps.install,
       },
@@ -637,11 +644,21 @@ export class Live2dWorld implements World {
     return join(this.workRoot(), 'sdk');
   }
 
+  private noticePayload(): { revision: number; acknowledged: boolean } {
+    return { revision: NOTICE_REVISION, acknowledged: this.state.distributionNotice?.revision === NOTICE_REVISION };
+  }
+
+  private requireNotice(): void {
+    if (!this.noticePayload().acknowledged) throw new Error('请先阅读并确认面板右上角的形象包分发须知');
+  }
+
   /** 面板要的核心状态：文件是否就绪、版本、官方地址、同意时间。 */
   private async corePayload(): Promise<Record<string, unknown>> {
     const state = await coreState(this.coreDir());
     return {
       ...state,
+      notice: this.noticePayload(),
+      versionLabel: VERSION,
       file: CORE_FILE,
       version: CORE_VERSION,
       urls: CORE_URLS,
@@ -657,14 +674,23 @@ export class Live2dWorld implements World {
   private async readState(): Promise<Persisted | null> {
     try {
       return JSON.parse(await readFile(this.stateFile(), 'utf8')) as Persisted;
-    } catch {
-      return null;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw new Error(`读取形象状态失败：${errText(e)}`);
     }
   }
 
   private async save(): Promise<void> {
-    await mkdir(dirname(this.stateFile()), { recursive: true }).catch(() => {});
-    await writeFile(this.stateFile(), JSON.stringify(this.state, null, 2), 'utf8').catch(() => {});
+    const data = JSON.stringify(this.state, null, 2);
+    const file = this.stateFile();
+    const task = this.saveQueue.catch(() => {}).then(async () => {
+      await mkdir(dirname(file), { recursive: true });
+      const tmp = `${file}.tmp`;
+      try { await writeFile(tmp, data, 'utf8'); await rename(tmp, file); }
+      finally { await rm(tmp, { force: true }).catch(() => {}); }
+    });
+    this.saveQueue = task;
+    await task;
   }
 
   private hydrate(): void {
@@ -740,11 +766,12 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           default: 'original',
           description: zh
             ? '打包时把贴图最长边缩到多少。original 是默认，原精度不缩放；往下选越小包越小、越省显存'
-            : 'Longest texture edge when packing. 2048 is the default; smaller packs less VRAM; original keeps it untouched',
+            : 'Longest texture edge when packing. original is the default; smaller sizes use less VRAM',
         },
         'worlds.figure.clean': {
           type: 'boolean',
           title: zh ? '清理' : 'Clean',
+          description: zh ? '隐藏水印 / 文字类部件，按作者提供的状态固定相关参数' : 'Hide watermark / text parts using author-provided parameter states',
           'x-hot': true,
           default: false,
         },

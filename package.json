@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-figure",
-  "version": "1.4.1",
+  "version": "1.4.3",
   "type": "module",
   "description": "把 Live2D 模型一键装进 Coo：扫描、打包、安装。 / Install a Live2D model into Coo: scan, pack, install.",
   "license": "AGPL-3.0-or-later",
@@ -33,7 +33,6 @@
     "displayName": "Live2D 模型一键安装",
     "icon": "assets/icon.svg",
     "tags": [
-      "apps",
       "experimental"
     ],
     "locales": {
@@ -66,5 +65,14 @@
   },
   "exports": {
     ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "check": "node --check dist/webui.js && tsc --noEmit -p tsconfig.check.json"
   }
 }

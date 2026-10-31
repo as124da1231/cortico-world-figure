@@ -1,4 +1,24 @@
 /* 形象工坊 面板 */
+.l2d-sheet { position: relative; }
+.l2d-sheet > h3 { padding-right: 75px; }
+.l2d-version-corner {
+  position: absolute; top: 14px; right: 18px; border-radius: 999px;
+  border: 1px solid var(--line-2, #d0d2d0); padding: 5px 10px;
+  background: var(--sheet, #fbfbfb); color: var(--ink-soft, #5c5c60);
+  font: 600 12px/1.2 ui-monospace, Consolas, monospace; cursor: pointer;
+}
+.l2d-version-corner.unack { color: #cf222e; border-color: #cf222e; background: #fff0f0; }
+.l2d-notice { margin-bottom: 12px; font-size: 12px; line-height: 1.65; color: var(--ink-soft, #5c5c60); }
+.l2d-notice summary { cursor: pointer; }
+.l2d-notice[open] { padding: 10px 12px; border: 1px solid #ecdfba; border-radius: 10px; }
+.l2d-notice p { margin: 8px 0; }
+.l2d-notice .l2d-license { margin: 10px 0 0; }
+.l2d-notice > [hidden] { display: none; }
+/* Once acknowledged, the version button is the quiet entry point. */
+.l2d-notice:not([open]) { display: none; }
+.l2d-btn:focus-visible, .l2d-version-corner:focus-visible, .l2d-notice summary:focus-visible {
+  outline: 2px solid var(--accent, #00a870); outline-offset: 3px;
+}
 
 /* 首次打开的许可条 */
 .l2d-license {
@@ -188,3 +208,14 @@ textarea.l2d-input { height: auto; padding: 7px 10px; line-height: 1.5; resize: 
 .l2d-packrow-tag { font-size: 11px; color: #9a6b16; }
 .l2d-packrow .l2d-btn { min-width: 64px; }
 .l2d-modal-card.drop { outline: 2px dashed var(--accent, #00a870); outline-offset: -6px; }
+@media (max-width: 480px) {
+  .l2d-modal { padding: 12px; }
+  .l2d-modal-card { padding: 14px; max-height: calc(100dvh - 24px); }
+  .l2d-modal-head { flex-wrap: wrap; }
+  .l2d-path { min-width: 0; flex-basis: calc(100% - 90px); }
+  .l2d-target { max-width: 100%; }
+  .l2d-grid { grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .l2d-spinner, .l2d-progress.on span, .l2d-card .shimmer { animation: none; }
+}

@@ -1,3 +1,5 @@
+import { childPath, packId } from './paths.ts';
+import { installPack } from './pipeline.ts';
 /**
  * 导入现成的形象包：一个 zip，或者一个（拖入 / 选中的）文件夹。
  *
@@ -6,7 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
 import { unzipSync } from 'fflate';
@@ -61,9 +63,7 @@ export interface StageResult {
 
 /** 路径拆成段；空、绝对路径、越界的一律不要。 */
 function segments(path: string): string[] | null {
-  const parts = path.split(/[\\/]/).filter((p) => p !== '' && p !== '.');
-  if (!parts.length || /^[a-z]:/i.test(path) || path.startsWith('/') || path.startsWith('\\')) return null;
-  return parts.some((p) => p === '..' || /[<>:"|?*\u0000-\u001f]/.test(p)) ? null : parts;
+  try { childPath('.', path); return path.split(/[\\/]/); } catch { return null; }
 }
 
 /** zip 里的文件（目录跳过）；返回字符串表示读不了。 */
@@ -146,7 +146,7 @@ async function thumbOf(dir: string, file: unknown): Promise<string | null> {
   const type = IMAGE[extname(file).toLowerCase()];
   if (!type) return null;
   try {
-    const full = join(dir, file);
+    const full = childPath(dir, file);
     if ((await stat(full)).size > THUMB_MAX) return null;
     return `data:${type};base64,${(await readFile(full)).toString('base64')}`;
   } catch {
@@ -159,7 +159,7 @@ async function thumbOf(dir: string, file: unknown): Promise<string | null> {
  * 同名先备份（与打包产物安装走同一套 backups 目录）。
  */
 export class PackImporter {
-  private staged: { token: string; root: string } | null = null;
+  private staged: { token: string; root: string; packs: Set<string> } | null = null;
   private uploads = new Map<string, { root: string; bytes: number }>();
 
   /** 摊开文件、读包；`installed` 用来标出哪些已经装过（只用于显示）。 */
@@ -179,6 +179,7 @@ export class PackImporter {
 
   /** 文件夹分批上传：先要一个临时目录，再一块块写，最后扫描。 */
   async beginUpload(): Promise<string> {
+    await this.cancel();
     const root = await mkdtemp(join(tmpdir(), 'figure-upload-'));
     const token = randomUUID();
     this.uploads.set(token, { root, bytes: 0 });
@@ -191,10 +192,10 @@ export class PackImporter {
     if (!up) return { error: '这次上传已经过期，重新选一次' };
     for (const f of files) {
       up.bytes += f.bytes.length;
-      if (up.bytes > UPLOAD_MAX) return { error: `内容太大：超过 ${UPLOAD_MAX / 1048576} MB` };
+      if (up.bytes > UPLOAD_MAX) { await this.cancel(); return { error: `内容太大：超过 ${UPLOAD_MAX / 1048576} MB` }; }
     }
     const written = await this.materialize(up.root, files);
-    if (typeof written === 'string') return { error: written };
+    if (typeof written === 'string') { await this.cancel(); return { error: written }; }
     return { files: files.length };
   }
 
@@ -236,9 +237,9 @@ export class PackImporter {
           problems.push({ dir, reason: `figure.json 读不了：${(err as Error).message}` });
           continue;
         }
-        const id = String(manifest.id ?? '').trim();
-        if (!id) { problems.push({ dir, reason: 'figure.json 里没有 id' }); continue; }
-        if (packs.some((p) => p.id === id)) { problems.push({ dir, reason: `同一个包里有两个 ${id}` }); continue; }
+        let id: string;
+        try { id = packId(manifest.id); } catch (e) { problems.push({ dir, reason: (e as Error).message }); continue; }
+        if (packs.some((p) => p.id.toLowerCase() === id.toLowerCase())) { problems.push({ dir, reason: `同一个包里有两个 ${id}` }); continue; }
         const name = (manifest.name ?? {}) as { zh?: unknown; en?: unknown };
         packs.push({
           dir,
@@ -277,7 +278,7 @@ export class PackImporter {
         await mkdir(sub, { recursive: true });
         for (const e of await readdir(root, { withFileTypes: true })) {
           if (e.name === title) continue;
-          await rename(join(root, e.name), join(sub, e.name)).catch(() => {});
+          await rename(join(root, e.name), join(sub, e.name));
         }
         models[0].dir = title;
       }
@@ -287,7 +288,7 @@ export class PackImporter {
         return { token: '', packs: [], models: [], problems };
       }
       const token = randomUUID();
-      this.staged = { token, root };
+      this.staged = { token, root, packs: new Set(packs.map((p) => p.dir)) };
       return { token, packs, models, problems };
     } catch (err) {
       await rm(root, { recursive: true, force: true });
@@ -307,12 +308,13 @@ export class PackImporter {
     if (!dirs.length) return { error: '没有选中要装的包' };
 
     const chosen: Array<{ dir: string; id: string }> = [];
-    for (const dir of dirs) {
-      const full = join(staged.root, ...dir.split('/').filter(Boolean));
+    for (const dir of new Set(dirs)) {
+      if (!staged.packs.has(dir)) return { error: '挑中的目录不在待装清单中' };
+      const full = dir ? childPath(staged.root, dir) : staged.root;
       let id = '';
       try {
         const m = JSON.parse(await readFile(join(full, 'figure.json'), 'utf8'));
-        id = String(m.id ?? '').trim();
+        id = packId(m.id);
       } catch { /* 目录里已经没有 figure.json */ }
       if (id) chosen.push({ dir, id });
     }
@@ -321,31 +323,15 @@ export class PackImporter {
     const conflicts = chosen.filter((c) => existsSync(join(opts.figuresDir, c.id))).map((c) => c.id);
     if (conflicts.some((id) => !replace.includes(id))) return { conflicts };
 
-    // 先用掉 token，避免并发重复安装
-    this.staged = null;
-    try {
-      await mkdir(opts.figuresDir, { recursive: true });
-      const out: Array<{ id: string; target: string }> = [];
-      for (const c of chosen) {
-        const source = join(staged.root, ...c.dir.split('/').filter(Boolean));
-        const target = join(opts.figuresDir, c.id);
-        if (existsSync(target) && opts.backupRoot) {
-          await mkdir(opts.backupRoot, { recursive: true });
-          await cp(target, join(opts.backupRoot, `${c.id}.bak-${Date.now()}`), { recursive: true });
-          const keep = Math.max(1, opts.keep ?? 2);
-          const olds = (await readdir(opts.backupRoot)).filter((n) => n.startsWith(`${c.id}.bak-`)).sort();
-          for (const n of olds.slice(0, Math.max(0, olds.length - keep))) {
-            await rm(join(opts.backupRoot, n), { recursive: true, force: true });
-          }
-        }
-        await rm(target, { recursive: true, force: true });
-        await cp(source, target, { recursive: true });
-        out.push({ id: c.id, target });
-      }
-      return { installed: out };
-    } finally {
-      await rm(staged.root, { recursive: true, force: true });
+    const out: Array<{ id: string; target: string }> = [];
+    for (const c of chosen) {
+      const source = c.dir ? childPath(staged.root, c.dir) : staged.root;
+      const target = await installPack(source, opts.figuresDir, opts);
+      out.push({ id: c.id, target });
     }
+    // Keep the staged files on failure so users can retry.
+    await this.cancel();
+    return { installed: out };
   }
 
   async cancel(): Promise<void> {

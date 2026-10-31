@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "NodeNext", "strict": true,
+    "noEmit": true, "allowImportingTsExtensions": true, "skipLibCheck": true,
+    "noUnusedLocals": true
+  },
+  "files": ["src/core.ts", "src/cover.ts", "src/import.ts", "src/paths.ts", "src/pipeline.ts"]
+}

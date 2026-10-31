@@ -73,7 +73,7 @@ export async function coreState(dir: string): Promise<CoreState> {
       file,
     };
   } catch (e) {
-    return { ...base, present: true, note: String((e as Error)?.message ?? e).slice(0, 200) };
+    return { ...base, ok: false, present: true, note: String((e as Error)?.message ?? e).slice(0, 200) };
   }
 }
 
@@ -91,7 +91,12 @@ function fetchOnce(url: string, redirects = 4): Promise<Buffer> {
       }
       if (code !== 200) { res.resume(); reject(new Error(`HTTP ${code}`)); return; }
       const chunks: Buffer[] = [];
-      res.on('data', (c: Buffer) => chunks.push(c));
+      let bytes = 0;
+      res.on('data', (c: Buffer) => {
+        bytes += c.length;
+        if (bytes > CORE_BYTES) { req.destroy(new Error('核心下载超过预期大小')); return; }
+        chunks.push(c);
+      });
       res.on('end', () => resolve(Buffer.concat(chunks)));
       res.on('error', reject);
     });

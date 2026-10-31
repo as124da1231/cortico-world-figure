@@ -105,10 +105,17 @@ export async function captureCover(
   const done = new Promise<CoverResult>((resolve) => { resolveResult = resolve; });
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', 'http://x');
+    let url: URL;
+    try { url = new URL(req.url ?? '/', 'http://x'); decodeURIComponent(url.pathname); }
+    catch { res.writeHead(400).end(); return; }
     if (req.method === 'POST' && url.pathname === '/__cover') {
       let raw = '';
-      for await (const c of req) raw += c;
+      try {
+        for await (const c of req) {
+          raw += c;
+          if (raw.length > 4 * 1048576) { res.writeHead(413).end(); resolveResult({ ok: false, error: '封面数据过大' }); return; }
+        }
+      } catch { resolveResult({ ok: false, error: '封面上传中断' }); return; }
       res.writeHead(200).end('ok');
       try {
         const body = JSON.parse(raw);
@@ -153,33 +160,42 @@ export async function captureCover(
     }
   });
 
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const port = (server.address() as { port: number }).port;
   const url = `http://127.0.0.1:${port}/`;
 
-  const profile = await mkdtemp(join(tmpdir(), 'l2d-cover-'));
-  const child = spawn(browser, [
-    '--headless=new',
-    '--disable-gpu',
-    '--enable-unsafe-swiftshader',
-    '--hide-scrollbars',
-    '--mute-audio',
-    '--no-first-run',
-    '--window-size=640,640',
-    '--virtual-time-budget=30000',
-    '--user-data-dir=' + profile,
-    url,
-  ], { windowsHide: true, stdio: 'ignore' });
+  let profile = '';
+  let child: ReturnType<typeof spawn> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    profile = await mkdtemp(join(tmpdir(), 'l2d-cover-'));
+    child = spawn(browser, [
+      '--headless=new',
+      '--disable-gpu',
+      '--enable-unsafe-swiftshader',
+      '--hide-scrollbars',
+      '--mute-audio',
+      '--no-first-run',
+      '--window-size=640,640',
+      '--virtual-time-budget=30000',
+      '--user-data-dir=' + profile,
+      url,
+    ], { windowsHide: true, stdio: 'ignore' });
 
-  const timeout = new Promise<CoverResult>((resolve) => {
-    setTimeout(() => resolve({ ok: false, error: '封面超时' }), timeoutMs).unref?.();
-  });
-  const result = await Promise.race([done, timeout]);
-
-  try { child.kill(); } catch { /* ignore */ }
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  await rm(profile, { recursive: true, force: true }).catch(() => {});
-  return result;
+    child.once('error', (e) => resolveResult({ ok: false, error: `启动浏览器失败：${e.message}` }));
+    const timeout = new Promise<CoverResult>((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, error: '封面超时' }), timeoutMs).unref?.();
+    });
+    return await Promise.race([done, timeout]);
+  } catch (e) {
+    return { ok: false, error: `启动浏览器失败：${(e as Error).message}` };
+  } finally {
+    clearTimeout(timer);
+    try { child?.kill(); } catch { /* already exited */ }
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (profile) await rm(profile, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /** PNG data URL → Buffer，顺带校验头。 */
@@ -187,6 +203,6 @@ function pngOf(raw: unknown): Buffer {
   const m = /^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/.exec(String(raw ?? ''));
   if (!m) throw new Error('封面不是 PNG data URL');
   const buf = Buffer.from(m[1].replace(/\s+/g, ''), 'base64');
-  if (buf.length < 8 || buf[0] !== 0x89 || buf[1] !== 0x50) throw new Error('封面不是有效 PNG');
+  if (buf.length < 8 || !buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('封面不是有效 PNG');
   return buf;
 }

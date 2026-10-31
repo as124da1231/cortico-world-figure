@@ -2,13 +2,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LIVE2D } from '../src/index.ts';
-import { MODEL, makeCtx, needModel } from './_ctx.mjs';
+import { MODEL, makeCtx, needModel, prepareWorld } from './_ctx.mjs';
 
 const dir = needModel();
 const tmp = await mkdtemp(join(tmpdir(), 'figure-panel-'));
 const cfg = { enabled: true, modelDir: '', figuresDir: join(tmp, 'figures'), workDir: join(tmp, 'figure') };
 const world = LIVE2D.create(makeCtx(tmp, cfg));
-await world.start({});
+await prepareWorld(world, cfg.workDir);
 const { invoke } = world.webUi('zh');
 
 const show = (tag, r) => {

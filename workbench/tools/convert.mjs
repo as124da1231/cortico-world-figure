@@ -27,7 +27,7 @@ import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/pro
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, dirname, extname, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -111,7 +111,9 @@ const OUT = resolve(arg('out', join(HERE, '..', 'build', id)));
 
 // ---------------------------------------------------------------- 模型资产
 const resolveAsset = (p) => {
-  const direct = join(modelDir, p);
+  if (typeof p !== 'string' || isAbsolute(p) || p.split(/[\\/]/).includes('..')) return null;
+  const direct = resolve(modelDir, p);
+  if (relative(modelDir, direct).startsWith('..')) return null;
   if (existsSync(direct)) return direct;
   const flat = join(modelDir, basename(p));
   return existsSync(flat) ? flat : null;
@@ -795,7 +797,8 @@ The files in this pack come from three sources, each under its own license.
      Live2D Proprietary Software License
      完整文本：sdk/LICENSE-live2d-core.txt
    Copyright (C) Live2D Inc.
-   Core 属于该许可第 5 条的 Redistributable Code，原样分发，未做修改。
+   本包含 Live2D Cubism Core，仅供本机使用，请勿上传、分享或再次分发。
+   Contains Live2D Cubism Core. Use locally; do not upload, share or redistribute this pack.
 
 3. vendor/soullink/
    SoulLink Emotion Engine 0.2.0-beta.1

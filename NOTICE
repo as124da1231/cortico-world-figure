@@ -14,3 +14,6 @@ Live2D Cubism Core（live2dcubismcore.min.js）**不随本包分发**：首次�
 同意 Live2D 许可后，从 Live2D Inc. 的官方托管地址获取并校验 SHA-256，存到本地缓存。
 
 本包作为 Coo 扩展分发时，同样适用以上边界；pack/sdk 下的 Live2D 文件不属于 AGPL。
+
+使用本功能生成的形象包包含 Live2D Cubism Core；请仅在本机使用，不要上传、分享或再次分发。
+Generated figure packs contain Live2D Cubism Core. Use locally; do not upload, share or redistribute them.
