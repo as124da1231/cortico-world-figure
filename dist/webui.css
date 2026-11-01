@@ -95,13 +95,20 @@
 .l2d-setting-row .l2d-input{width:45%;max-width:340px}
 .l2d-folder-control{display:flex;align-items:center;gap:8px;width:45%;max-width:340px;min-width:0;flex:none}
 .l2d-folder-control .l2d-input{flex:1;width:0;min-width:0}
-.l2d-config-page{max-width:960px;margin:0 auto;padding:12px 0 24px}
+.l2d-config-page{max-width:960px;margin:0 auto;padding:12px 0 24px;font-family:var(--sans,"Segoe UI","Microsoft YaHei",sans-serif);font-size:15px;line-height:1.6;color:var(--ink,#1b1a1e)}
+.l2d-config-page .l2d-settings{font-family:inherit;font-size:15px;line-height:1.6}
+.l2d-config-page .l2d-setting-label{font-size:15px;font-weight:400}
+.l2d-config-page .l2d-setting-label small{font-size:13px;line-height:1.6}
+.l2d-config-page .l2d-settings-heading{font-size:16px;line-height:1.5;font-weight:600}
+.l2d-config-page .l2d-input,.l2d-config-page .l2d-btn{font-size:14px}
+.l2d-config-page .l2d-gear-value{font-size:14px;line-height:20px}
+.l2d-config-page .l2d-settings-status,.l2d-config-page .l2d-notice-entry{font-size:12px}
 .l2d-config-header{display:flex;align-items:center;gap:20px;margin-bottom:12px}
-.l2d-config-header h2{flex:1;margin:0;font-size:18px;font-weight:600}
+.l2d-config-header h2{flex:1;margin:0;font-size:20px;line-height:1.4;font-weight:600}
 .l2d-config-header .l2d-version-corner{position:static;font-size:11px;font-weight:400;color:var(--ink-dim,#8b8b8f)}
 .l2d-settings-status{font-size:11px;color:var(--ink-dim,#8b8b8f)}
 .l2d-settings button[hidden]{display:none}
-.l2d-config-notice{font-size:11px;color:var(--ink-dim,#8b8b8f);margin-top:16px;line-height:1.65}
+.l2d-config-notice{font-size:12px;color:var(--ink-dim,#8b8b8f);margin-top:16px;line-height:1.65}
 .l2d-config-notice summary{cursor:pointer}
 .l2d-gear{display:flex;flex-direction:column;gap:9px;width:45%;max-width:300px;flex:none;min-width:0;--gear-color:#397ff5}
 .l2d-gear-value{color:var(--gear-color);font-size:12px;line-height:18px;text-align:center;font-weight:500}

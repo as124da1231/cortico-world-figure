@@ -46,7 +46,7 @@
       }
     },
     "webUiClient": "dist/webui-841f45778d48.js",
-    "webUiStyle": "dist/webui-8cef6912e26c.css",
+    "webUiStyle": "dist/webui-b546a2fc2f4c.css",
     "describe": "describe.json"
   },
   "files": [
