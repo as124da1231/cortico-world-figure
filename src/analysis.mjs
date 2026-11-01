@@ -1,8 +1,9 @@
+import {aiEnabled} from './adaptation.mjs';
 import {createHash} from 'node:crypto';
 
 export const configuredDepth=cfg=>['quick','standard','deep'].includes(cfg.assistDepth)?cfg.assistDepth:'standard';
 export function analysisPolicy(cfg) {
- const active=cfg.assistMotions===true&&cfg.assistGear==='image';
+ const active=aiEnabled(cfg)&&cfg.assistGear==='image';
  const depth=active?configuredDepth(cfg):null;
  return {depth,configuredDepth:configuredDepth(cfg),active,
   pageSize:depth==='deep'?8:12,parameters:depth==='deep'?8:6,

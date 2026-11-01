@@ -1,3 +1,4 @@
+import {aiEnabled,adaptationMode} from './adaptation.mjs';
 import {randomUUID} from 'node:crypto';
 import {mkdir,readFile,rename,writeFile} from 'node:fs/promises';
 import {dirname,isAbsolute,join} from 'node:path';
@@ -17,8 +18,8 @@ export const FIGURE_TOOL_DECLS=[
 ];
 export const FIGURE_EVENTS=[{type:'figure.imported',description:{zh:'用户导入了模型，等待 Coo 分析动作并提出安装方案。',en:'The person imported models for action analysis and an installation proposal.'},trigger:'debounce'},{type:'figure.installed',description:{zh:'用户在面板确认的形象已安装，Coo 可继续说明或按请求换装。',en:'A panel-approved figure was installed; Coo can explain the result or dress in it as requested.'},trigger:'debounce'}];
 export const FIGURE_SUMMARIES={figure_models:{zh:'识别本机目录中的模型',en:'Find models in local folders'},figure_actions:{zh:'识别原生动作与表情',en:'Inspect native animations and expressions'},figure_prepare:{zh:'生成可确认的动作适配方案',en:'Prepare an action mapping proposal'},figure_install:{zh:'按确认方案打包安装',en:'Pack and install an approved proposal'}};
-const enabled=cfg=>cfg.assistMotions===true;
-export const automationMode=cfg=>({enabled:enabled(cfg),gear:['auto','text','image'].includes(cfg.assistGear)?cfg.assistGear:'auto',automatic:cfg.assistAuto===true,configuredDepth:configuredDepth(cfg),depth:analysisPolicy(cfg).depth});
+const enabled=aiEnabled;
+export const automationMode=cfg=>({enabled:enabled(cfg),adaptationMode:adaptationMode(cfg),gear:['auto','text','image'].includes(cfg.assistGear)?cfg.assistGear:'auto',automatic:cfg.assistAuto===true,configuredDepth:configuredDepth(cfg),depth:analysisPolicy(cfg).depth});
 
 /** The host owns AI calls and speech. This class supplies bounded data and verified execution. */
 export class FigureAutomation{

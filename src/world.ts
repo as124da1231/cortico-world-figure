@@ -24,6 +24,10 @@ import { PackImporter, filesFromBundle, filesFromZip, thumbOf } from './import.t
 import { captureCover } from './cover.ts';
 import { readClipboardPaths } from './clipboard.ts';
 import { FigureAutomation, automationMode } from './automation.mjs';
+import {adaptationMode,aiEnabled} from './adaptation.mjs';
+import {ManualSessions,LIBRARY,writeNativePack} from './manual.ts';
+import {findModels,inspectNative,nativeConfig} from '../workbench/tools/native-catalog.mjs';
+import {packFingerprint} from './pack-fingerprint.ts';
 import { qualityPolicy } from '../workbench/pack/backends/render-quality.js';
 import {
   CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
@@ -49,6 +53,7 @@ export interface Live2dSection {
   texture?: string;
   quality?: string;
   clean?: boolean;
+  adaptationMode?: string;
   assistMotions?: boolean;
   assistGear?: string;
   assistDepth?: string;
@@ -76,6 +81,7 @@ interface BuildState {
 /** 一份打包产物（列表里的卡片）。 */
 interface BuildRecord extends BuildState {
   id: string;
+  manualAvailable?: boolean;
 }
 
 interface AutomationModel { id: string; kind: 'pack' | 'live2d'; title: string; dir: string; file: string }
@@ -116,9 +122,11 @@ export class Live2dWorld implements World {
   private importer = new PackImporter();
   private host: WorldHost | null = null;
   private automation: FigureAutomation;
+  private manual: ManualSessions;
 
   constructor(opts: Live2dWorld['opts']) {
     this.opts = opts;
+    this.manual = new ManualSessions(this.workRoot(),WORKBENCH_DIR);
     this.automation = new FigureAutomation({
       getConfig: () => this.opts.getConfig(), getHost: () => this.host, dataDir: opts.dataDir,
       recentRoots: () => { const dir = this.state.modelDir || this.opts.getConfig().modelDir; return dir ? [dir] : []; },
@@ -165,6 +173,7 @@ export class Live2dWorld implements World {
     this.stopping = true;
     await this.activeAction?.catch(() => {});
     await this.automation.stop();
+    await this.manual.stop();
     await this.saveQueue.catch(() => {});
     this.streams.clear();
     await this.importer.cancel();
@@ -231,7 +240,7 @@ export class Live2dWorld implements World {
   }
 
   private async invoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState'].includes(method);
+    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState', 'manualAsset'].includes(method);
     if (this.stopping) throw new Error('扩展正在停止');
     if (readOnly) return this.dispatch(panel, method, args);
     if (panel === 'workbench' && method === 'assistApprove') {
@@ -260,8 +269,12 @@ export class Live2dWorld implements World {
       const cfg = this.opts.getConfig();
       return { cover: cfg.cover !== false, texture: cfg.texture || 'original', quality: qualityPolicy(cfg).mode, clean: Boolean(cfg.clean),
         autoDelete: Boolean(cfg.autoDelete), figuresDir: cfg.figuresDir || '',
-        assistMotions: cfg.assistMotions === true, assistGear: automationMode(cfg).gear, assistDepth: automationMode(cfg).configuredDepth, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
+        adaptationMode: adaptationMode(cfg), assistMotions: aiEnabled(cfg), assistGear: automationMode(cfg).gear, assistDepth: automationMode(cfg).configuredDepth, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
     }
+    if (method === 'manualAsset') return this.manual.asset(String(args[0]),String(args[1]),Number(args[2]||0));
+    if (method === 'manualClose') { await this.manual.close(String(args[0])); return {ok:true}; }
+    if (method === 'manualOpen' || method === 'manualOpenBuild') return this.openManual(method,args);
+    if (method === 'manualSave') return this.saveManual(String(args[0]),args[1] as any[]);
     if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() };
     if (method === 'assistReject') return this.automation.reject(String(args[0] || ''));
     if (method === 'assistAnalyze') {
@@ -513,7 +526,7 @@ export class Live2dWorld implements World {
     }
   }
 
-  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; modelFile?: string; signal?: AbortSignal } = {}): Promise<unknown> {
+  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; modelFile?: string; fingerprint?: string; signal?: AbortSignal } = {}): Promise<unknown> {
     opts.signal?.throwIfAborted();
     this.guard(dir);
     this.requireNotice();
@@ -570,6 +583,9 @@ export class Live2dWorld implements World {
       }
 
       opts.signal?.throwIfAborted();
+      const found = await findModels(opts.modelFile ? join(dir,opts.modelFile) : dir);
+      const model = found.models.find((m:any)=>m.kind==='live2d');
+      if(model){const catalog=await inspectNative(model);if(opts.fingerprint && catalog.fingerprint!==opts.fingerprint)throw Error('模型素材已变化，请重新打开编辑');await writeFile(join(finalDir,LIBRARY),JSON.stringify({version:1,catalog,bindings:(opts.native as any)?.bindings||[]}));}
       const bytes = await dirSize(finalDir);
       const manifest = JSON.parse(await readFile(join(finalDir, 'figure.json'), 'utf8'));
       const words = Array.isArray(manifest.vocab) ? manifest.vocab.length : 0;
@@ -587,6 +603,7 @@ export class Live2dWorld implements World {
       if (opts.remember !== false) this.state.modelDir = dir;
       const rec: BuildRecord = {
         id: `${manifest.id || 'pack'}-${Date.now()}`,
+        manualAvailable: Boolean(model),
         packDir: finalDir, bytes, words,
         cover: shot.ok, fit: Boolean(shot.fit), at: Date.now(),
       };
@@ -653,13 +670,61 @@ export class Live2dWorld implements World {
     }
   }
 
+  private async openManual(method:string,args:unknown[]) {
+    this.requireNotice();
+    if(method==='manualOpenBuild'){
+      const rec=this.state.builds?.find(b=>b.id===String(args[0]));
+      if(!rec?.manualAvailable)throw Error('请重新导入模型以编辑原生动作');
+      const library=JSON.parse(await readFile(join(rec.packDir,LIBRARY),'utf8'));
+      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id);
+    }
+    const token=String(args[0]),dir=String(args[1]);
+    const paths=await this.importer.preserveForAutomation(token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
+    const source=paths.get(dir),file=this.importer.modelFile(token,dir);
+    if(!source||!file)throw Error('这次导入已过期，请重新选择模型');
+    const found=await findModels(join(source,file)),model=found.models.find((m:any)=>m.kind==='live2d');
+    if(!model)throw Error('没有找到 Live2D 模型');
+    const catalog=await inspectNative(model),core=await coreState(this.coreDir());
+    if(!core.ok)throw Error('请先获取 Live2D 核心组件');
+    const scratch=join(this.workRoot(),'manual-input-'+randomUUID());
+    try{
+      const render=qualityPolicy(this.opts.getConfig());
+      const pack=await buildPack(WORKBENCH_DIR,source,scratch,{corePath:core.file,modelFile:file,render,maxTexture:render.textureLimit,native:nativeConfig(catalog,[],{includeAll:true})});
+      const result=await this.manual.open(pack,catalog,[],model);
+      this.manual.get(result.token).ownedRoot=scratch;return result;
+    }catch(e){await rm(scratch,{recursive:true,force:true});throw e;}
+  }
+
+  private async saveManual(token:string,values:any[]) {
+    this.requireNotice();const {session,bindings}=await this.manual.validate(token,values);
+    if(session.source){
+      const current=await inspectNative(session.source);
+      if(current.fingerprint!==session.catalog.fingerprint)throw Error('模型素材已变化，请重新打开编辑');
+      const result=await this.doBuild(session.source.dir,{remember:false,modelFile:session.source.file,native:nativeConfig(current,bindings),fingerprint:current.fingerprint});
+      await this.manual.close(token);return result;
+    }
+    const parent=join(this.workRoot(),'builds','manual-'+randomUUID()),target=join(parent,'pack');
+    try{
+      await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
+      for(const file of ['live2d.js','native-actions.js','render-config.js','render-quality.js','role-values.js','soullink.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
+      await writeNativePack(target,session.catalog,bindings);
+      if(await packFingerprint(session.pack)!==session.hash)throw Error('形象包已变化，请重新打开编辑');
+      const old=this.state.builds?.find(b=>b.id===session.buildId);if(!old)throw Error('原打包产物已移除');
+      const rec={...old,id:'manual-'+randomUUID(),packDir:target,bytes:await dirSize(target),words:JSON.parse(await readFile(join(target,'figure.json'),'utf8')).vocab.length,at:Date.now()};
+      const previous={build:this.state.build,builds:this.state.builds};
+      this.state.builds=[rec,...this.state.builds||[]];this.state.build=rec;
+      try{await this.save();}catch(e){Object.assign(this.state,previous);throw e;}
+      await this.manual.close(token);return {state:this.snapshot(),buildId:rec.id};
+    }catch(e){await rm(parent,{recursive:true,force:true});throw e;}
+  }
+
   private async notifyImported(result: any): Promise<void> {
     try { const notified = await this.queueAnalysis(result); if(notified?.queued&&'count' in notified)this.say(`已交给 Coo 分析 · ${notified.count} 个模型`); }
     catch (error) { this.say(`! 导入成功，AI 分析通知未送达：${errText(error)}`); }
   }
 
   private async queueAnalysis(result: {token:string;models?:Array<{dir:string}>;packs?:Array<{dir:string}>},repeat=false) {
-    if(this.opts.getConfig().assistMotions!==true||!result.token)return {queued:false};
+    if(!aiEnabled(this.opts.getConfig())||!result.token)return {queued:false};
     const paths=await this.importer.preserveForAutomation(result.token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
     return this.automation.imported(result,(_token:string,dir:string)=>{
       const source=paths.get(dir),file=this.importer.modelFile(result.token,dir);
@@ -695,7 +760,7 @@ export class Live2dWorld implements World {
   private executeAutomation(model: AutomationModel, native: NativeConfig, signal?: AbortSignal, fingerprint?: string) {
     return this.exclusive(async () => {
       this.requireNotice(); signal?.throwIfAborted();
-      if (this.opts.getConfig().assistMotions !== true) throw new Error('AI 自动适配已关闭');
+      if (!aiEnabled(this.opts.getConfig())) throw new Error('AI 自动适配已关闭');
       if (model.kind === 'pack') {
         const figures=await resolveFigures(this.opts.getConfig(),this.opts.dataDir);
         const target = await installPack(model.dir, figures, {backupRoot:join(dirname(figures),'figure-backups'),keep:2,signal,expectedFingerprint:fingerprint});
@@ -707,7 +772,7 @@ export class Live2dWorld implements World {
       }
       await this.doBuild(model.dir, {native,modelFile:model.file,remember:false,signal});
       signal?.throwIfAborted();
-      if (this.opts.getConfig().assistMotions !== true) throw new Error('AI 自动适配已关闭，打包产物保留，尚未安装');
+      if (!aiEnabled(this.opts.getConfig())) throw new Error('AI 自动适配已关闭，打包产物保留，尚未安装');
       const record = this.state.builds?.[0];
       if (!record) throw new Error('打包未产出可安装模型');
       const manifest = JSON.parse(await readFile(join(record.packDir,'figure.json'),'utf8'));
@@ -741,7 +806,7 @@ export class Live2dWorld implements World {
       out.push({
         id: b.id, packId, nameZh, nameEn, bytes: b.bytes, words: b.words, cover: b.cover, fit: b.fit, at: b.at,
         exists: true, thumb,
-        adaptation,
+        adaptation, manualAvailable: b.manualAvailable === true && existsSync(join(b.packDir,LIBRARY)),
       });
     }
     if (dropped) {
@@ -959,10 +1024,11 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           'x-hot': true,
           'x-path': { kind: 'directory' },
         },
+        'worlds.figure.adaptationMode': {type:'string',enum:['','none','manual','ai'],title:zh?'适配方式':'Adaptation mode',description:zh?'通用配方、人工绑定或 AI 分析':'Generic recipes, manual bindings or AI analysis','x-hot':true},
         'worlds.figure.assistMotions': {type:'boolean',title:zh?'AI 自动适配':'AI action mapping',description:zh?'让 Coo 分析原生动作、生成方案并协助安装':'Let Coo inspect native actions, prepare a proposal and install it','x-hot':true},
         'worlds.figure.assistGear': {type:'string',enum:['auto','text','image'],title:zh?'分析方式':'Analysis mode','x-hot':true},
         'worlds.figure.assistDepth': {type:'string',enum:['quick','standard','deep'],title:zh?'适配深度':'Adaptation depth',description:zh?'仅文本＋图片时生效：基础取样、针对性补查或映射对照复核':'Only active with text + images: basic sampling, targeted inspection or mapping comparison','x-hot':true},
-        'worlds.figure.assistAuto': {type:'boolean',title:zh?'全自动执行':'Automatic execution',description:zh?'高置信度方案直接安装；不确定动作保留通用表现':'Install confident mappings directly; keep generic behavior for uncertain actions','x-hot':true},
+        'worlds.figure.assistAuto': {type:'boolean',title:zh?'自动安装':'Automatic installation',description:zh?'满足安装条件后自动执行；需要确认时暂停':'Install confident mappings directly; keep generic behavior for uncertain actions','x-hot':true},
         'worlds.figure.modelRoots': {type:'string',title:zh?'模型搜索目录':'Model search folders',description:zh?'每行一个目录，仅在这些目录和最近使用的模型目录内按名字查找':'One folder per line; name searches stay within these and recent model folders','x-hot':true},
       },
     },

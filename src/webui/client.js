@@ -22,6 +22,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
     return n;
   };
   const body = el('form', 'l2d-settings l2d-dialog-body');
+  cfg={...cfg,adaptationMode:cfg.adaptationMode || (cfg.assistMotions ? 'ai' : 'none')};
   const dirty = {};
   const controls = [];
   const fields = new Map();
@@ -49,7 +50,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
       input = el('input', 'l2d-gear-input');
       input.type = 'range'; input.min = '0'; input.max = String(choices.length - 1); input.step = '1';
       const initial = choices.findIndex(([v]) => v === cfg[key]);
-      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : 'auto')) : initial);
+      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : key === 'adaptationMode' ? 'none' : 'auto')) : initial);
       readValue = () => choices[Number(input.value)][0];
       paint = () => {
         const index = Number(input.value), title = choices[index][1];
@@ -110,21 +111,21 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
     });
     controls.push(browse);
   }
-  body.append(el('h3','l2d-settings-heading',t('AI 动作适配','AI action mapping')));
-  const enabled = field('assistMotions',t('交给 Coo 适配','Let Coo adapt actions'),t('导入后自动提交，确认动作方案再安装','Submit imports automatically; approve mappings before installation'),'checkbox');
+  body.append(el('h3','l2d-settings-heading',t('动作适配','Action mapping')));
+  const mode = field('adaptationMode',t('适配方式','Adaptation mode'),t('无：仅通用配方；人工：预览并绑定；AI：交给 Coo 分析','None: generic recipes; Manual: preview and bind; AI: let Coo analyze'),'gear',[['none',t('无','None')],['manual',t('人工','Manual')],['ai','AI']]);
   const gear = field('assistGear',t('分析方式','Analysis mode'),t('图片不受支持时自动使用文本','Falls back to text when the current model cannot use images'),'gear', [['text',t('文本','Text')],['auto',t('自动','Auto')],['image',t('文本＋图片','Text + images')]]);
   const depth = field('assistDepth',t('适配深度','Adaptation depth'),t('仅文本＋图片时启用：基础取样、针对性补查、映射对照复核','Available with text + images: basic sampling, targeted inspection, mapping comparison'),'gear', [['quick',t('快速','Quick')],['standard',t('标准','Standard')],['deep',t('深入','Deep')]]);
-  const automatic = field('assistAuto',t('全自动执行','Automatic execution'),t('直接安装明确的映射；不确定动作保留通用表现','Install confident mappings; keep generic behavior for uncertain actions'),'checkbox');
+  const automatic = field('assistAuto',t('自动安装','Automatic installation'),t('满足安装条件后自动执行；需要确认时暂停','Install when requirements are met; pause for confirmation when needed'),'checkbox');
   const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
   roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
   const depend = () => {
     syncQuality();
     for (const input of [gear,automatic,roots,depth]) {
-      input.disabled = !enabled.checked || input === depth && gear.value !== '2';
+      input.disabled = mode.value !== '2' || input === depth && gear.value !== '2';
       input.closest('.l2d-setting-row').classList.toggle('inactive', input.disabled);
     }
   };
-  enabled.addEventListener('change',depend); gear.addEventListener('change',depend); gear.addEventListener('input',depend); depend();
+  mode.addEventListener('change',depend); mode.addEventListener('input',depend); gear.addEventListener('change',depend); gear.addEventListener('input',depend); depend();
   const actions = el('div', 'l2d-dialog-actions');
   if (onNotice) {
     const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
@@ -572,7 +573,7 @@ export default {
 
         function paintAutomation(value) {
           assistState = value || {enabled:false,plans:[]};
-          pack.textContent = assistState.enabled ? t('提交 AI 适配','Submit to Coo') : t('一键打包','Pack models');
+          pack.textContent = assistState.enabled ? t('提交 AI 适配','Submit to Coo') : assistState.adaptationMode === 'manual' ? t('预览并绑定','Preview & bind') : t('一键打包','Pack models');
           if (assistState.enabled && !assistTimer && ctx.interval) assistTimer = ctx.interval(async () => {
             if (disposed || state.busy || assistPolling) return;
             assistPolling = true;
@@ -780,6 +781,7 @@ export default {
               } finally { setBusy(false); }
             });
             del.classList.add('quiet');
+            if(b.manualAvailable){const bind=el('button','l2d-btn sm',t('动作','Actions'));bind.addEventListener('click',()=>openBindings('manualOpenBuild',[b.id]));row.append(bind);}
             row.append(edit, del);
             cardActions.appendChild(row);
             card.appendChild(cardActions);
@@ -834,6 +836,15 @@ export default {
           }
         }
 
+        let bindingEditor = null;
+        let bindingOpening = false;
+        async function openBindings(method,args,onSaved) {
+          if(state.busy || bindingOpening || bindingEditor || !ensureNotice())return;
+          bindingOpening=true;
+          try{bindingEditor=await openBindingEditor(ctx,method,args,async()=>{onSaved?.();await refresh();},()=>{bindingEditor=null;});}
+          catch(error){ui.toast(text(error),'bad');}
+          finally{bindingOpening=false;if(bindingEditor?.closed)bindingEditor=null;}
+        }
         // ---------------- 编辑弹层 ----------------
         let modal = null;
         let editReturnFocus = null;
@@ -1166,6 +1177,10 @@ export default {
             catch(error){ui.toast(text(error),'bad');}
             finally{setBusy(false);}return;
           }
+          if (assistState.adaptationMode === 'manual' && staged.models?.length) {
+            const next=staged.models.find(item=>!completed.has('importBuild:'+item.dir));
+            if(next) { await openBindings('manualOpen',[staged.token,next.dir],()=>{completed.add('importBuild:'+next.dir);}); return; }
+          }
           if (staged.models?.length && !coreReady()) { ui.toast(t('先获取 Live2D 核心组件', 'Fetch the Live2D core first'), 'bad'); return; }
           const pending = [
             ...(staged.models ?? []).map(item => ({ ...item, method: 'importBuild' })),
@@ -1342,6 +1357,7 @@ export default {
           stopTicker();
           stopResume();
           assistTimer?.dispose?.();
+          bindingEditor?.dispose?.();
           modal?.close(); modal?.remove();
           observer?.disconnect(); win.removeEventListener('resize', resize);
           for (const handle of ownedOverlays) handle.dispose?.();

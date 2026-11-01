@@ -18,6 +18,7 @@ export const LIVE2D: WorldDefinition<Live2dSection> = {
     quality: 'balanced',
     clean: false,
     autoDelete: false,
+    adaptationMode: '', // Unset preserves the legacy AI preference.
     assistMotions: false,
     assistGear: 'auto',
     assistDepth: 'standard',

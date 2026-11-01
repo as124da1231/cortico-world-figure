@@ -56,7 +56,7 @@ async function mount(t, opts = {}) {
 
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
   const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
-  assert.equal(root.querySelectorAll('.l2d-gear-input').length,4);
+  assert.equal(root.querySelectorAll('.l2d-gear-input').length,5);
   assert.equal(root.querySelector('.l2d-config-notice'),null);
   assert.equal(root.querySelector('.l2d-config-page .l2d-notice-entry'),null);
   assert.equal(root.querySelector('.l2d-version-corner').textContent,'v1.4.2');
@@ -176,7 +176,7 @@ test('failed settings writes keep the form editable for retry', async t => {
 test('settings gear sliders preserve texture and analysis values and save only explicit choices', async t => {
   const {root,button,configCalls,dom}=await mount(t,{ack:true});
   button('设置').click();await tick();
-  root.querySelector('input[aria-label="交给 Coo 适配"]').click();
+  const mode=root.querySelector('[aria-label="适配方式"]');mode.value='2';mode.dispatchEvent(new dom.window.Event('change'));
   const gear=root.querySelector('input[type="range"][aria-label="分析方式"]');
   const texture=root.querySelector('input[type="range"][aria-label="贴图精度"]');
   assert.equal(texture.value,'4');assert.equal(texture.getAttribute('aria-valuetext'),'原精度');
@@ -191,7 +191,7 @@ test('settings gear sliders preserve texture and analysis values and save only e
   assert.equal(gear.getAttribute('aria-valuetext'),'文本＋图片');
   assert.equal(gear.closest('.l2d-gear').classList.contains('is-max'),true);
   button('保存设置').click();await tick();
-  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.assistMotions':true,'worlds.figure.texture':'4096','worlds.figure.assistGear':'image'}}]);
+  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.adaptationMode':'ai','worlds.figure.texture':'4096','worlds.figure.assistGear':'image'}}]);
 });
 
 test('AI-enabled imports are submitted for analysis rather than silently dropping native actions',async t=>{
@@ -217,7 +217,7 @@ test('adaptation depth is enabled only with AI and text plus images and retains 
  const {root,dom,button,configCalls}=await mount(t,{ack:true});button('设置').click();await tick();
  const depth=root.querySelector('[aria-label="适配深度"]'),gear=root.querySelector('[aria-label="分析方式"]');
  assert.equal(depth.value,'1');assert.equal(depth.disabled,true);
- root.querySelector('[aria-label="交给 Coo 适配"]').click();assert.equal(depth.disabled,true);
+ const mode=root.querySelector('[aria-label="适配方式"]');mode.value='2';mode.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));assert.equal(depth.disabled,true);
  gear.value='2';gear.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(depth.disabled,false);
  depth.value='2';depth.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
  gear.value='0';gear.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(depth.disabled,true);
@@ -236,11 +236,11 @@ test('a pending AI proposal shows its mapping and approval acts only on that pro
 test('AI controls follow the master switch and opening notice protects unsaved settings',async t=>{
  const {root,button,drawers}=await mount(t,{ack:true,confirm:async()=>false});button('设置').click();await tick();
  const gear=root.querySelector('[aria-label="分析方式"]');assert.equal(gear.disabled,true);
- root.querySelector('[aria-label="交给 Coo 适配"]').click();assert.equal(gear.disabled,false);
+ const mode=root.querySelector('[aria-label="适配方式"]');mode.value='2';mode.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));assert.equal(gear.disabled,false);
  // Refusing the discard must keep the form and its selected value.
  const note=root.querySelector('.l2d-settings .l2d-notice-entry');note.click();await tick();
  assert.equal(drawers.length,1);assert(root.querySelector('.l2d-settings'));
- assert.equal(root.querySelector('[aria-label="交给 Coo 适配"]').checked,true);
+ assert.equal(root.querySelector('[aria-label="适配方式"]').value,'2');
  assert.match(root.querySelector('[aria-label="模型搜索目录"]').placeholder,/最近使用/);
 });
 
@@ -522,4 +522,14 @@ test('leaving during folder reads stops subsequent transfer and cancels only tha
   input.dispatchEvent(new dom.window.Event('change'));await tick();handle.dispose();finish(new Uint8Array([1]).buffer);await tick();
   assert(!calls.some(call=>call.method==='importAppend'||call.method==='importFinish'));
   assert(calls.some(call=>call.method==='importCancel'&&call.args[0]==='owned'));
+});
+
+test('manual mode disables AI options while retaining depth and analysis selections',async t=>{
+ const {root,dom,button,configCalls}=await mount(t,{ack:true});button('设置').click();await tick();
+ const mode=root.querySelector('[aria-label="适配方式"]'),gear=root.querySelector('[aria-label="分析方式"]'),depth=root.querySelector('[aria-label="适配深度"]'),automatic=root.querySelector('[aria-label="自动安装"]');
+ const change=(input,value)=>{input.value=value;input.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
+ change(mode,'2');change(gear,'2');change(depth,'2');assert.equal(depth.disabled,false);
+ change(mode,'1');assert.equal(gear.disabled,true);assert.equal(depth.disabled,true);assert.equal(automatic.disabled,true);assert.equal(depth.value,'2');
+ change(mode,'0');change(mode,'2');assert.equal(gear.value,'2');assert.equal(depth.value,'2');assert.equal(depth.disabled,false);
+ change(mode,'1');button('保存设置').click();await tick();assert.equal(configCalls[0].values['worlds.figure.adaptationMode'],'manual');assert(!('worlds.figure.assistMotions' in configCalls[0].values));
 });

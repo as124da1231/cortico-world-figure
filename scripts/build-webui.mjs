@@ -11,7 +11,8 @@ const pkg = JSON.parse(await readFile(pkgFile, 'utf8'));
 const keep = new Set();
 
 for (const [extension, field] of [['js', 'webUiClient'], ['css', 'webUiStyle']]) {
-  const bytes = Buffer.from((await readFile(join(source, extension === 'js' ? 'client.js' : 'styles.css'), 'utf8')).replace(/\r\n/g, '\n'));
+  const content=await readFile(join(source, extension === 'js' ? 'client.js' : 'styles.css'),'utf8');
+  const bytes = Buffer.from(((extension === 'js' ? await readFile(join(source,'manual.js'),'utf8')+'\n' : '')+content).replace(/\r\n/g, '\n'));
   await writeFile(join(dist, `webui.${extension}`), bytes);
   const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
   const name = `webui-${hash}.${extension}`;

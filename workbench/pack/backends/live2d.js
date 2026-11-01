@@ -418,7 +418,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
   for (let i = 0; i < model._model.getPartCount(); i++) {
     partIndex.set(model._model.getPartId(i).getString(), i);
   }
-  const native = profile.native?.version === 1 ? createNativeActions(profile.native) : null;
+  let native = profile.native?.version === 1 ? createNativeActions(profile.native) : null;
+  let previewState = null;
   const nativeParams = new Set(), nativeParts = new Map();
   for (const resource of profile.native?.resources ?? []) {
     for (const p of resource.kind === 'expression' ? (resource.data.Parameters ?? []).map(p => ({Id:p.Id,Target:'Parameter'})) : resource.data.Curves ?? []) {
@@ -979,11 +980,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
       if (fo.parentNode !== petG) petG.appendChild(fo);
       if (!texturesReady || renderFailure) return;
 
+      if (opts.preview && previewState) frame = {...frame,face:previewState.word,gesture:null,talk:0,look:[0,0]};
       const dt = clamp(frame.dt ?? 0.016, 0.001, 0.05);
 
       model._model.loadParameters();
       resetNativeBase();
-      applyFrame(face, frame, dt, !extent);
+      applyFrame(face, frame, dt, !extent || Boolean(previewState?.raw));
       stepMotion(frame, dt);
       stepExpression(frame.face, dt);
       applyPartOpacity(currentId);
@@ -1087,6 +1089,17 @@ export async function createLive2DBody(base, opts, entry, kit) {
       finally { native.clearSample(); performance?.dispose(); performance = previousPerformance; }
     };
   }
+  if (opts.preview) globalThis.__l2dPreview = {
+    play(resource,word,bindings=[],raw=false) {
+      performance?.dispose(); performance=performanceFactory?.(profile,console.warn) || null;
+      previewState={word:word || 'neutral',raw};
+      const selected=bindings.filter(b=>b.word!==word);
+      if(resource)selected.push({...bindings.find(b=>b.word===word&&b.resource===resource),word:word || 'neutral',resource});
+      native=createNativeActions({...profile.native,bindings:selected});
+      body.do?.(word || 'neutral');
+    },
+    stop(){previewState=null;native=createNativeActions({...profile.native,bindings:[]});body.do?.('neutral');},
+  };
   const motionKind = profile.motion?.kind === 'stand' ? 'stand' : 'roam';
   if (SIMPLE && motionKind === 'stand') {
     // 站定：无论 Coo / 预览传什么 roam，都强制 off；正面立绘也不镜像。
