@@ -24,6 +24,27 @@ async function mountBindingPreview(ctx,frame,data,alive,onStatus) {
   return dispose;
 }
 
+// A host overlay outside showModal() is inert. Keep discard confirmation in the same top layer.
+function bindingDiscardPrompt(parent,zh=true) {
+  const doc=parent.ownerDocument,previous=doc.activeElement,t=(a,b)=>zh?a:b;
+  const prompt=doc.createElement('dialog');prompt.className='l2d-modal l2d-bind-discard';
+  prompt.setAttribute('aria-label',t('放弃未保存的绑定？','Discard unsaved bindings?'));
+  const card=doc.createElement('div');card.className='l2d-modal-card';
+  const title=doc.createElement('div');title.className='l2d-modal-title';title.textContent=prompt.getAttribute('aria-label');
+  const body=doc.createElement('p');body.className='l2d-bind-discard-text';body.textContent=t('本次未保存的修改会丢失，已保存的绑定不受影响。','Unsaved changes will be lost. Saved bindings are kept.');
+  const actions=doc.createElement('div');actions.className='l2d-dialog-actions';
+  const keep=doc.createElement('button'),discard=doc.createElement('button');keep.className='l2d-btn';discard.className='l2d-btn primary';
+  keep.textContent=t('继续编辑','Keep editing');discard.textContent=t('放弃修改','Discard changes');
+  let done=false,resolve;const result=new Promise(r=>{resolve=r;});
+  const settle=value=>{if(done)return;done=true;prompt.close();prompt.remove();if(parent.isConnected&&parent.open)previous?.focus?.();resolve(value);};
+  keep.onclick=()=>settle(false);discard.onclick=()=>settle(true);
+  prompt.addEventListener('cancel',e=>{e.preventDefault();e.stopPropagation();settle(false);});
+  prompt.addEventListener('click',e=>{e.stopPropagation();if(e.target===prompt)settle(false);});
+  prompt.addEventListener('close',()=>settle(false));
+  actions.append(keep,discard);card.append(title,body,actions);prompt.append(card);parent.append(prompt);prompt.showModal();keep.focus();
+  return {result,dispose:()=>settle(false)};
+}
+
 async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   const doc=ctx.root.ownerDocument,win=doc.defaultView,zh=String(ctx.language||'zh').startsWith('zh'),t=(a,b)=>zh?a:b;
   const names={neutral:'中性',happy:'开心',wink:'眨眼',love:'喜欢',shy:'害羞',surprised:'惊讶',angry:'生气',sad:'难过',sleepy:'困倦',thinking:'思考',smug:'得意',pout:'嘟嘴',worried:'担心',determined:'坚定',flustered:'慌乱',scared:'害怕',excited:'兴奋',cry:'哭泣',confused:'疑惑',idle:'待机',nod:'点头',shake:'摇头',wave:'挥手',bow:'鞠躬',cheer:'欢呼',dance:'跳舞',jump:'跳跃',sit:'坐下',stretch:'伸展',shiver:'发抖'};
@@ -43,10 +64,14 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   const footer=el('div','l2d-bind-footer'),summary=el('span','l2d-bind-summary',t('未绑定的项目使用通用配方','Unbound targets use generic recipes'));
   const cancel=el('button','l2d-btn',t('取消','Cancel')),save=el('button','l2d-btn primary',t('保存绑定','Save bindings'));save.disabled=true;
   footer.append(summary,cancel,save);card.append(head,layout,footer);modal.append(card);ctx.root.append(modal);modal.showModal();
-  let closed=false,saving=false,dirty=false,data,bindings=[],word='happy',resource=null,rawMode=false,ready=false,cleanup=()=>{},serial=0;
+  let closed=false,saving=false,dirty=false,data,bindings=[],word='happy',resource=null,rawMode=false,ready=false,cleanup=()=>{},serial=0,discardPrompt=null;
   const alive=()=>!closed&&!ctx.signal?.aborted;
-  const release=()=>{if(closed)return;closed=true;leave?.dispose?.();ctx.signal?.removeEventListener('abort',release);cleanup();modal.close();modal.remove();onClosed?.();if(data)ctx.invoke('manualClose',[data.token]).catch(()=>{});previous?.focus?.();};
-  const requestClose=async()=>{if(saving)return;if(dirty&&!await ctx.ui.confirm({title:t('放弃未保存的绑定？','Discard unsaved bindings?'),body:t('已保存的绑定会保留。','Saved bindings are kept.')}))return;release();};
+  const release=()=>{if(closed)return;closed=true;discardPrompt?.dispose();leave?.dispose?.();ctx.signal?.removeEventListener('abort',release);cleanup();modal.close();modal.remove();onClosed?.();if(data)ctx.invoke('manualClose',[data.token]).catch(()=>{});previous?.focus?.();};
+  const requestClose=async()=>{
+    if(closed||saving||discardPrompt)return;
+    if(dirty){discardPrompt=bindingDiscardPrompt(modal,zh);const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive())return;}
+    release();
+  };
   close.onclick=cancel.onclick=requestClose;modal.addEventListener('cancel',e=>{e.preventDefault();void requestClose();});modal.addEventListener('click',e=>{if(e.target===modal)void requestClose();});
   const leave=ctx.guardLeave?.(()=>alive()&&(dirty||saving)?t('动作绑定尚未保存，确定离开？','Bindings are not saved. Leave?'):null);
   ctx.signal?.addEventListener('abort',release,{once:true});
