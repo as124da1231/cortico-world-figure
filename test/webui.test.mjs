@@ -128,15 +128,25 @@ test('failed settings writes keep the form editable for retry', async t => {
   assert.ok(toasts.some(([s])=>s==='write failed'));
 });
 
-test('AI analysis settings use the existing settings dialog and save only explicit choices', async t => {
+test('settings gear sliders preserve texture and analysis values and save only explicit choices', async t => {
   const {root,button,configCalls,dom}=await mount(t,{ack:true});
   button('设置').click();await tick();
   root.querySelector('input[aria-label="交给 Coo 适配"]').click();
-  const gear=root.querySelector('select[aria-label="分析方式"]');
-  assert.deepEqual([...gear.options].map(o=>o.value),['auto','text','image']);
-  gear.value='image';gear.dispatchEvent(new dom.window.Event('change'));
+  const gear=root.querySelector('input[type="range"][aria-label="分析方式"]');
+  const texture=root.querySelector('input[type="range"][aria-label="贴图精度"]');
+  assert.equal(texture.value,'4');assert.equal(texture.getAttribute('aria-valuetext'),'原精度');
+  assert.equal(gear.value,'1');assert.equal(gear.getAttribute('aria-valuetext'),'自动');
+  for(const [index,title]of ['512 px','1024 px','2048 px','4096 px','原精度'].entries()){
+    texture.value=String(index);texture.dispatchEvent(new dom.window.Event('input'));
+    assert.equal(texture.getAttribute('aria-valuetext'),title);
+    assert.equal(texture.closest('.l2d-gear').classList.contains('is-max'),index===4);
+  }
+  texture.value='3';texture.dispatchEvent(new dom.window.Event('change'));
+  gear.value='2';gear.dispatchEvent(new dom.window.Event('change'));
+  assert.equal(gear.getAttribute('aria-valuetext'),'文本＋图片');
+  assert.equal(gear.closest('.l2d-gear').classList.contains('is-max'),true);
   button('保存设置').click();await tick();
-  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.assistMotions':true,'worlds.figure.assistGear':'image'}}]);
+  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.assistMotions':true,'worlds.figure.texture':'4096','worlds.figure.assistGear':'image'}}]);
 });
 
 test('AI-enabled imports are submitted for analysis rather than silently dropping native actions',async t=>{
