@@ -128,7 +128,7 @@ export default {
         const header = el('header', 'l2d-header');
         const heading = el('div');
         heading.append(el('h2', null, t('模型工坊', 'Figure workshop')));
-        const settingsButton = el('button', 'l2d-btn l2d-settings-button', t('打包设置', 'Pack settings'));
+        const settingsButton = el('button', 'l2d-btn l2d-settings-button', t('设置', 'Settings'));
         settingsButton.type = 'button';
         settingsButton.addEventListener('click', openSettings);
         header.append(heading, settingsButton);
@@ -239,11 +239,12 @@ export default {
           sourceTitle.textContent = count ? names.slice(0, 3).join('、') + (count > 3 ? t(` 等 ${count} 项`, ` and ${count - 3} more`) : '') : t('拖入模型或 ZIP', 'Drop a model folder or ZIP');
           sourceTitle.title = names.join('\n');
           sourceHint.textContent = count
-            ? (completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install') : t(`已识别 ${count} 项，点击右侧一键打包`, `${count} recognized; pack using the button on the right`))
+            ? (assistState.enabled ? t(`已识别 ${count} 项 · 导入后自动交给 Coo，进展见下方`, `${count} recognized · sent to Coo automatically; see progress below`) : completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install') : t(`已识别 ${count} 项，点击右侧一键打包`, `${count} recognized; pack using the button on the right`))
             : t('点击此区域后，按 Ctrl+V 粘贴文件或目录路径', 'Click here, then press Ctrl+V to paste files or a local path');
           dropZone.classList.toggle('ready', count > 0);
           dropZone.setAttribute('aria-disabled', String(state.busy));
           pack.disabled = state.busy || !count || completed.size === count;
+          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error)) pack.disabled = true;
         }
         paintSource();
 
@@ -383,24 +384,30 @@ export default {
               }
               input.setAttribute('aria-label', title);
               input.addEventListener('change', () => { dirty['worlds.figure.' + key] = type === 'checkbox' ? input.checked : input.value.trim(); });
-              controls.push(input); row.append(label, input); body.append(row);
+              controls.push(input); row.append(label, input); body.append(row); return input;
             }
             field('cover', t('生成封面', 'Generate cover'), t('同时自动调整模型取景', 'Also fits the model framing'), 'checkbox');
             field('texture', t('贴图精度', 'Texture resolution'), t('较小的贴图占用更少显存', 'Smaller textures use less VRAM'), 'select');
             field('clean', t('清理', 'Clean'), '', 'checkbox');
             field('autoDelete', t('安装后删除打包产物', 'Delete pack after installation'), t('仅在安装成功后执行，保留原始素材', 'Only after a successful install; source files are kept'), 'checkbox');
             field('figuresDir', t('安装目录', 'Install folder'), t('通常无需修改', 'Usually no change needed'), 'text');
-            body.append(el('h3','l2d-settings-heading',t('AI 自动适配','AI action mapping')));
-            field('assistMotions',t('交给 Coo 适配','Let Coo adapt actions'),t('导入后分析原生动作，确认方案再安装','Analyze imported native actions; approve a proposal before installation'),'checkbox');
-            field('assistGear',t('分析方式','Analysis mode'),t('图片不受支持时自动使用文本','Falls back to text when the current model cannot use images'),'select', [['auto',t('自动','Auto')],['text',t('文本','Text')],['image',t('文本＋图片','Text + images')]]);
-            field('assistAuto',t('全自动执行','Automatic execution'),t('直接安装明确的映射；不确定动作保留通用表现','Install confident mappings; keep generic behavior for uncertain actions'),'checkbox');
-            field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
+            body.append(el('h3','l2d-settings-heading',t('AI 动作适配','AI action mapping')));
+            const enabled = field('assistMotions',t('交给 Coo 适配','Let Coo adapt actions'),t('导入后自动提交，确认动作方案再安装','Submit imports automatically; approve mappings before installation'),'checkbox');
+            const gear = field('assistGear',t('分析方式','Analysis mode'),t('图片不受支持时自动使用文本','Falls back to text when the current model cannot use images'),'select', [['auto',t('自动','Auto')],['text',t('文本','Text')],['image',t('文本＋图片','Text + images')]]);
+            const automatic = field('assistAuto',t('全自动执行','Automatic execution'),t('直接安装明确的映射；不确定动作保留通用表现','Install confident mappings; keep generic behavior for uncertain actions'),'checkbox');
+            const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
+            roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
+            const depend = () => { for (const input of [gear,automatic,roots]) { input.disabled = !enabled.checked; input.closest('.l2d-setting-row').classList.toggle('inactive',!enabled.checked); } };
+            enabled.addEventListener('change',depend); depend();
             const actions = el('div', 'l2d-dialog-actions');
             const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
-            note.addEventListener('click', openNotice);
+            note.addEventListener('click', async () => {
+              if (Object.keys(dirty).length && !await ui.confirm({title:t('放弃未保存的设置？','Discard unsaved settings?'),body:t('打开须知将关闭当前设置。','Opening the notice closes settings.')})) return;
+              if (!disposed) openNotice();
+            });
             const save = el('button', 'l2d-btn primary', t('保存设置', 'Save settings')); save.type = 'submit';
             actions.append(note, save); body.append(actions);
-            const dialog = showDialog(t('打包设置', 'Pack settings'), body);
+            const dialog = showDialog(t('设置', 'Settings'), body);
             body.addEventListener('submit', async event => {
               event.preventDefault(); if (save.disabled || disposed || state.busy) return;
               save.disabled = true; controls.forEach(input => { input.disabled = true; });
@@ -410,7 +417,7 @@ export default {
                 dialog?.dispose?.(); ui.toast(t('设置已保存', 'Settings saved'), 'ok');
                 await refresh();
               } catch (error) { if (!disposed) ui.toast(text(error), 'bad'); }
-              finally { save.disabled = false; controls.forEach(input => { input.disabled = false; }); }
+              finally { save.disabled = false; controls.forEach(input => { input.disabled = false; }); depend(); }
             });
           } catch (error) { if (!disposed) ui.toast(text(error), 'bad'); }
           finally { settingsLoading = false; if (!disposed) settingsButton.disabled = state.busy; }
@@ -426,38 +433,58 @@ export default {
 
         function paintAutomation(value) {
           assistState = value || {enabled:false,plans:[]};
-          pack.textContent = assistState.enabled ? t('AI 适配','AI adaptation') : t('一键打包','Pack models');
+          pack.textContent = assistState.enabled ? t('提交 AI 适配','Submit to Coo') : t('一键打包','Pack models');
           if (assistState.enabled && !assistTimer && ctx.interval) assistTimer = ctx.interval(async () => {
             if (disposed || state.busy || assistPolling) return;
             assistPolling = true;
-            try { const value = await ctx.invoke('assistState', []); if (!disposed) paintAutomation(value); }
+            try { const value = await ctx.invoke('assistState', []); if (!disposed) {
+              const completed = (value.plans || []).some(p=>p.status==='done' && !(assistState.plans || []).some(old=>old.id===p.id && old.status==='done'));
+              if (completed) await refresh(); else paintAutomation(value);
+            } }
             catch { /* The normal status and task log still report operation failures. */ }
             finally { assistPolling = false; }
           },1500);
           if (!assistState.enabled && assistTimer) { assistTimer.dispose?.(); assistTimer = null; }
           const plans = assistState.plans || [];
-          if (assistDock.dataset.plans === JSON.stringify(plans)) { paintSource(); return; }
-          assistDock.dataset.plans = JSON.stringify(plans); assistDock.replaceChildren();
-          for (const plan of plans.filter(p=>p.status==='pending'||p.status==='approved').slice(-1)) {
+          const submissions = assistState.submissions || [];
+          const signature = JSON.stringify([assistState.enabled,plans,submissions]);
+          if (assistDock.dataset.plans === signature) { paintSource(); return; }
+          const expanded = new Set([...assistDock.querySelectorAll('details[open]')].map(d=>d.dataset.id));
+          assistDock.dataset.plans = signature; assistDock.replaceChildren();
+          if (!assistState.enabled) { paintSource(); return; }
+          for (const request of submissions) {
+            if (!request.error && !request.waiting?.length) continue;
+            const message = request.error ? t('提交失败：','Submission failed: ') + request.error : t('已提交 Coo，等待方案或聊天中的模型选择：','Sent to Coo; awaiting a proposal or model choice in chat: ') + request.waiting.join('、');
+            assistDock.append(el('p','l2d-assist-wait'+(request.error?' has-error':''),message));
+          }
+          const wordNames = {neutral:'平静',happy:'开心',wink:'眨眼',love:'喜欢',shy:'害羞',surprised:'惊讶',angry:'生气',sad:'难过',sleepy:'困倦',thinking:'思考',smug:'得意',pout:'嘟嘴',worried:'担心',determined:'坚定',flustered:'慌张',scared:'害怕',excited:'兴奋',cry:'哭泣',confused:'疑惑',idle:'待机',nod:'点头',shake:'摇头',wave:'挥手',bow:'鞠躬',cheer:'欢呼',dance:'跳舞',jump:'跳跃',sit:'坐下',stretch:'伸展',shiver:'发抖'};
+          for (const plan of plans) {
+            const row = el('section','l2d-assist-plan');
             const info = el('div','l2d-assist-info');
-            info.append(el('strong',null,t('动作适配方案','Action proposal')),el('p',null,plan.question));
+            const labels = {pending:t('待确认','Awaiting approval'),approved:t('待重试','Ready to retry'),validating:t('检查素材中','Validating'),executing:t('安装中','Installing'),done:t('已安装','Installed'),interrupted:t('任务已中断，请重新导入','Interrupted; import again')};
+            info.append(el('strong',null,`${plan.model} · ${labels[plan.status] || plan.status}`));
+            if (plan.status === 'pending') info.append(el('p',null,plan.question));
+            if (plan.error && plan.status !== 'done') info.append(el('p','has-error',plan.error));
             if (plan.summary?.length) {
               const detail = el('details','l2d-adaptation');detail.append(el('summary',null,t('适配详情','Mapping details')));
-              for(const item of plan.summary)detail.append(el('p',null,`${item.source} → ${item.word} · ${item.reason}`));
+              detail.dataset.id=plan.id;detail.open=expanded.has(plan.id);
+              for(const item of plan.summary)detail.append(el('p',null,t(`表现“${wordNames[item.word] || item.word}”时使用「${item.source}」：${item.reason}`,`For ${item.word}, use ${item.source}: ${item.reason}`)));
+              detail.append(el('p',null,t('未映射的动作保留通用表现。','Unmapped actions retain generic behavior.')));
+              for(const skipped of plan.skipped || [])detail.append(el('p',null,typeof skipped==='string'?skipped:skipped.reason || skipped.word || ''));
               info.append(detail);
             }
             const actions = el('div','l2d-dialog-actions');
-            for (const [method,label] of [['assistReject',t('暂不安装','Not now')],['assistApprove',t('同意安装','Approve & install')]]) {
+            for (const [method,label] of ['pending','approved'].includes(plan.status) ? [['assistReject',t('暂不安装','Not now')],['assistApprove',plan.status==='approved'?t('重试安装','Retry installation'):t('同意安装','Approve & install')]] : []) {
               const button = el('button','l2d-btn sm'+(method==='assistApprove'?' primary':''),label);
               button.addEventListener('click',async()=>{
                 if(state.busy)return;
                 setBusy(true,t('处理方案…','Processing proposal…'),undefined,'build');
                 try { await ctx.invoke(method,[plan.id]); await refresh(); }
-                catch(error){ui.toast(text(error),'bad');log.append(text(error),'bad');}
+                catch(error){ui.toast(text(error),'bad');log.append(text(error),'bad');await refresh().catch(()=>{});}
                 finally {setBusy(false);}
               }); actions.append(button);
             }
-            assistDock.append(info,actions);
+            row.append(info,actions); assistDock.append(row);
           }
           paintSource();
         }
@@ -494,6 +521,7 @@ export default {
           dropZone.setAttribute('aria-disabled', String(on));
           const count = (staged?.models?.length || 0) + (staged?.packs?.length || 0);
           pack.disabled = on || !count || completed.size === count;
+          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error)) pack.disabled = true;
           for (const b of grid.querySelectorAll('button')) b.disabled = on;
           for (const input of modal?.querySelectorAll('button, input, textarea, select') ?? []) input.disabled = on;
           status.classList.toggle('busy', on);
@@ -974,7 +1002,7 @@ export default {
           if (state.busy || !staged || !ensureNotice()) return;
           if (assistState.enabled) {
             setBusy(true,t('交给 Coo 分析…','Asking Coo to analyze…'),undefined,'import');
-            try { await ctx.invoke('assistAnalyze',[staged.token,(staged.models||[]).map(m=>m.dir),(staged.packs||[]).map(p=>p.dir)]); ui.toast(t('已交给 Coo，稍后在气泡或适配方案中确认','Coo will explain the proposal for your approval'),'ok'); }
+            try { const result = await ctx.invoke('assistAnalyze',[staged.token,(staged.models||[]).map(m=>m.dir),(staged.packs||[]).map(p=>p.dir)]); await refresh(); ui.toast(result.queued===false?t('已提交，请等待 Coo 的方案','Already submitted; wait for Coo'):t('已交给 Coo，稍后在气泡或适配方案中确认','Coo will explain the proposal for your approval'),'ok'); }
             catch(error){ui.toast(text(error),'bad');}
             finally{setBusy(false);}return;
           }

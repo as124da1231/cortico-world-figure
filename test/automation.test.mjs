@@ -38,6 +38,27 @@ function approveInChat(f,plan,{index=0,question=plan.question}={}){
  const answer={cursor:f.events.length+1,source:'desktop-pet',type:'desktop-pet.answer',meta:{askId,index}};f.events.push(answer);return answer.cursor;
 }
 
+test('panel approval can retry a failed install or decline the approved proposal',async t=>{
+ let attempts=0;
+ const f=await automation(t,{execute:async()=>{if(++attempts===1)throw Error('disk unavailable');return {figureId:'retry',installed:true};}});
+ const p=await f.auto.prepare(f.model.id,f.bindings);
+ await f.auto.approve(p.id);await assert.rejects(f.auto.install(p.id),/disk unavailable/);
+ assert.equal(f.auto.pending().find(x=>x.id===p.id).error,'disk unavailable');
+ await f.auto.approve(p.id);await f.auto.install(p.id);assert.equal(attempts,2);
+ const other=await f.auto.prepare(f.model.id,f.bindings);await f.auto.approve(other.id);await f.auto.reject(other.id);
+ await assert.rejects(f.auto.install(other.id),/失效/);
+});
+
+test('explicit resubmission and concurrent imports cannot duplicate a queued analysis',async t=>{
+ const f=await automation(t),result={token:'dedup',models:[{dir:'role'}],packs:[]};
+ await Promise.all([f.auto.imported(result,()=>f.dir),f.auto.imported(result,()=>f.dir,true)]);
+ await f.auto.imported(result,()=>f.dir,true);
+ assert.equal(f.events.filter(e=>e.type==='figure.imported').length,1);
+ assert.equal(f.auto.submissions()[0].waiting.length,1);
+ await f.auto.prepare(f.model.id,f.bindings);
+ assert.equal(f.auto.submissions()[0].waiting.length,0);
+});
+
 test('bounded generic discovery finds Chinese Animation/Exp3 and keeps unique stable resource IDs',async t=>{
  const f=await fixture(t);assert.equal(f.catalog.resources.length,4);assert.equal(new Set(f.catalog.resources.map(r=>r.id)).size,4);assert.equal(f.catalog.warnings.length,1);
  const second=await inspectNative(f.model);assert.deepEqual(second.resources.map(r=>r.id),f.catalog.resources.map(r=>r.id));

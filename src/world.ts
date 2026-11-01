@@ -259,7 +259,7 @@ export class Live2dWorld implements World {
         autoDelete: Boolean(cfg.autoDelete), figuresDir: cfg.figuresDir || '',
         assistMotions: cfg.assistMotions === true, assistGear: automationMode(cfg).gear, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
     }
-    if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending() };
+    if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() };
     if (method === 'assistReject') return this.automation.reject(String(args[0] || ''));
     if (method === 'assistAnalyze') {
       const token = String(args[0] || '');
@@ -778,7 +778,7 @@ export class Live2dWorld implements World {
       builds: (s.builds ?? []).map((b) => ({ id: b.id, bytes: b.bytes, at: b.at })),
       autoDelete: Boolean(this.opts.getConfig().autoDelete),
       coreReady: this.coreReady,
-      automation: { ...automationMode(this.opts.getConfig()), plans: this.automation.pending() },
+      automation: { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() },
       version: VERSION,
       notice: this.noticePayload(),
       busy: this.busy,

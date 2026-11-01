@@ -72,7 +72,7 @@
 .l2d-notice:not([open]){display:none}.l2d-notice p{margin:7px 0}
 .l2d-license{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:9px 0;font-size:11px;line-height:1.6;color:var(--l2d-soft)}
 .l2d-license-text{flex:1;min-width:200px}.l2d-link{border:0;background:none;padding:0;color:inherit;font:inherit;text-decoration:underline;cursor:pointer}
-.l2d-adaptation{font-size:10px;line-height:1.55;color:var(--l2d-muted);margin-top:4px;overflow-wrap:anywhere}
+.l2d-adaptation{font-size:12px;line-height:1.65;color:var(--l2d-soft);margin-top:4px;overflow-wrap:anywhere}
 .l2d-adaptation summary{cursor:pointer;color:var(--ink-soft,#5c5c60)}.l2d-adaptation p{margin:5px 0}
 .l2d-modal{position:sticky;top:16px;align-self:start;min-width:0;border:1px solid var(--l2d-line);border-radius:12px;background:var(--l2d-surface)}
 .l2d-modal-card{display:flex;flex-direction:column;gap:15px;padding:18px}
@@ -97,7 +97,12 @@
 .l2d-settings-heading{font-size:13px;font-weight:600;margin:24px 0 0}
 .l2d-setting-row textarea.l2d-input{height:60px;resize:vertical}
 .l2d-assist-dock:empty{display:none}
-.l2d-assist-dock{display:flex;align-items:center;gap:16px;padding:12px 14px;border:1px solid var(--line,#e2e6e3);border-radius:9px;background:var(--sheet,#fff)}
+.l2d-assist-dock{display:flex;flex-direction:column;gap:12px;padding:12px 14px;border:1px solid var(--line,#e2e6e3);border-radius:9px;background:var(--sheet,#fff)}
+.l2d-assist-plan{display:flex;align-items:center;gap:16px;width:100%;min-width:0}
+.l2d-assist-plan+.l2d-assist-plan{padding-top:12px;border-top:1px solid var(--line,#e2e6e3)}
+.l2d-assist-wait{margin:0;width:100%;font-size:12px;color:var(--l2d-soft);overflow-wrap:anywhere}
+.l2d-sheet .has-error{color:var(--danger,#b45950)}
+.l2d-setting-row.inactive{opacity:.55}
 .l2d-assist-info{flex:1;min-width:0;font-size:12px}.l2d-assist-info strong{font-weight:600}.l2d-assist-info p{font-size:11px;line-height:1.6;margin:4px 0 0;overflow-wrap:anywhere}
 .l2d-sheet[data-compact="true"]{gap:12px}.l2d-sheet[data-compact="true"] .l2d-header p{display:none}
 .l2d-sheet[data-compact="true"] .l2d-header h2{font-size:16px}.l2d-sheet[data-compact="true"] .l2d-import-bar{gap:9px}
@@ -105,6 +110,7 @@
 .l2d-sheet[data-compact="true"] .l2d-sort{width:95px}
 .l2d-sheet[data-compact="true"] .l2d-workspace.editing{grid-template-columns:minmax(0,1fr)}
 .l2d-sheet[data-compact="true"] .l2d-workspace.editing>.l2d-grid{display:none}
+.l2d-sheet[data-compact="true"] .l2d-assist-plan{align-items:stretch;flex-direction:column;gap:8px}
 @media(prefers-reduced-motion:reduce){.l2d-spinner,.l2d-progress span{animation:none}}
 @keyframes l2d-spin{to{transform:rotate(360deg)}}
 @keyframes l2d-progress{from{transform:translateX(-100%)}to{transform:translateX(350%)}}

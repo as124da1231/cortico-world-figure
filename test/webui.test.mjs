@@ -23,7 +23,7 @@ async function mount(t, opts = {}) {
         const body = document.createElement('div'); el.append(head, body); return { el, body };
       },
       log: () => ({ el: document.createElement('div'), append() {}, clear() {} }),
-      toast: (...args) => toasts.push(args), confirm: async () => true,
+      toast: (...args) => toasts.push(args), confirm: opts.confirm || (async () => true),
       drawer: (...args) => { drawers.push(args); const body = args[1]; if (typeof body !== 'string') root.append(body); return {dispose(){body?.remove?.();}}; },
     },
     async invoke(method, args) {
@@ -106,7 +106,7 @@ test('notice lives in the workbench footer and opens only on demand after agreem
 
 test('settings save only changed fields through the host configuration contract', async t => {
   const {root,button,configCalls} = await mount(t,{ack:true});
-  button('打包设置').click(); await tick();
+  button('设置').click(); await tick();
   const clean=root.querySelector('input[aria-label="清理"]');
   assert.equal(clean.closest('label').textContent,'清理');
   const auto=root.querySelector('input[aria-label="安装后删除打包产物"]');
@@ -117,7 +117,7 @@ test('settings save only changed fields through the host configuration contract'
 
 test('failed settings writes keep the form editable for retry', async t => {
   const {root,button,toasts} = await mount(t,{ack:true,setConfig:async()=>{throw Error('write failed');}});
-  button('打包设置').click(); await tick();
+  button('设置').click(); await tick();
   root.querySelector('input[aria-label="安装后删除打包产物"]').click();
   button('保存设置').click(); await tick();
   assert.ok(root.querySelector('.l2d-settings'));
@@ -127,7 +127,7 @@ test('failed settings writes keep the form editable for retry', async t => {
 
 test('AI analysis settings use the existing settings dialog and save only explicit choices', async t => {
   const {root,button,configCalls,dom}=await mount(t,{ack:true});
-  button('打包设置').click();await tick();
+  button('设置').click();await tick();
   root.querySelector('input[aria-label="交给 Coo 适配"]').click();
   const gear=root.querySelector('select[aria-label="分析方式"]');
   assert.deepEqual([...gear.options].map(o=>o.value),['auto','text','image']);
@@ -139,16 +139,48 @@ test('AI analysis settings use the existing settings dialog and save only explic
 test('AI-enabled imports are submitted for analysis rather than silently dropping native actions',async t=>{
   const {root,dom,button,calls}=await mount(t,{ack:true,automation:{enabled:true,plans:[]},invoke:method=>method==='importPaths'?{token:'ai-source',models:[{dir:'role',title:'角色'}],packs:[]}:undefined});
   paste(dom,root.querySelector('.l2d-drop-zone'),'G:/models/role');await tick();
-  button('AI 适配').click();await tick();
+  button('提交 AI 适配').click();await tick();
   assert.deepEqual(calls.find(c=>c.method==='assistAnalyze').args,['ai-source',['role'],[]]);
   assert(!calls.some(c=>c.method==='importBuild'));
 });
 
 test('a pending AI proposal shows its mapping and approval acts only on that proposal',async t=>{
   const {root,button,calls}=await mount(t,{ack:true,automation:{enabled:true,plans:[{id:'pending',status:'pending',question:'方案确认',summary:[{source:'脸红',word:'shy',reason:'表情对应'}]}]}});
-  assert.match(root.querySelector('.l2d-assist-dock').textContent,/脸红 → shy/);
+  assert.match(root.querySelector('.l2d-assist-dock').textContent,/表现“害羞”时使用「脸红」/);
   button('同意安装').click();await tick();
   assert.deepEqual(calls.find(c=>c.method==='assistApprove').args,['pending']);
+});
+
+test('AI controls follow the master switch and opening notice protects unsaved settings',async t=>{
+ const {root,button,drawers}=await mount(t,{ack:true,confirm:async()=>false});button('设置').click();await tick();
+ const gear=root.querySelector('[aria-label="分析方式"]');assert.equal(gear.disabled,true);
+ root.querySelector('[aria-label="交给 Coo 适配"]').click();assert.equal(gear.disabled,false);
+ // Refusing the discard must keep the form and its selected value.
+ const note=root.querySelector('.l2d-settings .l2d-notice-entry');note.click();await tick();
+ assert.equal(drawers.length,1);assert(root.querySelector('.l2d-settings'));
+ assert.equal(root.querySelector('[aria-label="交给 Coo 适配"]').checked,true);
+ assert.match(root.querySelector('[aria-label="模型搜索目录"]').placeholder,/最近使用/);
+});
+
+test('multiple proposals, active tasks, and approved retry states remain visible together',async t=>{
+ const {root,button,calls}=await mount(t,{ack:true,automation:{enabled:true,plans:[
+  {id:'one',model:'一',status:'pending',question:'确认一'},
+  {id:'two',model:'二',status:'approved',error:'磁盘暂不可用'},
+  {id:'three',model:'三',status:'executing'},
+ ]}});
+ assert.equal(root.querySelectorAll('.l2d-assist-plan').length,3);
+ assert.match(root.querySelector('.l2d-assist-dock').textContent,/安装中/);
+ assert.match(root.querySelector('.l2d-assist-dock').textContent,/磁盘暂不可用/);
+ button('重试安装').click();await tick();
+ assert.deepEqual(calls.find(c=>c.method==='assistApprove').args,['two']);
+});
+
+test('queued imports show the wait state and disable duplicate submission',async t=>{
+ const {root,dom,button,calls}=await mount(t,{ack:true,automation:{enabled:true,plans:[],submissions:[{token:'queued',waiting:['角色']}]},invoke:method=>method==='importPaths'?{token:'queued',models:[{dir:'role',title:'角色'}],packs:[]}:undefined});
+ paste(dom,root.querySelector('.l2d-drop-zone'),'G:/models/role');await tick();
+ assert.match(root.querySelector('.l2d-assist-dock').textContent,/等待方案/);
+ assert.equal(button('提交 AI 适配').disabled,true);
+ button('提交 AI 适配').click();assert(!calls.some(c=>c.method==='assistAnalyze'));
 });
 
 test('search and sorting preserve the underlying pack list and editing stays in the workspace', async t => {
