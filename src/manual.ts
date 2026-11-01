@@ -39,12 +39,21 @@ export class ManualSessions {
   private preview=new PreviewServer(token=>{try{return this.get(token);}catch{return null;}});
   private root:string;
   private workbench:string;
+  private reaper:ReturnType<typeof setInterval>|null=null;
+  private receipts=new Map<string,{at:number;result:any}>();
+  private openingTokens=new Map<string,{cancelled:boolean}>();
+  private cancelled=new Set<string>();
   constructor(root:string,workbench:string){this.root=root;this.workbench=workbench;}
-  async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string){
+  async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string,requestedToken?:string){
+    await this.prune();
     if(this.sessions.size>=3)throw Error('请先关闭已有动作编辑窗口');
-    await assertRegularTree(pack);
-    const token=randomUUID(),dir=join(this.root,'manual-preview',token),copy=join(dir,'pack');
+    const token=requestedToken||randomUUID();
+    if(!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(token))throw Error('编辑标识无效');
+    if(this.cancelled.has(token)||this.sessions.has(token)||this.openingTokens.has(token))throw Error('这次编辑已取消或已打开');
+    const pending={cancelled:false};this.openingTokens.set(token,pending);
+    const dir=join(this.root,'manual-preview',token),copy=join(dir,'pack');
     try{
+      await assertRegularTree(pack);
       await mkdir(dir,{recursive:true});await cp(pack,copy,{recursive:true});
       // The preview always uses this version's trusted renderer, including old generated packs.
       for(const file of ['live2d.js','native-actions.js','render-config.js','render-quality.js','role-values.js','soullink.js'])
@@ -64,14 +73,21 @@ export class ManualSessions {
       }};await walk(dir);
       if(bytes>512*1048576||files.length>1000)throw Error('预览资源过大');
       const value={token,dir,pack,catalog,bindings,source,buildId,hash:await packFingerprint(pack),at:Date.now(),files};
+      if(pending.cancelled)throw Error('这次编辑已取消');
       this.sessions.set(token,value);
+      if(!this.reaper){this.reaper=setInterval(()=>void this.prune().catch(()=>{}),60000);this.reaper.unref();}
       const origin=await this.preview.start();const base=`${origin}/figure-preview/${token}/`;
-      return {token,preview:{url:base+'frame.html',base:base+'pack/',entry:base+'pack/figure.js'},title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,files,
+      if(pending.cancelled||!this.sessions.has(token))throw Error('这次编辑已取消');
+      return {token,buildId,preview:{url:base+'frame.html',base:base+'pack/',entry:base+'pack/figure.js'},title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,files,
         words:{expressions:FACE_WORDS,motions:MOTION_WORDS},
         resources:catalog.resources.map(({id,title,kind,classification,seconds,release}:any)=>({id,title,kind,classification,seconds,release})),warnings:catalog.warnings||[],truncated:catalog.truncated};
-    }catch(e){this.sessions.delete(token);if(!this.sessions.size)await this.preview.stop();await rm(dir,{recursive:true,force:true});throw e;}
+    }catch(e){this.sessions.delete(token);if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;await this.preview.stop();}await rm(dir,{recursive:true,force:true});throw e;}
+    finally{this.openingTokens.delete(token);}
   }
-  get(token:string){const s=this.sessions.get(token);if(!s||Date.now()-s.at>2*3600000)throw Error('编辑已过期，请重新打开');s.at=Date.now();return s;}
+  get(token:string){const s=this.sessions.get(token);if(!s||!s.saving&&Date.now()-s.at>2*3600000){if(s)void this.close(token).catch(()=>{});throw Error('编辑已过期，请重新打开');}s.at=Date.now();return s;}
+  async prune(){for(const [token,s]of this.sessions)if(!s.saving&&Date.now()-s.at>2*3600000)await this.close(token).catch(()=>{});}
+  saved(token:string){for(const [key,value]of this.receipts)if(Date.now()-value.at>2*3600000)this.receipts.delete(key);return this.receipts.get(token)?.result;}
+  complete(token:string,result:any){this.receipts.set(token,{at:Date.now(),result});while(this.receipts.size>64)this.receipts.delete(this.receipts.keys().next().value!);}
   async asset(token:string,path:string,offset:number){
     const s=this.get(token),file=s.files.find((f:any)=>f.path===path);
     if(!file||!Number.isInteger(offset)||offset<0||offset>file.size)throw Error('预览资源无效');
@@ -83,6 +99,6 @@ export class ManualSessions {
     if(await packFingerprint(s.pack)!==s.hash)throw Error('形象包已变化，请重新打开编辑');
     return {session:s,bindings:validateBindings(s.catalog,bindings)};
   }
-  async close(token:string){const s=this.sessions.get(token);if(s){this.sessions.delete(token);await rm(s.dir,{recursive:true,force:true});if(s.ownedRoot)await rm(s.ownedRoot,{recursive:true,force:true});if(!this.sessions.size)await this.preview.stop();}}
-  async stop(){for(const key of this.sessions.keys())await this.close(key);}
+  async close(token:string){const pending=this.openingTokens.get(token);if(pending)pending.cancelled=true;const s=this.sessions.get(token);if(s){if(s.saving){s.closeRequested=true;return;}this.sessions.delete(token);try{await rm(s.dir,{recursive:true,force:true});if(s.ownedRoot)await rm(s.ownedRoot,{recursive:true,force:true});}finally{if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;await this.preview.stop();}}}else if(/^[a-f0-9-]{36}$/i.test(token)){this.cancelled.add(token);while(this.cancelled.size>128)this.cancelled.delete(this.cancelled.values().next().value!);}}
+  async stop(){try{await Promise.allSettled([...this.sessions.keys()].map(key=>this.close(key)));}finally{if(this.reaper)clearInterval(this.reaper);this.reaper=null;await this.preview.stop();}}
 }

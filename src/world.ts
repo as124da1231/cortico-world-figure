@@ -240,7 +240,7 @@ export class Live2dWorld implements World {
   }
 
   private async invoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState', 'manualAsset'].includes(method);
+    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState', 'manualAsset', 'manualClose', 'manualKeepAlive'].includes(method);
     if (this.stopping) throw new Error('扩展正在停止');
     if (readOnly) return this.dispatch(panel, method, args);
     if (panel === 'workbench' && method === 'assistApprove') {
@@ -273,6 +273,7 @@ export class Live2dWorld implements World {
     }
     if (method === 'manualAsset') return this.manual.asset(String(args[0]),String(args[1]),Number(args[2]||0));
     if (method === 'manualClose') { await this.manual.close(String(args[0])); return {ok:true}; }
+    if (method === 'manualKeepAlive') { this.manual.get(String(args[0])); return {ok:true}; }
     if (method === 'manualOpen' || method === 'manualOpenBuild') return this.openManual(method,args);
     if (method === 'manualSave') return this.saveManual(String(args[0]),args[1] as any[]);
     if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() };
@@ -672,11 +673,12 @@ export class Live2dWorld implements World {
 
   private async openManual(method:string,args:unknown[]) {
     this.requireNotice();
+    const requestedToken=String(args[method==='manualOpenBuild'?1:2]||'')||undefined;
     if(method==='manualOpenBuild'){
       const rec=this.state.builds?.find(b=>b.id===String(args[0]));
       if(!rec?.manualAvailable)throw Error('请重新导入模型以编辑原生动作');
       const library=JSON.parse(await readFile(join(rec.packDir,LIBRARY),'utf8'));
-      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id);
+      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id,requestedToken);
     }
     const token=String(args[0]),dir=String(args[1]);
     const paths=await this.importer.preserveForAutomation(token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
@@ -690,32 +692,47 @@ export class Live2dWorld implements World {
     try{
       const render={mode:'economy',textureLimit:512,canvasLimit:512,strict:false};
       const pack=await buildPack(WORKBENCH_DIR,source,scratch,{corePath:core.file,modelFile:file,render,maxTexture:render.textureLimit,native:nativeConfig(catalog,[],{includeAll:true})});
-      const result=await this.manual.open(pack,catalog,[],model);
+      const result=await this.manual.open(pack,catalog,[],model,undefined,requestedToken);
       this.manual.get(result.token).ownedRoot=scratch;return result;
     }catch(e){await rm(scratch,{recursive:true,force:true});throw e;}
   }
 
   private async saveManual(token:string,values:any[]) {
+    const receipt=this.manual.saved(token);if(receipt)return receipt;
     this.requireNotice();const {session,bindings}=await this.manual.validate(token,values);
+    session.saving=true;
+    try{
     if(session.source){
       const current=await inspectNative(session.source);
       if(current.fingerprint!==session.catalog.fingerprint)throw Error('模型素材已变化，请重新打开编辑');
       const result=await this.doBuild(session.source.dir,{remember:false,modelFile:session.source.file,native:nativeConfig(current,bindings),fingerprint:current.fingerprint});
-      await this.manual.close(token);return result;
+      this.manual.complete(token,result);return result;
     }
     const parent=join(this.workRoot(),'builds','manual-'+randomUUID()),target=join(parent,'pack');
+    let committed=false;
     try{
       await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
       for(const file of ['live2d.js','native-actions.js','render-config.js','render-quality.js','role-values.js','soullink.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
       await writeNativePack(target,session.catalog,bindings);
       if(await packFingerprint(session.pack)!==session.hash)throw Error('形象包已变化，请重新打开编辑');
       const old=this.state.builds?.find(b=>b.id===session.buildId);if(!old)throw Error('原打包产物已移除');
-      const rec={...old,id:'manual-'+randomUUID(),packDir:target,bytes:await dirSize(target),words:JSON.parse(await readFile(join(target,'figure.json'),'utf8')).vocab.length,at:Date.now()};
+      const rec={...old,packDir:target,bytes:await dirSize(target),words:JSON.parse(await readFile(join(target,'figure.json'),'utf8')).vocab.length,at:Date.now()};
       const previous={build:this.state.build,builds:this.state.builds};
-      this.state.builds=[rec,...this.state.builds||[]];this.state.build=rec;
+      this.state.builds=(this.state.builds||[]).map(b=>b.id===old.id?rec:b);this.state.build=rec;
       try{await this.save();}catch(e){Object.assign(this.state,previous);throw e;}
-      await this.manual.close(token);return {state:this.snapshot(),buildId:rec.id};
-    }catch(e){await rm(parent,{recursive:true,force:true});throw e;}
+      committed=true;
+      const result={state:this.snapshot(),buildId:rec.id};this.manual.complete(token,result);
+      const rel=relative(resolve(this.workRoot(),'builds'),resolve(old.packDir));
+      const inside=(root:string,file:string)=>{const path=relative(resolve(root),resolve(file));return !path||path!=='..'&&!path.startsWith('..'+sep)&&!isAbsolute(path);};
+      const installed=this.state.install?.target;
+      if(rel&&rel!=='..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel)&&!this.state.builds.some(b=>b.packDir===old.packDir)&&(!installed||!inside(old.packDir,installed)&&!inside(installed,old.packDir)))
+        await rm(old.packDir,{recursive:true,force:true}).catch(e=>this.say(`旧打包副本未能移除 · ${errText(e)}`));
+      return result;
+    }catch(e){if(!committed)await rm(parent,{recursive:true,force:true}).catch(()=>{});throw e;}
+    }finally{
+      session.saving=false;
+      if(this.manual.saved(token)||session.closeRequested)await this.manual.close(token).catch(e=>this.say(`预览资源释放未完成 · ${errText(e)}`));
+    }
   }
 
   private async notifyImported(result: any): Promise<void> {

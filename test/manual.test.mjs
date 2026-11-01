@@ -7,6 +7,7 @@ import {ManualSessions,writeNativePack,LIBRARY} from '../src/manual.ts';
 import {adaptationMode,aiEnabled} from '../src/adaptation.mjs';
 import {LIVE2D} from '../src/index.ts';
 import {makeCtx} from './_ctx.mjs';
+import {Live2dWorld} from '../src/world.ts';
 
 const catalog={model:{title:'Example'},fingerprint:'source',resources:[
  {id:'smile',kind:'expression',classification:'expression',title:'Smile',seconds:1.5,parameters:[{id:'ParamSmile',value:1}],raw:{Parameters:[{Id:'ParamSmile',Value:1}] }},
@@ -61,4 +62,38 @@ test('AI mode can execute with the legacy switch off, and switching to manual st
  world.doBuild=async()=>{built=true;throw Error('build reached');};
  await assert.rejects(world.executeAutomation({kind:'live2d',dir:root,file:'a.model3.json'},{version:1,bindings:[],resources:[]}),/build reached/);assert.equal(built,true);
  cfg.adaptationMode='manual';built=false;await assert.rejects(world.executeAutomation({kind:'live2d',dir:root},{version:1,bindings:[],resources:[]}),/关闭/);assert.equal(built,false);
+});
+
+async function editableWorld(t){
+ const f=await fixture(t);await writeNativePack(f.pack,catalog,[]);
+ const world=new Live2dWorld({getConfig:()=>({enabled:true,workDir:join(f.root,'work')}),persist(){},dataDir:f.root});
+ const record={id:'existing',packDir:f.pack,at:1,bytes:1,words:0,cover:false,fit:false,manualAvailable:true};
+ world.state={modelDir:'',builds:[record],build:record,distributionNotice:{revision:1,at:1}};
+ t.after(()=>world.stop());const opened=await world.manual.open(f.pack,catalog,[],undefined,record.id);
+ return {...f,world,token:opened.token};
+}
+test('editing replaces the same card and retrying its receipt never creates another card',async t=>{
+ const {world,token}=await editableWorld(t);const first=await world.saveManual(token,binding),pack=world.state.builds[0].packDir;
+ assert.equal(first.buildId,'existing');assert.equal(world.state.builds.length,1);assert.equal(world.state.builds[0].id,'existing');
+ assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).bindings[0].resource,'smile');
+ assert.deepEqual(await world.saveManual(token,binding),first);assert.equal(world.state.builds.length,1);
+ const opened=await world.manual.open(pack,catalog,binding,undefined,'existing');await world.saveManual(opened.token,[]);
+ assert.equal(world.state.builds.length,1);assert.deepEqual(JSON.parse(await readFile(join(world.state.builds[0].packDir,LIBRARY))).bindings,[]);
+});
+test('temporary cleanup failures cannot remove a committed pack or report save failure',async t=>{
+ const {world,token}=await editableWorld(t),close=world.manual.close.bind(world.manual);world.manual.close=async()=>{throw Error('EPERM cleanup');};
+ try{const result=await world.saveManual(token,binding);assert.equal(result.buildId,'existing');assert((await readFile(join(world.state.builds[0].packDir,'figure.json'))).length);assert.equal(world.state.builds.length,1);assert.equal((await world.saveManual(token,binding)).buildId,'existing');}
+ finally{world.manual.close=close;await close(token);}
+});
+test('failed state commits keep the original card and allow retry with the same session',async t=>{
+ const {world,token,pack,root}=await editableWorld(t),save=world.save.bind(world);world.save=async()=>{throw Error('disk full');};
+ await assert.rejects(world.saveManual(token,binding),/disk full/);assert.equal(world.state.builds[0].packDir,pack);assert.deepEqual(JSON.parse(await readFile(join(pack,LIBRARY))).bindings,[]);assert.deepEqual(await readdir(join(root,'work','builds')),[]);
+ world.save=save;await world.saveManual(token,binding);assert.equal(world.state.builds[0].id,'existing');
+});
+test('expired leases are removed, saving leases defer close, and cancelled open requests leave no sessions',async t=>{
+ const {root,pack}=await fixture(t),sessions=new ManualSessions(root,new URL('../workbench',import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1'));t.after(()=>sessions.stop());
+ const first=await sessions.open(pack,catalog);sessions.get(first.token).at=Date.now()-3*3600000;await sessions.prune();assert.equal(sessions.sessions.size,0);await assert.rejects(fetch(first.preview.url));
+ const second=await sessions.open(pack,catalog);const lease=sessions.get(second.token);lease.saving=true;await sessions.close(second.token);assert(sessions.sessions.has(second.token));assert(lease.closeRequested);lease.saving=false;await sessions.close(second.token);
+ const id='12345678-1234-1234-1234-123456789abc';await sessions.close(id);await assert.rejects(sessions.open(pack,catalog,[],undefined,undefined,id),/取消/);assert.equal(sessions.sessions.size,0);
+ const next='23456789-1234-1234-1234-123456789abc';const opening=sessions.open(pack,catalog,[],undefined,undefined,next);await sessions.close(next);await assert.rejects(opening,/取消/);assert.equal(sessions.sessions.size,0);
 });
