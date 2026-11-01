@@ -104,15 +104,18 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
   };
   enabled.addEventListener('change',depend); gear.addEventListener('change',depend); gear.addEventListener('input',depend); depend();
   const actions = el('div', 'l2d-dialog-actions');
-  const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
-  note.addEventListener('click', async () => {
-    if (Object.keys(dirty).length && !autosave && !await ctx.ui.confirm({title:t('放弃未保存的设置？','Discard unsaved settings?'),body:t('打开须知将关闭当前设置。','Opening the notice closes settings.')})) return;
-    if (!isDisposed()) onNotice?.();
-  });
+  if (onNotice) {
+    const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
+    note.addEventListener('click', async () => {
+      if (Object.keys(dirty).length && !autosave && !await ctx.ui.confirm({title:t('放弃未保存的设置？','Discard unsaved settings?'),body:t('打开须知将关闭当前设置。','Opening the notice closes settings.')})) return;
+      if (!isDisposed()) onNotice();
+    });
+    actions.append(note);
+  }
   const status = el('span', 'l2d-settings-status', autosave ? t('修改后自动保存。', 'Changes save automatically.') : '');
   status.setAttribute('role', 'status');
   const save = el('button', 'l2d-btn primary', t('保存设置', 'Save settings')); save.type = 'submit'; save.hidden = autosave;
-  actions.append(note, status, save); body.append(actions);
+  actions.append(status, save); body.append(actions);
   let saving = false;
   ctx.guardLeave?.(() => body.isConnected && (saving || Object.keys(dirty).length) ? t('设置尚未保存，确定离开？', 'Settings are not saved. Leave anyway?') : null);
   async function persist() {
@@ -160,11 +163,8 @@ const configuration = {
     const title = doc.createElement('h2'); title.textContent = zh ? '配置' : 'Configuration';
     const version = doc.createElement('span'); version.className = 'l2d-version-corner'; version.textContent = 'v' + state.version;
     header.append(title, version);
-    const notice = doc.createElement('details'); notice.className = 'l2d-config-notice';
-    const summary = doc.createElement('summary'); summary.textContent = zh ? '须知' : 'Notice';
-    const message = doc.createElement('p'); message.textContent = NOTICE_TEXT[zh ? 'zh' : 'en']; notice.append(summary, message);
-    const form = settingsForm(ctx, cfg, {autosave:true, onNotice:() => {notice.open = !notice.open;}});
-    shell.append(header, form, notice); ctx.root.append(shell);
+    const form = settingsForm(ctx, cfg, {autosave:true});
+    shell.append(header, form); ctx.root.append(shell);
     return {dispose() { shell.remove(); }};
   },
 };

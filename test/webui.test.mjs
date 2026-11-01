@@ -57,7 +57,8 @@ async function mount(t, opts = {}) {
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
   const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
   assert.equal(root.querySelectorAll('.l2d-gear-input').length,3);
-  assert.equal(root.querySelector('.l2d-config-notice').open,false);
+  assert.equal(root.querySelector('.l2d-config-notice'),null);
+  assert.equal(root.querySelector('.l2d-config-page .l2d-notice-entry'),null);
   assert.equal(root.querySelector('.l2d-version-corner').textContent,'v1.4.2');
   const texture=root.querySelector('[aria-label="贴图精度"]');
   texture.value='2';texture.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await tick();
