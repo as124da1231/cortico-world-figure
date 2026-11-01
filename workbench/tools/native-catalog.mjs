@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {lstat,readFile,readdir,realpath} from 'node:fs/promises';
-import {basename,dirname,extname,isAbsolute,join,relative,resolve,sep} from 'node:path';
+import {basename,dirname,isAbsolute,join,relative,resolve,sep} from 'node:path';
 import {compileCurve} from '../pack/backends/native-actions.js';
 
 export const FACE_WORDS=['neutral','happy','wink','love','shy','surprised','angry','sad','sleepy','thinking','smug','pout','worried','determined','flustered','scared','excited','cry','confused'];
@@ -20,7 +20,10 @@ export async function localFile(root,name,max=4*1048576){
  return file;
 }
 
-/** Bounded discovery, without executing any model files. Never follows directory links. */
+/** Bounded discovery, without executing any model files. Never follows directory links.
+ * @param {string | undefined} input
+ * @param {{roots?:string[],query?:string,maxDepth?:number,maxEntries?:number,maxModels?:number,signal?:AbortSignal}} options
+ */
 export async function findModels(input,{roots=[],query='',maxDepth=4,maxEntries=10000,maxModels=40,signal}={}){
  const result=[],problems=[];let entries=0,truncated=false;
  const scan=async(dir,depth,entryFile)=>{
@@ -55,10 +58,13 @@ export async function findModels(input,{roots=[],query='',maxDepth=4,maxEntries=
  return {models:[...new Map(result.map(m=>[m.id,m])).values()],problems:problems.slice(0,20),truncated,entries};
 }
 
+/** @type {Array<[string, RegExp]>} */
 const hints=[
  ['happy',/happy|smile|开心|高兴|微笑|笑脸/i],['shy',/shy|blush|害羞|脸红/i],['angry',/angry|anger|生气|愤怒/i],['sad',/sad|难过|悲伤/i],['cry',/cry|tear|哭|流泪/i],['surprised',/surpris|shock|惊讶|吃惊/i],['sleepy',/sleepy|tired|困倦|困了/i],['wink',/wink|眨眼/i],['love',/love|heart|喜欢|爱心/i],['thinking',/think|思考/i],['nod',/\bnod\b|点头/i],['shake',/\bshake\b|摇头/i],['wave',/\bwave\b|挥手|招手/i],['bow',/\bbow\b|鞠躬/i],['cheer',/cheer|欢呼/i],['dance',/dance|跳舞/i],['idle',/\bidle\b|待机|呼吸/i],['stretch',/stretch|伸懒腰/i],
 ];
 
+/** @param {{id:string,dir:string,file:string,kind:string,title:string}} model
+ * @param {{signal?:AbortSignal}} options */
 export async function inspectNative(model,{signal}={}){
  const root=model.dir,manifest=await readJson(await localFile(root,model.file));
  const refs=manifest.FileReferences?.FileReferences||manifest.FileReferences||{};
@@ -108,7 +114,7 @@ export async function inspectNative(model,{signal}={}){
    const hit=hints.find(([,rx])=>rx.test(`${title} ${basename(rel)}`));
    const candidate=hit&&!appearance?{word:hit[0],confidence:.82,reason:'文件名或作者热键含明确动作／表情含义'}:null;
    const sourceRel=relative(root,canonical).replaceAll('\\','/');
-   resources.push({id:(kind==='motion'?'motion-':'expr-')+digest(sourceRel).slice(0,16),kind,file:sourceRel,title,classification,seconds:kind==='motion'?Math.max(.05,Math.min(60,Number(json.Meta?.Duration)||1)):1.5,loop:json.Meta?.Loop===true,hash:digest(raw),parameters:values.map(v=>({...v,label:metadata.get(v.id)?.name||v.id})),suggestion:candidate,raw:json});
+   resources.push({id:(kind==='motion'?'motion-':'expr-')+digest(sourceRel).slice(0,16),kind,file:sourceRel,title,classification,seconds:kind==='motion'?Math.max(.05,Math.min(60,Number(json.Meta?.Duration)||1)):1.5,loop:json.Meta?.Loop===true,hash:digest(raw),parameters:values.map(v=>({...v,label:metadata.get(v.id)?.name||v.id})),suggestion:candidate,raw:json,release:undefined});
   }catch(e){warnings.push(`${rel}: ${e.message}`);}
  }
  // Pair transitions by their parameter channels and reversed endpoints, independent of model names.

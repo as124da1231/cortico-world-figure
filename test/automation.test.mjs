@@ -9,6 +9,8 @@ import {compileCurve,createNativeActions,applyNativeValues} from '../workbench/p
 import {LIVE2D} from '../src/index.ts';
 import {makeCtx} from './_ctx.mjs';
 import {PackImporter} from '../src/import.ts';
+import {installPack} from '../src/pipeline.ts';
+import {packFingerprint} from '../src/pack-fingerprint.ts';
 
 const json=(path,value)=>writeFile(path,JSON.stringify(value));
 const motion=(start,end)=>({Meta:{Duration:1,Loop:true},Curves:[{Target:'Parameter',Id:'ParamArm',Segments:[0,start,0,1,end]},{Target:'PartOpacity',Id:'PartArm',Segments:[0,start,0,1,end]}]});
@@ -57,6 +59,43 @@ test('explicit resubmission and concurrent imports cannot duplicate a queued ana
  assert.equal(f.auto.submissions()[0].waiting.length,1);
  await f.auto.prepare(f.model.id,f.bindings);
  assert.equal(f.auto.submissions()[0].waiting.length,0);
+});
+
+test('a stalled submission can retry after cooldown and concurrent retries still emit once',async t=>{
+ const f=await automation(t),result={token:'retry-analysis',models:[{dir:'role'}],packs:[]};
+ await f.auto.imported(result,()=>f.dir);f.auto.requests.get(result.token).at-=31*60000;
+ assert.equal(f.auto.submissions()[0].canRetry,true);
+ await Promise.all([f.auto.imported(result,()=>f.dir,true),f.auto.imported(result,()=>f.dir,true)]);
+ assert.equal(f.events.length,2);assert.equal(f.auto.submissions()[0].canRetry,false);
+ await f.auto.prepare(f.model.id,f.bindings);f.auto.requests.get(result.token).at-=31000;
+ assert.equal((await f.auto.imported(result,()=>f.dir,true)).queued,false);assert.equal(f.events.length,2);
+});
+
+test('ready-pack approval rejects changed runtime files and copied contents before replacing an installation',async t=>{
+ const f=await automation(t),source=join(f.root,'ready');await mkdir(source);
+ await json(join(source,'figure.json'),{id:'ready',entry:'figure.js'});await writeFile(join(source,'figure.js'),'old');
+ const model=(await f.auto.find(source)).models[0],plan=await f.auto.prepare(model.id,[]);await f.auto.approve(plan.id);
+ const expected=await packFingerprint(source),target=await installPack(source,join(f.root,'installed'));
+ await writeFile(join(source,'figure.js'),'new');
+ await assert.rejects(f.auto.install(plan.id),/已改变/);assert.equal(f.executions.length,0);
+ await assert.rejects(installPack(source,join(f.root,'installed'),{expectedFingerprint:expected}),/已改变/);
+ assert.equal(await readFile(join(target,'figure.js'),'utf8'),'old');
+ const current=await packFingerprint(source);await installPack(source,join(f.root,'installed'),{expectedFingerprint:current});
+ assert.equal(await readFile(join(target,'figure.js'),'utf8'),'new');
+ await mkdir(join(source,'models'));await writeFile(join(source,'models','texture.png'),'texture');
+ assert.notEqual(await packFingerprint(source),current);
+});
+
+test('legacy figure plans migrate into the figure namespace without overwriting the original record',async t=>{
+ const f=await automation(t),plan=await f.auto.prepare(f.model.id,f.bindings);await f.auto.approve(plan.id);
+ const saved=await readFile(f.auto.file(),'utf8'),legacy=join(f.root,'data','automation.json');
+ await writeFile(legacy,saved);await rm(f.auto.file());
+ const resumed=new FigureAutomation(f.auto.options);await resumed.start();t.after(()=>resumed.stop());
+ assert.equal(resumed.pending()[0].status,'approved');assert.equal(await readFile(legacy,'utf8'),saved);
+ assert.equal(JSON.parse(await readFile(resumed.file(),'utf8')).owner,'figure');
+ await rm(resumed.file());await writeFile(legacy,JSON.stringify({version:1,plans:[{id:'other-app',model:{id:'unrelated'}}]}));
+ const unrelated=new FigureAutomation(f.auto.options);await unrelated.start();t.after(()=>unrelated.stop());
+ assert.equal(unrelated.pending().length,0);assert.equal(JSON.parse(await readFile(legacy,'utf8')).plans[0].id,'other-app');
 });
 
 test('bounded generic discovery finds Chinese Animation/Exp3 and keeps unique stable resource IDs',async t=>{

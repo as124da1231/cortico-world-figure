@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { childPath, packId } from './paths.ts';
+import { packFingerprint } from './pack-fingerprint.ts';
 
 /** Imported packages may not redirect copying or editing outside their own directory. */
 export async function assertRegularTree(root: string): Promise<void> {
@@ -173,7 +174,7 @@ export async function buildPack(
 export async function installPack(
   packDir: string,
   figuresDir: string,
-  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal } = {},
+  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal; expectedFingerprint?: string } = {},
 ): Promise<string> {
   opts.signal?.throwIfAborted();
   await assertRegularTree(packDir);
@@ -194,6 +195,9 @@ export async function installPack(
   try {
     // Copy and verify before touching the installed figure.
     await cp(source, pending, { recursive: true, dereference: false });
+    if (opts.expectedFingerprint && await packFingerprint(pending, opts.signal) !== opts.expectedFingerprint) {
+      throw new Error('形象包内容已改变，请重新分析确认');
+    }
     const copied = JSON.parse(await readFile(join(pending, 'figure.json'), 'utf8'));
     if (copied.id !== id) throw new Error('复制后的形象包校验失败');
     opts.signal?.throwIfAborted();

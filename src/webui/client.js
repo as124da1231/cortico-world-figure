@@ -126,17 +126,21 @@ export default {
 
         const shell = el('section', 'l2d-sheet');
         const header = el('header', 'l2d-header');
-        const heading = el('div');
-        heading.append(el('h2', null, t('模型工坊', 'Figure workshop')));
+        header.setAttribute('aria-label',t('模型工坊操作','Figure workshop actions'));
+        const toolbar = el('div','l2d-toolbar');
         const settingsButton = el('button', 'l2d-btn l2d-settings-button', t('设置', 'Settings'));
         settingsButton.type = 'button';
         settingsButton.addEventListener('click', openSettings);
-        header.append(heading, settingsButton);
+        toolbar.append(settingsButton);header.append(toolbar);
         const sheet = { el: shell, body: el('div', 'l2d-body') };
         shell.append(header, sheet.body);
         ctx.root.appendChild(shell);
         const noticeTop = el('div', 'l2d-notice-top');
         sheet.body.appendChild(noticeTop);
+        const operation = el('section','l2d-operation');
+        operation.setAttribute('aria-label',t('导入与处理','Import and processing'));
+        const operationBottom = el('div','l2d-operation-bottom');
+        sheet.body.append(operation);
         let versionCorner = el('button', 'l2d-version-corner', '…');
         versionCorner.type = 'button';
         versionCorner.disabled = true;
@@ -226,9 +230,10 @@ export default {
         zipInput.type = 'file';
         zipInput.accept = '.zip,application/zip';
         zipInput.hidden = true;
-        actions.append(chooseFolder, chooseZip, pack);
-        bar.append(dropZone, actions, folderInput, zipInput);
-        sheet.body.appendChild(bar);
+        toolbar.prepend(chooseFolder, chooseZip);
+        actions.append(pack);
+        bar.append(dropZone, folderInput, zipInput);
+        operation.append(bar,operationBottom);
         let staged = null;
         const completed = new Set();
         function paintSource() {
@@ -239,12 +244,13 @@ export default {
           sourceTitle.textContent = count ? names.slice(0, 3).join('、') + (count > 3 ? t(` 等 ${count} 项`, ` and ${count - 3} more`) : '') : t('拖入模型或 ZIP', 'Drop a model folder or ZIP');
           sourceTitle.title = names.join('\n');
           sourceHint.textContent = count
-            ? (assistState.enabled ? t(`已识别 ${count} 项 · 导入后自动交给 Coo，进展见下方`, `${count} recognized · sent to Coo automatically; see progress below`) : completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install') : t(`已识别 ${count} 项，点击右侧一键打包`, `${count} recognized; pack using the button on the right`))
+            ? (assistState.enabled ? t(`已识别 ${count} 项 · 导入后自动交给 Coo，进展见下方`, `${count} recognized · sent to Coo automatically; see progress below`) : completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install') : t(`已识别 ${count} 项，可以开始打包`, `${count} recognized; ready to pack`))
             : t('点击此区域后，按 Ctrl+V 粘贴文件或目录路径', 'Click here, then press Ctrl+V to paste files or a local path');
           dropZone.classList.toggle('ready', count > 0);
           dropZone.setAttribute('aria-disabled', String(state.busy));
           pack.disabled = state.busy || !count || completed.size === count;
-          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error)) pack.disabled = true;
+          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error && !r.canRetry)) pack.disabled = true;
+          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && r.canRetry)) pack.textContent = t('重新提交分析','Retry analysis');
         }
         paintSource();
 
@@ -256,9 +262,9 @@ export default {
         status.setAttribute('role', 'status');
         status.setAttribute('aria-live', 'polite');
         status.append(dot, spinner, statusText);
-        sheet.body.appendChild(status);
+        const actionRow=el('div','l2d-action-row');actionRow.append(status,actions);operationBottom.append(actionRow);
         const adaptationNote = el('div', 'l2d-adaptation-note');
-        sheet.body.appendChild(adaptationNote);
+        operationBottom.appendChild(adaptationNote);
 
         function adaptationDetails(info) {
           if (!info) return null;
@@ -295,7 +301,7 @@ export default {
         const progress = el('div', 'l2d-progress');
         const progressBar = el('span');
         progress.appendChild(progressBar);
-        sheet.body.appendChild(progress);
+        operationBottom.appendChild(progress);
 
         // Cards flow with the page; the editor appears beside them when needed.
         const head = el('div', 'l2d-head');
@@ -315,7 +321,7 @@ export default {
         sheet.body.appendChild(head);
         const workspace = el('div', 'l2d-workspace');
         const assistDock = el('div', 'l2d-assist-dock');
-        sheet.body.insertBefore(assistDock, head);
+        operationBottom.append(assistDock);
         const grid = el('div', 'l2d-grid');
         grid.setAttribute('aria-label', t('模型包卡片', 'Pack cards'));
         workspace.append(grid); sheet.body.append(workspace);
@@ -455,7 +461,12 @@ export default {
           for (const request of submissions) {
             if (!request.error && !request.waiting?.length) continue;
             const message = request.error ? t('提交失败：','Submission failed: ') + request.error : t('已提交 Coo，等待方案或聊天中的模型选择：','Sent to Coo; awaiting a proposal or model choice in chat: ') + request.waiting.join('、');
-            assistDock.append(el('p','l2d-assist-wait'+(request.error?' has-error':''),message));
+            const waiting=el('div','l2d-assist-submission');waiting.append(el('p','l2d-assist-wait'+(request.error?' has-error':''),message));
+            if(request.canRetry&&request.token===staged?.token){
+              const retry=el('button','l2d-btn sm',t('重新提交','Retry'));retry.disabled=state.busy;
+              retry.addEventListener('click',()=>pack.click());waiting.append(retry);
+            }
+            assistDock.append(waiting);
           }
           const wordNames = {neutral:'平静',happy:'开心',wink:'眨眼',love:'喜欢',shy:'害羞',surprised:'惊讶',angry:'生气',sad:'难过',sleepy:'困倦',thinking:'思考',smug:'得意',pout:'嘟嘴',worried:'担心',determined:'坚定',flustered:'慌张',scared:'害怕',excited:'兴奋',cry:'哭泣',confused:'疑惑',idle:'待机',nod:'点头',shake:'摇头',wave:'挥手',bow:'鞠躬',cheer:'欢呼',dance:'跳舞',jump:'跳跃',sit:'坐下',stretch:'伸展',shiver:'发抖'};
           const history = el('details','l2d-assist-history'); history.dataset.id='history'; history.open=expanded.has('history');
@@ -526,7 +537,7 @@ export default {
           dropZone.setAttribute('aria-disabled', String(on));
           const count = (staged?.models?.length || 0) + (staged?.packs?.length || 0);
           pack.disabled = on || !count || completed.size === count;
-          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error)) pack.disabled = true;
+          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error && !r.canRetry)) pack.disabled = true;
           for (const b of grid.querySelectorAll('button')) b.disabled = on;
           for (const input of modal?.querySelectorAll('button, input, textarea, select') ?? []) input.disabled = on;
           status.classList.toggle('busy', on);

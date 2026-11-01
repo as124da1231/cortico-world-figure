@@ -191,6 +191,16 @@ test('completed proposals use collapsed history while pending proposals stay dir
  assert.equal(root.querySelector('.l2d-assist-dock > .l2d-assist-plan button.primary').textContent,'同意安装');
 });
 
+test('an eligible stalled import can resubmit analysis from the current workbench',async t=>{
+ const {root,dom,button,calls}=await mount(t,{ack:true,automation:{enabled:true,plans:[],submissions:[{token:'retry',models:[{id:'m',title:'角色'}],waiting:['角色'],canRetry:true}]},invoke:method=>method==='importPaths'?{token:'retry',models:[{dir:'role',title:'角色'}],packs:[]}:undefined});
+ const paste=new dom.window.Event('paste',{bubbles:true,cancelable:true});
+ Object.defineProperty(paste,'clipboardData',{value:{files:[],getData:()=> 'E:\\models\\role'}});
+ root.querySelector('.l2d-drop-zone').dispatchEvent(paste);await tick();await tick();
+ assert.equal(button('重新提交分析').disabled,false);button('重新提交分析').click();await tick();
+ assert.equal(calls.filter(c=>c.method==='assistAnalyze').length,1);
+ assert.deepEqual(calls.find(c=>c.method==='assistAnalyze').args,['retry',['role'],[]]);
+});
+
 test('search and sorting preserve the underlying pack list and editing stays in the workspace', async t => {
   const {root,dom,button,calls}=await mount(t,{ack:true,builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1},{id:'b',nameZh:'Beta',at:2,bytes:1}]});
   assert.equal(root.querySelector('.l2d-card').dataset.id,'b');
@@ -272,7 +282,8 @@ test('folder and ZIP selection are owned by the Coo browser window without the b
     ack: true,
     pickPath: async () => { throw new Error('must not use the backend picker'); },
   });
-  assert.deepEqual([...root.querySelectorAll('.l2d-import-bar button')].map(b => b.textContent), ['选择文件夹', '选择 ZIP', '一键打包']);
+  assert.deepEqual([...root.querySelectorAll('.l2d-toolbar button')].map(b => b.textContent), ['选择文件夹', '选择 ZIP', '设置']);
+  assert.equal(root.querySelector('.l2d-operation .l2d-import-controls button').textContent, '一键打包');
   assert.equal(root.querySelector('.l2d-path'), null);
   assert.equal(button('扫描'), undefined);
   assert.equal(button('一键打包').disabled, true);

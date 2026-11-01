@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { unzipSync } from 'fflate';
 
 /** 一次 zip 导入最多这么多（未解压）。 */
@@ -49,6 +49,7 @@ export interface StagedPack {
 
 export interface StagedModel {
   dir: string;
+  file: string;
   /** .model3.json 去掉后缀，当标题。 */
   title: string;
   files: number;
@@ -166,7 +167,7 @@ export async function thumbOf(dir: string, file: unknown): Promise<string | null
  * 同名先备份（与打包产物安装走同一套 backups 目录）。
  */
 export class PackImporter {
-  private staged: { token: string; root: string; packs: Set<string>; models:Set<string>;local?:Map<string,string> } | null = null;
+  private staged: { token: string; root: string; packs: Set<string>; models:Set<string>;entries:Map<string,string>;local?:Map<string,string> } | null = null;
   private uploads = new Map<string, { root: string; bytes: number; paths: Set<string>; chunks: Map<string,{written:number;total:number}> }>();
 
   /** AI jobs outlive the panel's import token. Keep only owned upload data in a separate cache. */
@@ -209,12 +210,12 @@ export class PackImporter {
     if(!paths.length||paths.length>16)return {error:'请选择 1–16 个模型文件夹或 ZIP'};
     await this.cancel();
     const root=await mkdtemp(join(tmpdir(),'figure-local-'));
-    const sources:Array<{dir:string;full:string}>=[];
+    const sources:Array<{dir:string;full:string;entryFile?:string}>=[];
     try {
       let bytes=0;
       for(const [i,input] of [...new Set(paths)].entries()) {
         if(!isAbsolute(input))throw new Error('需要本机绝对路径');
-        const info=await stat(input);let full=input;
+        const info=await stat(input);let full=input,entryFile:string|undefined;
         if(info.isFile()) {
           if(/\.zip$/i.test(input)) {
             if(info.size>IMPORT_MAX)throw new Error('ZIP 超过 32 MB，请选择解压后的文件夹');
@@ -222,10 +223,10 @@ export class PackImporter {
             bytes+=files.reduce((sum,f)=>sum+f.bytes.length,0);if(bytes>UPLOAD_MAX)throw new Error('导入内容超过 512 MB');
             full=join(root,`zip-${i}`);await mkdir(full);
             const error=await this.materialize(full,files);if(error)throw new Error(error);
-          } else if(/(?:\.model3\.json|[\\/]figure\.json)$/i.test(input))full=dirname(input);
+          } else if(/(?:\.model3\.json|[\\/]figure\.json)$/i.test(input)){full=dirname(input);entryFile=basename(input);}
           else throw new Error('请选择模型目录、model3.json、figure.json 或 ZIP');
         }
-        sources.push({dir:`source-${i}`,full});
+        sources.push({dir:`source-${i}`,full,entryFile});
       }
       return this.finish(root,false,installed,sources);
     } catch(e){await rm(root,{recursive:true,force:true});return {error:String((e as Error).message??e)};}
@@ -326,17 +327,21 @@ export class PackImporter {
   }
 
   /** 扫描临时目录，登记成待装清单。 */
-  private async finish(root: string, fromFolders: boolean, installed: Map<string, string>,sources?:Array<{dir:string;full:string}>): Promise<StageResult | { error: string }> {
+  private async finish(root: string, fromFolders: boolean, installed: Map<string, string>,sources?:Array<{dir:string;full:string;entryFile?:string}>): Promise<StageResult | { error: string }> {
     try {
       const packs: StagedPack[] = [];
       const models: StagedModel[] = [];
       const problems: StageResult['problems'] = [];
       const local=new Map<string,string>();
       const candidates=async(kind:'pack'|'model')=>{
-        const out:Array<{dir:string;full:string}>=[];
-        for(const source of sources??[{dir:'',full:root}])for(const rel of await (kind==='pack'?findPacks:findModels)(source.full,PACK_DEPTH+(fromFolders?1:0))) {
+        const out:Array<{dir:string;full:string;entryFile?:string}>=[];
+        for(const source of sources??[{dir:'',full:root}]) {
+          if(source.entryFile && (kind==='pack') !== (source.entryFile.toLowerCase()==='figure.json'))continue;
+          const dirs=source.entryFile?['']:await (kind==='pack'?findPacks:findModels)(source.full,PACK_DEPTH+(fromFolders?1:0));
+          for(const rel of dirs) {
           const dir=[source.dir,rel].filter(Boolean).join('/'),full=join(source.full,...rel.split('/').filter(Boolean));
-          out.push({dir,full});if(sources)local.set(dir,full);
+          out.push({dir,full,entryFile:source.entryFile});if(sources)local.set(dir,full);
+          }
         }
         return out;
       };
@@ -368,13 +373,14 @@ export class PackImporter {
         });
       }
 
-      for (const {dir,full} of await candidates('model')) {
+      for (const {dir,full,entryFile} of await candidates('model')) {
         const entries = await readdir(full, { withFileTypes: true });
-        const entry = entries.find((e) => e.isFile() && e.name.toLowerCase().endsWith('.model3.json'));
+        const entry = entries.find((e) => e.isFile() && (entryFile ? e.name === entryFile : e.name.toLowerCase().endsWith('.model3.json')));
         if (!entry) continue;
         const info=await dirInfo(full).catch(()=>({bytes:0,files:0}));
         models.push({
           dir,
+          file: entry.name,
           title: entry.name.replace(/\.model3\.json$/i, ''),
           files: info.files,
           bytes: info.bytes,
@@ -400,7 +406,7 @@ export class PackImporter {
         return { token: '', packs: [], models: [], problems };
       }
       const token = randomUUID();
-      this.staged = { token, root, packs: new Set(packs.map((p) => p.dir)),models:new Set(models.map(m=>m.dir)),...(sources?{local}:{}) };
+      this.staged = { token, root, packs: new Set(packs.map((p) => p.dir)),models:new Set(models.map(m=>m.dir)),entries:new Map(models.map(m=>[m.dir,m.file])),...(sources?{local}:{}) };
       return { token, packs, models, problems };
     } catch (err) {
       await rm(root, { recursive: true, force: true });
@@ -464,6 +470,10 @@ export class PackImporter {
   resolvePack(token: string, dir: string): string | null {
     if (!this.staged || this.staged.token !== token || !this.staged.packs.has(dir)) return null;
     return this.resolve(token, dir);
+  }
+
+  modelFile(token: string, dir: string): string | undefined {
+    return this.staged?.token === token ? this.staged.entries.get(dir) : undefined;
   }
 
   /** 待装清单里某个目录的绝对路径；token 不对就说没有。 */

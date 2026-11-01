@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.check.json",
+  "compilerOptions": {
+    "checkJs": true,
+    "strict": false
+  },
+  "include": [],
+  "files": ["src/automation.mjs"]
+}

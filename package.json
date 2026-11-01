@@ -45,8 +45,8 @@
         "description": "Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo."
       }
     },
-    "webUiClient": "dist/webui-aee511b88f9f.js",
-    "webUiStyle": "dist/webui-7ef90b3abaf5.css",
+    "webUiClient": "dist/webui-eddcc9a886e0.js",
+    "webUiStyle": "dist/webui-f9722680cd34.css",
     "describe": "describe.json"
   },
   "files": [
@@ -69,6 +69,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
+    "cortico": "0.2.7",
     "jsdom": "^26.1.0",
     "typescript": "^5.9.3"
   },
@@ -76,6 +77,6 @@
     "build:ui": "node scripts/build-webui.mjs",
     "prepack": "npm run build:ui",
     "test": "node --experimental-strip-types --test test/*.test.mjs",
-    "check": "node --check dist/webui.js && tsc --noEmit -p tsconfig.check.json"
+    "check": "node --check dist/webui.js && tsc --noEmit -p tsconfig.check.json && tsc --noEmit -p tsconfig.automation.json"
   }
 }

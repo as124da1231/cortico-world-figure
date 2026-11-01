@@ -30,6 +30,21 @@ test('local entry-file imports whitelist candidate paths and cancellation preser
   assert.equal(JSON.parse(await readFile(join(source,'figure.json'),'utf8')).id,'sample');
 });
 
+test('an explicitly selected model entry survives panel import, packing and AI discovery',async t=>{
+  const root=await fixture(t),source=join(root,'variants');await mkdir(source);
+  for(const name of ['A','B'])await writeFile(join(source,name+'.model3.json'),JSON.stringify({FileReferences:{Moc:name+'.moc3'}}));
+  const events=[],cfg={enabled:true,assistMotions:true,assistGear:'text'};
+  const world=LIVE2D.create(makeCtx(root,cfg));await world.start({pushEvent:async e=>events.push(e)});t.after(()=>world.stop());
+  const invoke=(method,args=[])=>world.webUi().invoke('workbench',method,args);
+  const staged=await invoke('importPaths',[[join(source,'B.model3.json')]]);
+  assert.equal(staged.models.length,1);assert.equal(staged.models[0].title,'B');
+  const model=(await world.tools().find(t=>t.name==='figure_actions').handler({model:events[0].meta.models[0]},{}));
+  assert.equal(JSON.parse(model.text).model.file,'B.model3.json');assert.equal(events[0].meta.models.length,1);
+  let built;world.doBuild=async(dir,options)=>{built={dir,options};return {};};
+  await invoke('importBuild',[staged.token,staged.models[0].dir,false]);
+  assert.equal(built.dir,source);assert.equal(built.options.modelFile,'B.model3.json');
+});
+
 test('packing retains a finished package as an editable draft; auto-delete runs only after a successful install',async t=>{
   const root=await fixture(t), source=await sourcePack(join(root,'source'));
   const world=LIVE2D.create(makeCtx(root,{enabled:true,autoDelete:true,figuresDir:join(root,'figures')}));

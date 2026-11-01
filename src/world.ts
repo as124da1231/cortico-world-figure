@@ -120,7 +120,7 @@ export class Live2dWorld implements World {
       getConfig: () => this.opts.getConfig(), getHost: () => this.host, dataDir: opts.dataDir,
       recentRoots: () => { const dir = this.state.modelDir || this.opts.getConfig().modelDir; return dir ? [dir] : []; },
       warn: (message: string) => this.say(message),
-      execute: (model: AutomationModel, native: NativeConfig, signal?: AbortSignal) => this.executeAutomation(model, native, signal),
+      execute: (model: AutomationModel, native: NativeConfig, signal?: AbortSignal, fingerprint?: string) => this.executeAutomation(model, native, signal, fingerprint),
       evidence: (catalog: {model: AutomationModel}, native: unknown, samples: Array<{id:string;time:number}>, signal?: AbortSignal) => this.actionEvidence(catalog.model, native, samples, signal),
     });
   }
@@ -420,7 +420,7 @@ export class Live2dWorld implements World {
       const full = this.importer.resolve(token, dir);
       if (!full || !existsSync(full)) throw new Error('这次导入已经过期，重新选一次');
       const wantInstall = Boolean(args[2]);
-      const built = await this.doBuild(full, { remember: false }) as { log?: string[] };
+      const built = await this.doBuild(full, { remember: false, modelFile: this.importer.modelFile(token, dir) }) as { log?: string[] };
       const buildId = this.state.builds?.[0]?.id;
       let installed: unknown = null;
       if (wantInstall && buildId) installed = await this.doInstall(full, buildId);
@@ -657,7 +657,10 @@ export class Live2dWorld implements World {
   private async queueAnalysis(result: {token:string;models?:Array<{dir:string}>;packs?:Array<{dir:string}>},repeat=false) {
     if(this.opts.getConfig().assistMotions!==true||!result.token)return {queued:false};
     const paths=await this.importer.preserveForAutomation(result.token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
-    return this.automation.imported(result,(_token:string,dir:string)=>paths.get(dir),repeat);
+    return this.automation.imported(result,(_token:string,dir:string)=>{
+      const source=paths.get(dir),file=this.importer.modelFile(result.token,dir);
+      return source && file ? join(source,file) : source;
+    },repeat);
   }
 
   private async exclusive<T>(action: () => Promise<T>): Promise<T> {
@@ -685,12 +688,13 @@ export class Live2dWorld implements World {
     });
   }
 
-  private executeAutomation(model: AutomationModel, native: NativeConfig, signal?: AbortSignal) {
+  private executeAutomation(model: AutomationModel, native: NativeConfig, signal?: AbortSignal, fingerprint?: string) {
     return this.exclusive(async () => {
       this.requireNotice(); signal?.throwIfAborted();
       if (this.opts.getConfig().assistMotions !== true) throw new Error('AI 自动适配已关闭');
       if (model.kind === 'pack') {
-        const target = await installPack(model.dir, await resolveFigures(this.opts.getConfig(),this.opts.dataDir), {backupRoot:join(this.opts.dataDir,'figure-backups'),keep:2,signal});
+        const figures=await resolveFigures(this.opts.getConfig(),this.opts.dataDir);
+        const target = await installPack(model.dir, figures, {backupRoot:join(dirname(figures),'figure-backups'),keep:2,signal,expectedFingerprint:fingerprint});
         const manifest = JSON.parse(await readFile(join(target,'figure.json'),'utf8'));
         this.state.install = {target,at:Date.now()};
         let warning;
