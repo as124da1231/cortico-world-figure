@@ -45,8 +45,8 @@
         "description": "Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo."
       }
     },
-    "webUiClient": "dist/webui-841f45778d48.js",
-    "webUiStyle": "dist/webui-b546a2fc2f4c.css",
+    "webUiClient": "dist/webui-a44acf6c178e.js",
+    "webUiStyle": "dist/webui-6d43594917b7.css",
     "describe": "describe.json"
   },
   "files": [

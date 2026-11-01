@@ -48,7 +48,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
       input = el('input', 'l2d-gear-input');
       input.type = 'range'; input.min = '0'; input.max = String(choices.length - 1); input.step = '1';
       const initial = choices.findIndex(([v]) => v === cfg[key]);
-      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : 'auto')) : initial);
+      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'assistDepth' ? 'standard' : 'auto')) : initial);
       readValue = () => choices[Number(input.value)][0];
       paint = () => {
         const index = Number(input.value), title = choices[index][1];
@@ -92,11 +92,17 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
   body.append(el('h3','l2d-settings-heading',t('AI 动作适配','AI action mapping')));
   const enabled = field('assistMotions',t('交给 Coo 适配','Let Coo adapt actions'),t('导入后自动提交，确认动作方案再安装','Submit imports automatically; approve mappings before installation'),'checkbox');
   const gear = field('assistGear',t('分析方式','Analysis mode'),t('图片不受支持时自动使用文本','Falls back to text when the current model cannot use images'),'gear', [['text',t('文本','Text')],['auto',t('自动','Auto')],['image',t('文本＋图片','Text + images')]]);
+  const depth = field('assistDepth',t('适配深度','Adaptation depth'),t('仅文本＋图片时启用：基础取样、针对性补查、映射对照复核','Available with text + images: basic sampling, targeted inspection, mapping comparison'),'gear', [['quick',t('快速','Quick')],['standard',t('标准','Standard')],['deep',t('深入','Deep')]]);
   const automatic = field('assistAuto',t('全自动执行','Automatic execution'),t('直接安装明确的映射；不确定动作保留通用表现','Install confident mappings; keep generic behavior for uncertain actions'),'checkbox');
   const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
   roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
-  const depend = () => { for (const input of [gear,automatic,roots]) { input.disabled = !enabled.checked; input.closest('.l2d-setting-row').classList.toggle('inactive',!enabled.checked); } };
-  enabled.addEventListener('change',depend); depend();
+  const depend = () => {
+    for (const input of [gear,automatic,roots,depth]) {
+      input.disabled = !enabled.checked || input === depth && gear.value !== '2';
+      input.closest('.l2d-setting-row').classList.toggle('inactive', input.disabled);
+    }
+  };
+  enabled.addEventListener('change',depend); gear.addEventListener('change',depend); gear.addEventListener('input',depend); depend();
   const actions = el('div', 'l2d-dialog-actions');
   const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
   note.addEventListener('click', async () => {
@@ -584,6 +590,7 @@ export default {
             info.append(el('strong',null,`${plan.model} · ${labels[plan.status] || plan.status}`));
             if (plan.status === 'pending') info.append(el('p',null,plan.question));
             if (plan.error && plan.status !== 'done') info.append(el('p','has-error',plan.error));
+            for (const warning of plan.reviewWarnings || []) info.append(el('p',null,t('需要确认：','Confirmation required: ') + warning));
             if (plan.summary?.length) {
               const detail = el('details','l2d-adaptation');detail.append(el('summary',null,t('适配详情','Mapping details')));
               detail.dataset.id=plan.id;detail.open=expanded.has(plan.id);

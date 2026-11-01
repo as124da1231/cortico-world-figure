@@ -56,7 +56,7 @@ async function mount(t, opts = {}) {
 
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
   const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
-  assert.equal(root.querySelectorAll('.l2d-gear-input').length,2);
+  assert.equal(root.querySelectorAll('.l2d-gear-input').length,3);
   assert.equal(root.querySelector('.l2d-config-notice').open,false);
   assert.equal(root.querySelector('.l2d-version-corner').textContent,'v1.4.2');
   const texture=root.querySelector('[aria-label="贴图精度"]');
@@ -199,6 +199,19 @@ test('AI-enabled imports are submitted for analysis rather than silently droppin
   button('提交 AI 适配').click();await tick();
   assert.deepEqual(calls.find(c=>c.method==='assistAnalyze').args,['ai-source',['role'],[]]);
   assert(!calls.some(c=>c.method==='importBuild'));
+});
+
+test('adaptation depth is enabled only with AI and text plus images and retains its selected tier',async t=>{
+ const {root,dom,button,configCalls}=await mount(t,{ack:true});button('设置').click();await tick();
+ const depth=root.querySelector('[aria-label="适配深度"]'),gear=root.querySelector('[aria-label="分析方式"]');
+ assert.equal(depth.value,'1');assert.equal(depth.disabled,true);
+ root.querySelector('[aria-label="交给 Coo 适配"]').click();assert.equal(depth.disabled,true);
+ gear.value='2';gear.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(depth.disabled,false);
+ depth.value='2';depth.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+ gear.value='0';gear.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(depth.disabled,true);
+ assert.equal(depth.closest('.l2d-setting-row').classList.contains('inactive'),true);assert.equal(depth.value,'2');
+ gear.value='2';gear.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(depth.disabled,false);assert.equal(depth.value,'2');
+ button('保存设置').click();await tick();assert.equal(configCalls[0].values['worlds.figure.assistDepth'],'deep');
 });
 
 test('a pending AI proposal shows its mapping and approval acts only on that proposal',async t=>{

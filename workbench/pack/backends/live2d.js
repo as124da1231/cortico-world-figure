@@ -374,8 +374,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
   // 情绪词 → VAD → FACS → role，负责过渡、待机微动、呼吸和视线漂移。
   // 加载失败就退回下面的离散表情配方，包不会因此不可用。
   let performance = null;
+  let performanceFactory = null;
   try {
     const { createPerformance } = await import('./soullink.js');
+    performanceFactory = createPerformance;
     performance = createPerformance(profile, console.warn);
     if (performance) {
       console.info('[l2d] SoulLink 表演层已启用');
@@ -1003,15 +1005,27 @@ export async function createLive2DBody(base, opts, entry, kit) {
   if (native) {
     const doBase = body.do.bind(body);
     body.do = (word) => { const accepted = doBase(word); if (accepted !== false) native.trigger(word); return accepted; };
-    globalThis.__l2dNativeSample = (id, time) => {
+    globalThis.__l2dNativeSample = (id, time, word, generic = false) => {
       if (!texturesReady) return null;
       model._model.loadParameters();
       for (let i = 0; i < model._model.getParameterCount(); i++) model._model.setParameterValueByIndex(i, model._model.getParameterDefaultValue(i));
       resetNativeBase();
-      applyFrame({}, {}, 1 / 60, true); applyPartOpacity(null);
-      native.sample(id, time);
-      try { applyNativeValues(native.update({},0),model._model,paramIndex,partIndex); model._model.update();render();return canvasPng(384); }
-      finally { native.clearSample(); }
+      const previousPerformance = performance;
+      performance = word && performanceFactory ? performanceFactory(profile, () => {}) : null;
+      try {
+        // Reset and warm the same generic layer for repeatable static comparisons.
+        for (let i = 0; i < (word ? 60 : 1); i++) applyFrame({}, {face:word,t:i / 60}, 1 / 60, !word);
+        applyPartOpacity(null);
+        if (id !== '__neutral__' && !generic) native.sample(id, time);
+        const values = id !== '__neutral__' && !generic ? native.update({},0) : [];
+        applyNativeValues(values.filter(v => !nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
+        model._model.saveParameters();
+        // Static comparisons use equilibrium, avoiding residual motion from a prior sample.
+        try { model._physics?.stabilization(model._model); } catch { /* optional */ }
+        applyNativeValues(values.filter(v => nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
+        model._model.update();render();return canvasPng(384);
+      }
+      finally { native.clearSample(); performance?.dispose(); performance = previousPerformance; }
     };
   }
   const motionKind = profile.motion?.kind === 'stand' ? 'stand' : 'roam';

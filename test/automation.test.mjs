@@ -4,7 +4,7 @@ import {mkdtemp,mkdir,writeFile,readFile,rm,symlink,utimes} from 'node:fs/promis
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {FigureAutomation,FIGURE_TOOL_DECLS} from '../src/automation.mjs';
-import {findModels,inspectNative,nativeConfig,validateBindings} from '../workbench/tools/native-catalog.mjs';
+import {findModels,inspectNative,nativeConfig,validateBindings,curveSummary} from '../workbench/tools/native-catalog.mjs';
 import {compileCurve,createNativeActions,applyNativeValues} from '../workbench/pack/backends/native-actions.js';
 import {LIVE2D} from '../src/index.ts';
 import {makeCtx} from './_ctx.mjs';
@@ -12,7 +12,10 @@ import {PackImporter} from '../src/import.ts';
 import {installPack} from '../src/pipeline.ts';
 import {packFingerprint} from '../src/pack-fingerprint.ts';
 
+import {analysisPolicy,bindingKey} from '../src/analysis.mjs';
+
 const json=(path,value)=>writeFile(path,JSON.stringify(value));
+const evidenceFrames=async(_catalog,_native,samples)=>samples.map(s=>({...s,png:'data:image/png;base64,iVBORw0KGgo='}));
 const motion=(start,end)=>({Meta:{Duration:1,Loop:true},Curves:[{Target:'Parameter',Id:'ParamArm',Segments:[0,start,0,1,end]},{Target:'PartOpacity',Id:'PartArm',Segments:[0,start,0,1,end]}]});
 async function fixture(t){
  const root=await mkdtemp(join(tmpdir(),'figure-auto-'));t.after(()=>rm(root,{recursive:true,force:true}));
@@ -39,6 +42,115 @@ function approveInChat(f,plan,{index=0,question=plan.question}={}){
  const askId='real-ask';f.events.push({cursor:f.events.length+1,source:'desktop-pet',type:'desktop-pet.self',meta:{kind:'ask',askId,question,options:plan.options}});
  const answer={cursor:f.events.length+1,source:'desktop-pet',type:'desktop-pet.answer',meta:{askId,index}};f.events.push(answer);return answer.cursor;
 }
+
+test('depth policy is inactive outside explicit image mode and defaults to standard',()=>{
+ assert.equal(analysisPolicy({assistGear:'text',assistDepth:'deep'}).depth,null);
+ assert.equal(analysisPolicy({assistGear:'auto',assistDepth:'deep'}).targeted,false);
+ assert.equal(analysisPolicy({assistGear:'image'}).depth,null);
+ assert.equal(analysisPolicy({assistMotions:true,assistGear:'image'}).depth,'standard');
+ assert.equal(analysisPolicy({assistMotions:true,assistGear:'image',assistDepth:'quick'}).maxFrames,4);
+});
+
+test('curve summaries reveal middle peaks, returns and exact cubic extrema',()=>{
+ const bounce=curveSummary({Segments:[0,0,0,.5,1,0,1,0]});
+ assert.equal(bounce.max,1);assert.equal(bounce.peakTime,.5);assert.equal(bounce.turns,1);assert.equal(bounce.returnsToStart,true);
+ const cubic=curveSummary({Segments:[0,0,1,1/3,2,2/3,2,1,0]});
+ assert.equal(cubic.max,1.5);assert.equal(cubic.peakTime,.5);assert.equal(cubic.min,0);
+});
+
+test('appearance channels are protected regardless of position, title or claimed confidence',async t=>{
+ const f=await automation(t);
+ for(const [i,name]of ['单片眼镜','黑框眼镜','脱鞋','体型1','默认体型','尾巴开关'].entries())await json(join(f.dir,'Exp3',name+'.exp3.json'),{Parameters:[{Id:'custom'+i,Value:1}]});
+ await json(join(f.dir,'Exp3','开心2.exp3.json'),{Parameters:[{Id:'custom0',Value:1}]});
+ const c=await f.auto.catalog(f.model.id);
+ for(const r of c.resources.filter(r=>r.title!=='开心'&&r.title!=='另一个中文'&&r.kind==='expression')){
+  assert.equal(r.classification,'appearance');assert.throws(()=>validateBindings(c,[{word:'happy',resource:r.id,confidence:.99}]),/外观/);
+ }
+ const long=Array.from({length:35},(_,i)=>({Id:'channel'+i,Value:1}));long[34].Id='ParamGlasses';
+ await json(join(f.dir,'Exp3','开心3.exp3.json'),{Parameters:long});
+ assert.equal((await f.auto.catalog(f.model.id)).resources.find(r=>r.title==='开心3').classification,'appearance');
+});
+
+test('resource and channel pagination stay within a total text budget without hiding truncation',async t=>{
+ const f=await automation(t);f.cfg.assistGear='text';
+ for(let n=0;n<40;n++)await json(join(f.dir,'Exp3',`resource-${n}.exp3.json`),{Parameters:Array.from({length:45},(_,i)=>({Id:'P'+i+'x'.repeat(100),Value:i}))});
+ const seen=new Set();let offset=0,first;
+ do{
+  const reply=await f.auto.actions(f.model.id,offset),page=JSON.parse(reply.text);assert(reply.text.length<=6500);assert.equal(page.truncated,false);
+  for(const r of page.resources){assert(!seen.has(r.id));seen.add(r.id);if(r.parameterCount===45)first??=r.id;}
+  offset=page.next;
+ }while(offset!==null);
+ assert.equal(seen.size,44);
+ let p=0;const channels=[];
+ do{const reply=await f.auto.actions(f.model.id,0,undefined,{resources:[first],parameter_offset:p});assert(reply.text.length<=6500);const row=JSON.parse(reply.text).resources[0];channels.push(...row.parameters.map(p=>p.id));p=row.nextParameterOffset;}while(p!==null);
+ assert.equal(new Set(channels).size,45);
+});
+
+test('image evidence balances named expressions and motions and supports exact targeted moments',async t=>{
+ const f=await automation(t,{evidence:evidenceFrames});f.cfg.assistGear='image';f.cfg.assistDepth='standard';f.host.modelFacts.accepts=()=>true;
+ const result=JSON.parse((await f.auto.actions(f.model.id)).text);
+ assert(result.evidence.some(e=>e.id===f.bindings[0].resource));assert.equal(result.evidence[0].id,'__neutral__');
+ const pose=f.catalog.resources.find(r=>r.kind==='motion');
+ const target=JSON.parse((await f.auto.actions(f.model.id,0,undefined,{resources:[pose.id],samples:[{resource:pose.id,time:.37}]})).text);
+ assert(target.evidence.some(e=>e.id===pose.id&&e.time===.37));
+ await assert.rejects(f.auto.actions(f.model.id,0,undefined,{resources:[pose.id],samples:[{resource:pose.id,time:4}]}),/时刻/);
+ f.cfg.assistGear='text';await assert.rejects(f.auto.actions(f.model.id,0,undefined,{resources:[pose.id],samples:[{resource:pose.id,time:0}]}),/标准或深入/);
+});
+
+test('deep mode requires mapping comparisons even after general inspection and confidence .99',async t=>{
+ const f=await automation(t,{evidence:evidenceFrames});Object.assign(f.cfg,{assistGear:'image',assistDepth:'deep',assistAuto:true});f.host.modelFacts.accepts=()=>true;
+ await f.auto.actions(f.model.id);
+ const unreviewed=await f.auto.prepare(f.model.id,[{...f.bindings[0],confidence:.99}]);assert.equal(unreviewed.automatic,false);
+ await assert.rejects(f.auto.install(unreviewed.id),/真实同意/);assert.equal(f.executions.length,0);
+ const result=JSON.parse((await f.auto.call('figure_actions',{model:f.model.id,review:f.bindings})).text);
+ assert.equal(result.review.provided,true);assert(result.evidence.some(e=>e.generic&&e.word==='happy'));assert(result.evidence.some(e=>!e.generic&&e.word==='happy'));
+ const reviewed=await f.auto.prepare(f.model.id,f.bindings);assert.equal(reviewed.automatic,true);assert(reviewed.analysis.review.includes(bindingKey(f.bindings[0])));
+ // Existing unreviewed proposals cannot acquire a later receipt silently.
+ await assert.rejects(f.auto.install(unreviewed.id),/真实同意/);
+ await f.auto.install(reviewed.id);assert.equal(f.executions.length,1);
+});
+
+test('unsupported, partial or source-changed pictures never authorize automatic installation',async t=>{
+ const f=await automation(t,{evidence:evidenceFrames});Object.assign(f.cfg,{assistGear:'image',assistDepth:'deep',assistAuto:true});
+ let result=JSON.parse((await f.auto.actions(f.model.id,0,undefined,{review:f.bindings})).text);assert.equal(result.review.provided,false);
+ assert.equal((await f.auto.prepare(f.model.id,f.bindings)).automatic,false);
+ f.host.modelFacts.accepts=()=>true;f.auto.options.evidence=async()=>[];
+ result=JSON.parse((await f.auto.actions(f.model.id,0,undefined,{review:f.bindings})).text);assert.match(result.evidenceWarning,/不完整/);
+ f.auto.options.evidence=async(...args)=>{await json(join(f.dir,'Exp3','开心.exp3.json'),{Parameters:[{Id:'ParamSmile',Value:.4}]});return evidenceFrames(...args);};
+ result=JSON.parse((await f.auto.actions(f.model.id,0,undefined,{review:f.bindings})).text);assert.equal(result.evidence.length,0);assert.match(result.evidenceWarning,/已改变/);
+ assert.equal((await f.auto.prepare(f.model.id,f.bindings)).automatic,false);
+});
+
+test('changing labels invalidates receipts and raising depth cannot bypass confirmation',async t=>{
+ const f=await automation(t,{evidence:evidenceFrames});Object.assign(f.cfg,{assistGear:'image',assistDepth:'standard',assistAuto:true});f.host.modelFacts.accepts=()=>true;
+ await f.auto.actions(f.model.id);const p=await f.auto.prepare(f.model.id,f.bindings);assert.equal(p.automatic,true);
+ f.cfg.assistDepth='deep';assert.equal(f.auto.publicPlan(f.auto.plans.get(p.id)).automatic,false);
+ await assert.rejects(f.auto.install(p.id),/真实同意/);
+ const reviewed=await f.auto.actions(f.model.id,0,undefined,{review:f.bindings});assert(JSON.parse(reviewed.text).review.provided);
+ await json(join(f.dir,'角色.cdi3.json'),{Parameters:[{Id:'ParamSmile',Name:'custom smile'}]});
+ const next=await f.auto.prepare(f.model.id,f.bindings);assert.equal(next.automatic,false);
+});
+
+test('visual receipts alone do not make arbitrary or truncated mappings safe for full-auto',async t=>{
+ const f=await automation(t,{evidence:evidenceFrames});Object.assign(f.cfg,{assistGear:'image',assistDepth:'deep',assistAuto:true});f.host.modelFacts.accepts=()=>true;
+ const arbitrary=[{...f.bindings[0],word:'thinking',confidence:.99}];
+ await f.auto.actions(f.model.id,0,undefined,{review:arbitrary});
+ const proposal=await f.auto.prepare(f.model.id,arbitrary);assert.equal(proposal.automatic,false);
+ await assert.rejects(f.auto.install(proposal.id),/真实同意/);
+ const catalog=await f.auto.catalog(f.model.id);f.auto.catalog=async()=>({...catalog,truncated:true});
+ const response=JSON.parse((await f.auto.actions(f.model.id)).text);assert.equal(response.truncated,true);
+ const partial=await f.auto.prepare(f.model.id,[]);assert.equal(partial.automatic,true); // No native mappings: generic-only is safe.
+ const mapped=await f.auto.prepare(f.model.id,f.bindings);assert.equal(mapped.automatic,false);
+});
+
+test('tool proposal receipts stay bounded while the panel retains the full mapping list',async t=>{
+ const f=await automation(t);
+ const words=['neutral','happy','wink','love','shy','surprised','angry','sad','sleepy','thinking','smug','pout','worried','determined','flustered','scared','excited','cry','confused'];
+ const bindings=words.map(word=>({...f.bindings[0],word,reason:'说明'.repeat(100)}));
+ const reply=await f.auto.call('figure_prepare',{model:f.model.id,bindings});assert(reply.text.length<6500);
+ const receipt=JSON.parse(reply.text);assert.equal(receipt.mappedCount,19);assert.equal(receipt.moreMappings,11);
+ assert.equal(f.auto.publicPlan(f.auto.plans.get(receipt.id)).bindings.length,19);
+});
 
 test('panel approval can retry a failed install or decline the approved proposal',async t=>{
  let attempts=0;

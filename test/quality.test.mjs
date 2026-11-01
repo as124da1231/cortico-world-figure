@@ -32,7 +32,7 @@ test('workbench settings expose only declared editable values and the notice has
   t.after(() => world.stop());
   const page = world.webUi('zh');
   assert.deepEqual(page.panels.map(p => p.id), ['workbench']);
-  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',clean:false,autoDelete:true,figuresDir:'',assistMotions:false,assistGear:'auto',assistAuto:false,modelRoots:'' });
+  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',clean:false,autoDelete:true,figuresDir:'',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:false,modelRoots:'' });
   cfg.clean=true; cfg.texture='1024';
   const next=await page.invoke('workbench', 'settings', []);
   assert.equal(next.clean,true); assert.equal(next.texture,'1024');

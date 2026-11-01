@@ -19,6 +19,7 @@ export const LIVE2D: WorldDefinition<Live2dSection> = {
     autoDelete: false,
     assistMotions: false,
     assistGear: 'auto',
+    assistDepth: 'standard',
     assistAuto: false,
     modelRoots: '',
   }),

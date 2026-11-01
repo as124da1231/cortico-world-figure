@@ -56,7 +56,7 @@ try {
   if (!r || !r.png) throw new Error('cover api unavailable');
   const evidence = [];
   for (const sample of __NATIVE_SAMPLES__) {
-    const png = globalThis.__l2dNativeSample?.(sample.id, sample.time);
+    const png = globalThis.__l2dNativeSample?.(sample.id, sample.time, sample.word, sample.generic);
     if (!png) throw new Error('native sample api unavailable');
     evidence.push({ ...sample, png });
   }

@@ -49,6 +49,7 @@ export interface Live2dSection {
   clean?: boolean;
   assistMotions?: boolean;
   assistGear?: string;
+  assistDepth?: string;
   assistAuto?: boolean;
   modelRoots?: string;
 }
@@ -257,7 +258,7 @@ export class Live2dWorld implements World {
       const cfg = this.opts.getConfig();
       return { cover: cfg.cover !== false, texture: cfg.texture || 'original', clean: Boolean(cfg.clean),
         autoDelete: Boolean(cfg.autoDelete), figuresDir: cfg.figuresDir || '',
-        assistMotions: cfg.assistMotions === true, assistGear: automationMode(cfg).gear, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
+        assistMotions: cfg.assistMotions === true, assistGear: automationMode(cfg).gear, assistDepth: automationMode(cfg).configuredDepth, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
     }
     if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() };
     if (method === 'assistReject') return this.automation.reject(String(args[0] || ''));
@@ -671,7 +672,7 @@ export class Live2dWorld implements World {
     finally { this.busy = false; this.activeAction = null; }
   }
 
-  private actionEvidence(model: AutomationModel, native: unknown, samples: Array<{id:string;time:number}>, signal?: AbortSignal) {
+  private actionEvidence(model: AutomationModel, native: unknown, samples: Array<{id:string;time:number;word?:string;generic?:boolean}>, signal?: AbortSignal) {
     return this.exclusive(async () => {
       signal?.throwIfAborted();
       const core = await coreState(this.coreDir());
@@ -956,6 +957,7 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
         },
         'worlds.figure.assistMotions': {type:'boolean',title:zh?'AI 自动适配':'AI action mapping',description:zh?'让 Coo 分析原生动作、生成方案并协助安装':'Let Coo inspect native actions, prepare a proposal and install it','x-hot':true},
         'worlds.figure.assistGear': {type:'string',enum:['auto','text','image'],title:zh?'分析方式':'Analysis mode','x-hot':true},
+        'worlds.figure.assistDepth': {type:'string',enum:['quick','standard','deep'],title:zh?'适配深度':'Adaptation depth',description:zh?'仅文本＋图片时生效：基础取样、针对性补查或映射对照复核':'Only active with text + images: basic sampling, targeted inspection or mapping comparison','x-hot':true},
         'worlds.figure.assistAuto': {type:'boolean',title:zh?'全自动执行':'Automatic execution',description:zh?'高置信度方案直接安装；不确定动作保留通用表现':'Install confident mappings directly; keep generic behavior for uncertain actions','x-hot':true},
         'worlds.figure.modelRoots': {type:'string',title:zh?'模型搜索目录':'Model search folders',description:zh?'每行一个目录，仅在这些目录和最近使用的模型目录内按名字查找':'One folder per line; name searches stay within these and recent model folders','x-hot':true},
       },
