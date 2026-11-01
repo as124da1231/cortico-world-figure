@@ -10,7 +10,161 @@ const NOTICE_TEXT = {
   en: 'Generated figure packs contain Live2D Cubism Core. Use these packs locally; do not upload, share or redistribute them. Models, textures and third-party components remain subject to their respective licenses.',
 };
 
+// Both the primary configuration page and its quick popup use this form.
+function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDisposed = () => ctx.signal?.aborted } = {}) {
+  const doc = ctx.root.ownerDocument;
+  const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
+  const t = (a, b) => zh ? a : b;
+  const el = (tag, cls, text) => {
+    const n = doc.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  const body = el('form', 'l2d-settings l2d-dialog-body');
+  const dirty = {};
+  const controls = [];
+  function field(key, title, hint, type, choices) {
+    const row = el('label', 'l2d-setting-row');
+    const label = el('span', 'l2d-setting-label');
+    label.append(el('span', null, title));
+    if (hint) label.append(el('small', null, hint));
+    let input, control, readValue, paint = () => {};
+    if (type === 'gear') {
+      row.classList.add('l2d-gear-row');
+      control = el('span', 'l2d-gear');
+      const value = el('output', 'l2d-gear-value'); value.setAttribute('aria-hidden', 'true');
+      const track = el('span', 'l2d-gear-track');
+      const fill = el('span', 'l2d-gear-fill');
+      const sparks = el('span', 'l2d-gear-sparks'); sparks.setAttribute('aria-hidden', 'true');
+      for (let i = 0; i < 10; i++) {
+        const spark = el('i');
+        spark.style.cssText = `--spark-x:${8 + i * 8.4}%;--spark-y:${6 + (i * 7 % 18)}px;--spark-delay:${-i * .37}s;--spark-duration:${1.8 + i % 3 * .4}s`;
+        sparks.append(spark);
+      }
+      fill.append(sparks);
+      const stops = el('span', 'l2d-gear-stops'); stops.setAttribute('aria-hidden', 'true');
+      choices.forEach(() => stops.append(el('i')));
+      input = el('input', 'l2d-gear-input');
+      input.type = 'range'; input.min = '0'; input.max = String(choices.length - 1); input.step = '1';
+      const initial = choices.findIndex(([v]) => v === cfg[key]);
+      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : 'auto')) : initial);
+      readValue = () => choices[Number(input.value)][0];
+      paint = () => {
+        const index = Number(input.value), title = choices[index][1];
+        value.value = title; input.setAttribute('aria-valuetext', title);
+        control.style.setProperty('--gear-ratio', String(index / (choices.length - 1)));
+        control.classList.toggle('is-max', index === choices.length - 1);
+      };
+      input.addEventListener('input', paint); paint();
+      track.append(fill, stops, input); control.append(value, track);
+    } else {
+      input = el(type === 'textarea' ? 'textarea' : 'input', type === 'checkbox' ? 'l2d-switch' : 'l2d-input');
+      if (type !== 'textarea') input.type = type;
+      else input.rows = 2;
+      if (type === 'checkbox') { input.checked = cfg[key] === true; input.setAttribute('role', 'switch'); }
+      else { input.value = cfg[key] || ''; input.placeholder = t('留空使用 Coo 默认目录', 'Leave empty for the Coo default'); }
+    }
+    input.setAttribute('aria-label', title);
+    input.addEventListener('change', () => { paint(); dirty['worlds.figure.' + key] = type === 'checkbox' ? input.checked : readValue ? readValue() : input.value.trim(); });
+    controls.push(input); row.append(label, control || input); body.append(row); return input;
+  }
+  field('cover', t('生成封面', 'Generate cover'), t('同时自动调整模型取景', 'Also fits the model framing'), 'checkbox');
+  field('texture', t('贴图精度', 'Texture resolution'), t('较小的贴图占用更少显存', 'Smaller textures use less VRAM'), 'gear', ['512','1024','2048','4096','original'].map(value=>[value,value==='original'?t('原精度','Original'):value+' px']));
+  field('clean', t('清理', 'Clean'), '', 'checkbox');
+  field('autoDelete', t('安装后删除打包产物', 'Delete pack after installation'), t('仅在安装成功后执行，保留原始素材', 'Only after a successful install; source files are kept'), 'checkbox');
+  const folder = field('figuresDir', t('安装目录', 'Install folder'), t('通常无需修改', 'Usually no change needed'), 'text');
+  if (ctx.pickPath) {
+    const picker = el('span', 'l2d-folder-control');
+    const browse = el('button', 'l2d-btn sm', t('选择', 'Browse')); browse.type = 'button';
+    folder.replaceWith(picker); picker.append(folder, browse);
+    browse.addEventListener('click', async () => {
+      try {
+        const path = await ctx.pickPath({kind:'directory'});
+        if (path !== null && !isDisposed()) {
+          folder.value = path;
+          folder.dispatchEvent(new doc.defaultView.Event('change', {bubbles:true}));
+        }
+      } catch (error) { if (!isDisposed()) ctx.ui.toast(String(error?.message || error), 'bad'); }
+    });
+    controls.push(browse);
+  }
+  body.append(el('h3','l2d-settings-heading',t('AI 动作适配','AI action mapping')));
+  const enabled = field('assistMotions',t('交给 Coo 适配','Let Coo adapt actions'),t('导入后自动提交，确认动作方案再安装','Submit imports automatically; approve mappings before installation'),'checkbox');
+  const gear = field('assistGear',t('分析方式','Analysis mode'),t('图片不受支持时自动使用文本','Falls back to text when the current model cannot use images'),'gear', [['text',t('文本','Text')],['auto',t('自动','Auto')],['image',t('文本＋图片','Text + images')]]);
+  const automatic = field('assistAuto',t('全自动执行','Automatic execution'),t('直接安装明确的映射；不确定动作保留通用表现','Install confident mappings; keep generic behavior for uncertain actions'),'checkbox');
+  const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
+  roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
+  const depend = () => { for (const input of [gear,automatic,roots]) { input.disabled = !enabled.checked; input.closest('.l2d-setting-row').classList.toggle('inactive',!enabled.checked); } };
+  enabled.addEventListener('change',depend); depend();
+  const actions = el('div', 'l2d-dialog-actions');
+  const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
+  note.addEventListener('click', async () => {
+    if (Object.keys(dirty).length && !autosave && !await ctx.ui.confirm({title:t('放弃未保存的设置？','Discard unsaved settings?'),body:t('打开须知将关闭当前设置。','Opening the notice closes settings.')})) return;
+    if (!isDisposed()) onNotice?.();
+  });
+  const status = el('span', 'l2d-settings-status', autosave ? t('修改后自动保存。', 'Changes save automatically.') : '');
+  status.setAttribute('role', 'status');
+  const save = el('button', 'l2d-btn primary', t('保存设置', 'Save settings')); save.type = 'submit'; save.hidden = autosave;
+  actions.append(note, status, save); body.append(actions);
+  let saving = false;
+  ctx.guardLeave?.(() => body.isConnected && (saving || Object.keys(dirty).length) ? t('设置尚未保存，确定离开？', 'Settings are not saved. Leave anyway?') : null);
+  async function persist() {
+    if (saving || isDisposed()) return;
+    if (!Object.keys(dirty).length) { if (!autosave) await onSaved?.(); return; }
+    saving = true; save.disabled = true;
+    if (!autosave) controls.forEach(input => { input.disabled = true; });
+    status.textContent = t('保存中…', 'Saving…');
+    const patch = {...dirty};
+    let succeeded = false;
+    try {
+      await ctx.setConfig('figure', patch);
+      for (const key of Object.keys(patch)) if (dirty[key] === patch[key]) delete dirty[key];
+      succeeded = true;
+      if (isDisposed()) return;
+      status.textContent = t('已保存', 'Saved'); save.hidden = autosave;
+      await onSaved?.();
+    } catch (error) {
+      if (!isDisposed()) {
+        status.textContent = t('保存失败，请重试。', 'Save failed. Please retry.');
+        save.hidden = false; if (autosave) save.textContent = t('重试保存', 'Retry save');
+        ctx.ui.toast(String(error?.message || error), 'bad');
+      }
+    } finally {
+      saving = false; save.disabled = false;
+      if (!autosave) { controls.forEach(input => { input.disabled = false; }); depend(); }
+    }
+    if (autosave && succeeded && Object.keys(dirty).length && !isDisposed()) await persist();
+  }
+  body.addEventListener('submit', event => { event.preventDefault(); void persist(); });
+  if (autosave) body.addEventListener('change', () => { void persist(); });
+  return body;
+}
+
+const configuration = {
+  // Local Coo configuration renderer hook; ordinary hosts retain the schema view.
+  panelId: 'workbench',
+  async mount(ctx) {
+    const [cfg, state] = await Promise.all([ctx.invoke('settings', []), ctx.invoke('state', [])]);
+    if (ctx.signal?.aborted) return;
+    const doc = ctx.root.ownerDocument;
+    const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
+    const shell = doc.createElement('section'); shell.className = 'l2d-config-page';
+    const header = doc.createElement('header'); header.className = 'l2d-config-header';
+    const title = doc.createElement('h2'); title.textContent = zh ? '配置' : 'Configuration';
+    const version = doc.createElement('span'); version.className = 'l2d-version-corner'; version.textContent = 'v' + state.version;
+    header.append(title, version);
+    const notice = doc.createElement('details'); notice.className = 'l2d-config-notice';
+    const summary = doc.createElement('summary'); summary.textContent = zh ? '须知' : 'Notice';
+    const message = doc.createElement('p'); message.textContent = NOTICE_TEXT[zh ? 'zh' : 'en']; notice.append(summary, message);
+    const form = settingsForm(ctx, cfg, {autosave:true, onNotice:() => {notice.open = !notice.open;}});
+    shell.append(header, form, notice); ctx.root.append(shell);
+    return {dispose() { shell.remove(); }};
+  },
+};
+
 export default {
+  configuration,
   panels: {
     workbench: {
       mount(ctx) {
@@ -365,87 +519,17 @@ export default {
           try {
             const cfg = await ctx.invoke('settings', []);
             if (disposed || state.busy) return;
-            const body = el('form', 'l2d-settings l2d-dialog-body');
-            const dirty = {};
-            const controls = [];
-            function field(key, title, hint, type, choices) {
-              const row = el('label', 'l2d-setting-row');
-              const label = el('span', 'l2d-setting-label');
-              label.append(el('span', null, title));
-              if (hint) label.append(el('small', null, hint));
-              let input, control, readValue, paint = () => {};
-              if (type === 'gear') {
-                row.classList.add('l2d-gear-row');
-                control = el('span', 'l2d-gear');
-                const value = el('output', 'l2d-gear-value'); value.setAttribute('aria-hidden', 'true');
-                const track = el('span', 'l2d-gear-track');
-                const fill = el('span', 'l2d-gear-fill');
-                const sparks = el('span', 'l2d-gear-sparks'); sparks.setAttribute('aria-hidden', 'true');
-                for (let i = 0; i < 10; i++) {
-                  const spark = el('i');
-                  spark.style.cssText = `--spark-x:${8 + i * 8.4}%;--spark-y:${6 + (i * 7 % 18)}px;--spark-delay:${-i * .37}s;--spark-duration:${1.8 + i % 3 * .4}s`;
-                  sparks.append(spark);
-                }
-                fill.append(sparks);
-                const stops = el('span', 'l2d-gear-stops'); stops.setAttribute('aria-hidden', 'true');
-                choices.forEach(() => stops.append(el('i')));
-                input = el('input', 'l2d-gear-input');
-                input.type = 'range'; input.min = '0'; input.max = String(choices.length - 1); input.step = '1';
-                const initial = choices.findIndex(([v]) => v === cfg[key]);
-                input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : 'auto')) : initial);
-                readValue = () => choices[Number(input.value)][0];
-                paint = () => {
-                  const index = Number(input.value), title = choices[index][1];
-                  value.value = title; input.setAttribute('aria-valuetext', title);
-                  control.style.setProperty('--gear-ratio', String(index / (choices.length - 1)));
-                  control.classList.toggle('is-max', index === choices.length - 1);
-                };
-                input.addEventListener('input', paint); paint();
-                track.append(fill, stops, input); control.append(value, track);
-              } else {
-                input = el(type === 'textarea' ? 'textarea' : 'input', type === 'checkbox' ? 'l2d-switch' : 'l2d-input');
-                if (type !== 'textarea') input.type = type;
-                else input.rows = 2;
-                if (type === 'checkbox') { input.checked = cfg[key] === true; input.setAttribute('role', 'switch'); }
-                else { input.value = cfg[key] || ''; input.placeholder = t('留空使用 Coo 默认目录', 'Leave empty for the Coo default'); }
-              }
-              input.setAttribute('aria-label', title);
-              input.addEventListener('change', () => { paint(); dirty['worlds.figure.' + key] = type === 'checkbox' ? input.checked : readValue ? readValue() : input.value.trim(); });
-              controls.push(input); row.append(label, control || input); body.append(row); return input;
-            }
-            field('cover', t('生成封面', 'Generate cover'), t('同时自动调整模型取景', 'Also fits the model framing'), 'checkbox');
-            field('texture', t('贴图精度', 'Texture resolution'), t('较小的贴图占用更少显存', 'Smaller textures use less VRAM'), 'gear', ['512','1024','2048','4096','original'].map(value=>[value,value==='original'?t('原精度','Original'):value+' px']));
-            field('clean', t('清理', 'Clean'), '', 'checkbox');
-            field('autoDelete', t('安装后删除打包产物', 'Delete pack after installation'), t('仅在安装成功后执行，保留原始素材', 'Only after a successful install; source files are kept'), 'checkbox');
-            field('figuresDir', t('安装目录', 'Install folder'), t('通常无需修改', 'Usually no change needed'), 'text');
-            body.append(el('h3','l2d-settings-heading',t('AI 动作适配','AI action mapping')));
-            const enabled = field('assistMotions',t('交给 Coo 适配','Let Coo adapt actions'),t('导入后自动提交，确认动作方案再安装','Submit imports automatically; approve mappings before installation'),'checkbox');
-            const gear = field('assistGear',t('分析方式','Analysis mode'),t('图片不受支持时自动使用文本','Falls back to text when the current model cannot use images'),'gear', [['text',t('文本','Text')],['auto',t('自动','Auto')],['image',t('文本＋图片','Text + images')]]);
-            const automatic = field('assistAuto',t('全自动执行','Automatic execution'),t('直接安装明确的映射；不确定动作保留通用表现','Install confident mappings; keep generic behavior for uncertain actions'),'checkbox');
-            const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
-            roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
-            const depend = () => { for (const input of [gear,automatic,roots]) { input.disabled = !enabled.checked; input.closest('.l2d-setting-row').classList.toggle('inactive',!enabled.checked); } };
-            enabled.addEventListener('change',depend); depend();
-            const actions = el('div', 'l2d-dialog-actions');
-            const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
-            note.addEventListener('click', async () => {
-              if (Object.keys(dirty).length && !await ui.confirm({title:t('放弃未保存的设置？','Discard unsaved settings?'),body:t('打开须知将关闭当前设置。','Opening the notice closes settings.')})) return;
-              if (!disposed) openNotice();
-            });
-            const save = el('button', 'l2d-btn primary', t('保存设置', 'Save settings')); save.type = 'submit';
-            actions.append(note, save); body.append(actions);
-            const dialog = showDialog(t('设置', 'Settings'), body);
-            body.addEventListener('submit', async event => {
-              event.preventDefault(); if (save.disabled || disposed || state.busy) return;
-              save.disabled = true; controls.forEach(input => { input.disabled = true; });
-              try {
-                if (Object.keys(dirty).length) await ctx.setConfig('figure', dirty);
+            let dialog;
+            const body = settingsForm(ctx, cfg, {
+              isDisposed: () => disposed,
+              onNotice: openNotice,
+              onSaved: async () => {
                 if (disposed) return;
                 dialog?.dispose?.(); ui.toast(t('设置已保存', 'Settings saved'), 'ok');
                 await refresh();
-              } catch (error) { if (!disposed) ui.toast(text(error), 'bad'); }
-              finally { save.disabled = false; controls.forEach(input => { input.disabled = false; }); depend(); }
+              },
             });
+            dialog = showDialog(t('设置', 'Settings'), body);
           } catch (error) { if (!disposed) ui.toast(text(error), 'bad'); }
           finally { settingsLoading = false; if (!disposed) settingsButton.disabled = state.busy; }
         }

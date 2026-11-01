@@ -12,12 +12,14 @@ async function mount(t, opts = {}) {
   dom.window.HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
   const calls = []; const toasts = []; const drawers = [];
   const configCalls = [];
+  const guards = [];
   let ack = opts.ack ?? false;
   const root = document.querySelector('main');
   const ctx = {
     root, language: opts.language ?? 'zh',
     pickPath: opts.pickPath,
     interval: opts.interval,
+    guardLeave(fn) { guards.push(fn); return {dispose(){}}; },
     async setConfig(group, values) { configCalls.push({group, values}); if (opts.setConfig) return opts.setConfig(group, values); return 'saved'; },
     ui: {
       sheet: ({ title, desc }) => {
@@ -45,12 +47,54 @@ async function mount(t, opts = {}) {
       return { builds: opts.builds ?? [] };
     },
   };
-  const handle = panel.panels.workbench.mount(ctx);
+  const handle = await (opts.configuration ? panel.configuration : panel.panels.workbench).mount(ctx);
   t.after(() => { handle.dispose(); dom.window.close(); });
   await tick();
   const button = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent === label);
-  return { ctx, root, calls, configCalls, toasts, drawers, button, handle, dom };
+  return { ctx, root, calls, configCalls, toasts, drawers, button, handle, dom, guards };
 }
+
+test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
+  const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
+  assert.equal(root.querySelectorAll('.l2d-gear-input').length,2);
+  assert.equal(root.querySelector('.l2d-config-notice').open,false);
+  assert.equal(root.querySelector('.l2d-version-corner').textContent,'v1.4.2');
+  const texture=root.querySelector('[aria-label="贴图精度"]');
+  texture.value='2';texture.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await tick();
+  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.texture':'2048'}}]);
+  assert.equal(guards[0](),null);
+  assert.equal(root.querySelector('.l2d-settings-status').textContent,'已保存');
+});
+
+test('auto-save serializes rapid edits and keeps the latest selection', async t => {
+  let release;
+  const {root,dom,configCalls,guards} = await mount(t,{configuration:true,setConfig:()=>new Promise(r=>{release=r;})});
+  const texture=root.querySelector('[aria-label="贴图精度"]');
+  texture.value='1';texture.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  texture.value='3';texture.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  assert.match(guards[0](),/尚未保存/);assert.equal(configCalls.length,1);
+  release();await tick();assert.equal(configCalls.length,2);
+  assert.equal(configCalls[1].values['worlds.figure.texture'],'4096');
+  release();await tick();assert.equal(guards[0](),null);
+});
+
+test('failed primary auto-save retains dirty values and retries without reverting controls',async t=>{
+  let fail=true;
+  const {root,dom,button,configCalls,guards}=await mount(t,{configuration:true,setConfig:async()=>{if(fail)throw Error('failed');}});
+  const texture=root.querySelector('[aria-label="贴图精度"]');
+  texture.value='0';texture.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await tick();
+  assert.equal(texture.value,'0');assert.equal(texture.disabled,false);assert.match(guards[0](),/尚未保存/);
+  fail=false;button('重试保存').click();await tick();
+  assert.deepEqual(configCalls[1].values,{'worlds.figure.texture':'512'});assert.equal(guards[0](),null);
+});
+
+test('configuration folder selection uses the host picker and persists the chosen directory',async t=>{
+  const picks=[];
+  const {root,button,configCalls}=await mount(t,{configuration:true,pickPath:async options=>{picks.push(options);return 'E:/figures';}});
+  button('选择').click();await tick();
+  assert.deepEqual(picks,[{kind:'directory'}]);assert.equal(root.querySelector('[aria-label="安装目录"]').value,'E:/figures');
+  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.figuresDir':'E:/figures'}}]);
+});
 
 test('consent persists while the version offers a quiet manual notice fallback on standard hosts', async (t) => {
   const { root, button, calls, drawers } = await mount(t);
