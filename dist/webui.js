@@ -142,7 +142,7 @@ export default {
         versionCorner.disabled = true;
         versionCorner.setAttribute('aria-controls', 'l2d-distribution-notice');
         sheet.el.classList.add('l2d-sheet');
-        sheet.el.appendChild(versionCorner);
+        header.appendChild(versionCorner);
         const noticeDetails = el('details', 'l2d-notice');
         noticeDetails.id = 'l2d-distribution-notice';
         const noticeSummary = el('summary', null, t('须知', 'Notice'));
@@ -458,6 +458,9 @@ export default {
             assistDock.append(el('p','l2d-assist-wait'+(request.error?' has-error':''),message));
           }
           const wordNames = {neutral:'平静',happy:'开心',wink:'眨眼',love:'喜欢',shy:'害羞',surprised:'惊讶',angry:'生气',sad:'难过',sleepy:'困倦',thinking:'思考',smug:'得意',pout:'嘟嘴',worried:'担心',determined:'坚定',flustered:'慌张',scared:'害怕',excited:'兴奋',cry:'哭泣',confused:'疑惑',idle:'待机',nod:'点头',shake:'摇头',wave:'挥手',bow:'鞠躬',cheer:'欢呼',dance:'跳舞',jump:'跳跃',sit:'坐下',stretch:'伸展',shiver:'发抖'};
+          const history = el('details','l2d-assist-history'); history.dataset.id='history'; history.open=expanded.has('history');
+          const finished = plans.filter(p=>p.status==='done');
+          history.append(el('summary',null,t(`已完成 ${finished.length} 项 · 查看记录`,`${finished.length} completed · View history`)));
           for (const plan of plans) {
             const row = el('section','l2d-assist-plan');
             const info = el('div','l2d-assist-info');
@@ -484,8 +487,10 @@ export default {
                 finally {setBusy(false);}
               }); actions.append(button);
             }
-            row.append(info,actions); assistDock.append(row);
+            row.append(info,actions); (plan.status==='done'?history:assistDock).append(row);
           }
+          if (finished.length) assistDock.append(history);
+          assistDock.classList.toggle('history-only',assistDock.children.length===1 && assistDock.firstElementChild===history);
           paintSource();
         }
 

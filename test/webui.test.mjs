@@ -63,7 +63,7 @@ test('consent persists while the version offers a quiet manual notice fallback o
   assert.equal(badge.textContent, 'v1.4.2');
   assert.ok(badge.classList.contains('ack'));
   assert.equal(badge.classList.contains('unack'), false);
-  assert.equal(badge.parentElement, root.querySelector('.l2d-sheet'));
+  assert.equal(badge.parentElement, root.querySelector('.l2d-header'));
   assert.equal(root.querySelector('.l2d-notice-dock'), null);
   assert.equal(badge.tagName, 'BUTTON');
   assert.equal(badge.title, '查看须知');
@@ -79,7 +79,7 @@ test('acknowledged users see only the version across upgrades, without the notic
   const { root, calls, drawers } = await mount(t, { ack: true, version: '1.4.99', language: 'en' });
   assert.equal(drawers.length, 0);
   assert.equal(root.querySelector('.l2d-version-corner').textContent, 'v1.4.99');
-  assert.equal(root.querySelector('.l2d-version-corner').parentElement, root.querySelector('.l2d-sheet'));
+  assert.equal(root.querySelector('.l2d-version-corner').parentElement, root.querySelector('.l2d-header'));
   assert.equal(root.querySelector('.l2d-notice'), null);
   root.querySelector('.l2d-version-corner').click();
   assert.equal(root.querySelector('.l2d-notice'), null);
@@ -181,6 +181,14 @@ test('queued imports show the wait state and disable duplicate submission',async
  assert.match(root.querySelector('.l2d-assist-dock').textContent,/等待方案/);
  assert.equal(button('提交 AI 适配').disabled,true);
  button('提交 AI 适配').click();assert(!calls.some(c=>c.method==='assistAnalyze'));
+});
+
+test('completed proposals use collapsed history while pending proposals stay directly accessible',async t=>{
+ const {root}=await mount(t,{ack:true,automation:{enabled:true,plans:[{id:'done',model:'完成',status:'done'},{id:'todo',model:'等待',status:'pending',question:'确认安装'}]}});
+ const history=root.querySelector('.l2d-assist-history');assert(history);assert.equal(history.open,false);
+ assert.match(history.textContent,/完成 · 已安装/);
+ assert.equal(root.querySelectorAll('.l2d-assist-dock > .l2d-assist-plan').length,1);
+ assert.equal(root.querySelector('.l2d-assist-dock > .l2d-assist-plan button.primary').textContent,'同意安装');
 });
 
 test('search and sorting preserve the underlying pack list and editing stays in the workspace', async t => {
