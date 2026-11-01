@@ -135,7 +135,7 @@ export async function buildPack(
   workbenchDir: string,
   modelDir: string,
   workDir: string,
-  opts: { fit?: unknown; native?: unknown; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; signal?: AbortSignal } = {},
+  opts: { fit?: unknown; native?: unknown; render?: unknown; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; signal?: AbortSignal } = {},
 ): Promise<string> {
   const builds = join(workDir, 'builds');
   await mkdir(builds, { recursive: true });
@@ -151,9 +151,9 @@ export async function buildPack(
   if (opts.modelFile) args.push('--model-file', opts.modelFile);
   if (opts.clean) args.push('--clean');
   let overrideFile = '';
-  if (opts.fit || opts.native) {
+  if (opts.fit || opts.native || opts.render) {
     overrideFile = join(workDir, `overrides-${randomUUID()}.json`);
-    await writeFile(overrideFile, JSON.stringify({ ...(opts.fit ? {fit:opts.fit} : {}), ...(opts.native ? {native:opts.native} : {}) }, null, 2), 'utf8');
+    await writeFile(overrideFile, JSON.stringify({ ...(opts.fit ? {fit:opts.fit} : {}), ...(opts.native ? {native:opts.native} : {}), ...(opts.render ? {render:opts.render} : {}) }, null, 2), 'utf8');
     args.push('--overrides', overrideFile);
   }
   try {

@@ -24,6 +24,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
   const body = el('form', 'l2d-settings l2d-dialog-body');
   const dirty = {};
   const controls = [];
+  const fields = new Map();
   function field(key, title, hint, type, choices) {
     const row = el('label', 'l2d-setting-row');
     const label = el('span', 'l2d-setting-label');
@@ -48,7 +49,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
       input = el('input', 'l2d-gear-input');
       input.type = 'range'; input.min = '0'; input.max = String(choices.length - 1); input.step = '1';
       const initial = choices.findIndex(([v]) => v === cfg[key]);
-      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'assistDepth' ? 'standard' : 'auto')) : initial);
+      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : 'auto')) : initial);
       readValue = () => choices[Number(input.value)][0];
       paint = () => {
         const index = Number(input.value), title = choices[index][1];
@@ -66,11 +67,31 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
       else { input.value = cfg[key] || ''; input.placeholder = t('留空使用 Coo 默认目录', 'Leave empty for the Coo default'); }
     }
     input.setAttribute('aria-label', title);
-    input.addEventListener('change', () => { paint(); dirty['worlds.figure.' + key] = type === 'checkbox' ? input.checked : readValue ? readValue() : input.value.trim(); });
+    input.addEventListener('change', () => { if (input.disabled) return; paint(); dirty['worlds.figure.' + key] = type === 'checkbox' ? input.checked : readValue ? readValue() : input.value.trim(); });
+    fields.set(key,{input,paint,readValue,choices});
     controls.push(input); row.append(label, control || input); body.append(row); return input;
   }
   field('cover', t('生成封面', 'Generate cover'), t('同时自动调整模型取景', 'Also fits the model framing'), 'checkbox');
-  field('texture', t('贴图精度', 'Texture resolution'), t('较小的贴图占用更少显存', 'Smaller textures use less VRAM'), 'gear', ['512','1024','2048','4096','original'].map(value=>[value,value==='original'?t('原精度','Original'):value+' px']));
+  const quality = field('quality',t('画质','Quality'),t('画布随显示大小调整；原图不设软件精度上限。已有形象需重新打包安装。','Canvas follows display size; Original has no software cap. Repack existing figures to apply.'),'gear',[['economy',t('流畅','Smooth')],['balanced',t('标准','Standard')],['high',t('高清','HD')],['original',t('原图','Original')]]);
+  const texture = field('texture', t('贴图精度', 'Texture resolution'), t('原图档可调整；较小的贴图占用更少显存', 'Adjustable in Original mode; smaller textures use less VRAM'), 'gear', ['512','1024','2048','4096','original'].map(value=>[value,value==='original'?t('原精度','Original'):value+' px']));
+  let customTexture = cfg.texture || 'original';
+  const syncQuality = () => {
+    const editable = quality.value === '3';
+    const selected = editable ? customTexture : ['1024','2048','4096'][Number(quality.value)];
+    texture.value = String(fields.get('texture').choices.findIndex(([value])=>value===selected));
+    fields.get('texture').paint(); fields.get('quality').paint();
+    texture.disabled = !editable; texture.closest('.l2d-setting-row').classList.toggle('inactive',!editable);
+    if (editable && customTexture !== 'original') {
+      quality.setAttribute('aria-valuetext',t('自定义','Custom'));
+      quality.closest('.l2d-gear').querySelector('output').value=t('自定义','Custom');
+      quality.closest('.l2d-gear').classList.remove('is-max');
+    }
+  };
+  for (const event of ['input','change']) {
+    quality.addEventListener(event,syncQuality);
+    texture.addEventListener(event,()=>{if(quality.value==='3'){customTexture=fields.get('texture').readValue();syncQuality();}});
+  }
+  syncQuality();
   field('clean', t('清理', 'Clean'), '', 'checkbox');
   field('autoDelete', t('安装后删除打包产物', 'Delete pack after installation'), t('仅在安装成功后执行，保留原始素材', 'Only after a successful install; source files are kept'), 'checkbox');
   const folder = field('figuresDir', t('安装目录', 'Install folder'), t('通常无需修改', 'Usually no change needed'), 'text');
@@ -97,6 +118,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
   const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
   roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
   const depend = () => {
+    syncQuality();
     for (const input of [gear,automatic,roots,depth]) {
       input.disabled = !enabled.checked || input === depth && gear.value !== '2';
       input.closest('.l2d-setting-row').classList.toggle('inactive', input.disabled);

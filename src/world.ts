@@ -24,6 +24,7 @@ import { PackImporter, filesFromBundle, filesFromZip, thumbOf } from './import.t
 import { captureCover } from './cover.ts';
 import { readClipboardPaths } from './clipboard.ts';
 import { FigureAutomation, automationMode } from './automation.mjs';
+import { qualityPolicy } from '../workbench/pack/backends/render-quality.js';
 import {
   CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
   coreState, ensureCore,
@@ -46,6 +47,7 @@ export interface Live2dSection {
   cover?: boolean;
   /** 贴图最长边：2048 / 1024 / 512 / 4096，original = 原精度不缩放。 */
   texture?: string;
+  quality?: string;
   clean?: boolean;
   assistMotions?: boolean;
   assistGear?: string;
@@ -256,7 +258,7 @@ export class Live2dWorld implements World {
     }
     if (method === 'settings') {
       const cfg = this.opts.getConfig();
-      return { cover: cfg.cover !== false, texture: cfg.texture || 'original', clean: Boolean(cfg.clean),
+      return { cover: cfg.cover !== false, texture: cfg.texture || 'original', quality: qualityPolicy(cfg).mode, clean: Boolean(cfg.clean),
         autoDelete: Boolean(cfg.autoDelete), figuresDir: cfg.figuresDir || '',
         assistMotions: cfg.assistMotions === true, assistGear: automationMode(cfg).gear, assistDepth: automationMode(cfg).configuredDepth, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
     }
@@ -528,9 +530,10 @@ export class Live2dWorld implements World {
       push(`打包 ${dir}`);
 
       let t0 = Date.now();
-      const maxTexture = textureLimit(this.opts.getConfig().texture);
+      const render = qualityPolicy(this.opts.getConfig());
+      const maxTexture = render.textureLimit;
       const clean = this.opts.getConfig().clean === true;
-      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { render, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
       temporary.add(packDir);
       push(`初版包就绪 · ${Date.now() - t0} ms`);
 
@@ -547,7 +550,7 @@ export class Live2dWorld implements World {
       let finalDir = packDir;
       if (shot.fit) {
         t0 = Date.now();
-        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { render, fit: shot.fit, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
         temporary.add(rebuilt);
         // 封面跟着走
         const thumb = join(packDir, 'thumb');
@@ -928,6 +931,7 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           description: zh ? '关掉就不启动无头浏览器，也不量尺寸' : 'Off: skip headless render',
           'x-hot': true,
         },
+        'worlds.figure.quality': {type:'string',enum:['economy','balanced','high','original'],title:zh?'画质':'Quality',description:zh?'流畅／标准／高清／原图；原图不设软件精度上限，仅受设备能力限制':'Smooth / Standard / HD / Original; Original has no software resolution cap, subject to device limits','x-hot':true},
         'worlds.figure.texture': {
           type: 'string',
           title: zh ? '贴图精度' : 'Texture size',
@@ -963,12 +967,4 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
       },
     },
   };
-}
-
-/** 配置里的贴图上限；original / 空 / 非法一律当原精度（0 = 不缩放）。 */
-function textureLimit(value: unknown): number {
-  const v = String(value ?? '').trim().toLowerCase();
-  if (!v || v === 'original') return 0;
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
 }

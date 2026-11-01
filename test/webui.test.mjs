@@ -43,7 +43,7 @@ async function mount(t, opts = {}) {
       if (method === 'noticeAccept') { ack = true; return { acknowledged: true, revision: 1 }; }
       if (method === 'list') return { dir: '', figuresDir: 'E:/test/figures', builds: opts.builds ?? [], installed: null, automation: opts.automation ?? {enabled:false,plans:[]} };
       if (method === 'detail') return { nameZh: '名字', aboutZh: '简介' };
-      if (method === 'settings') return { cover: true, clean: true, texture: 'original', autoDelete: false, figuresDir: '' };
+      if (method === 'settings') return { cover: true, clean: true, texture: 'original', quality: opts.quality ?? 'original', autoDelete: false, figuresDir: '' };
       return { builds: opts.builds ?? [] };
     },
   };
@@ -56,7 +56,7 @@ async function mount(t, opts = {}) {
 
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
   const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
-  assert.equal(root.querySelectorAll('.l2d-gear-input').length,3);
+  assert.equal(root.querySelectorAll('.l2d-gear-input').length,4);
   assert.equal(root.querySelector('.l2d-config-notice'),null);
   assert.equal(root.querySelector('.l2d-config-page .l2d-notice-entry'),null);
   assert.equal(root.querySelector('.l2d-version-corner').textContent,'v1.4.2');
@@ -200,6 +200,17 @@ test('AI-enabled imports are submitted for analysis rather than silently droppin
   button('提交 AI 适配').click();await tick();
   assert.deepEqual(calls.find(c=>c.method==='assistAnalyze').args,['ai-source',['role'],[]]);
   assert(!calls.some(c=>c.method==='importBuild'));
+});
+
+test('quality presets show effective texture limits and Original restores the remembered custom value',async t=>{
+ const {root,dom,button,configCalls}=await mount(t,{ack:true,quality:'balanced'});button('设置').click();await tick();
+ const quality=root.querySelector('[aria-label="画质"]'),texture=root.querySelector('[aria-label="贴图精度"]');
+ assert.equal(quality.getAttribute('aria-valuetext'),'标准');assert.equal(texture.value,'2');assert.equal(texture.disabled,true);
+ quality.value='3';quality.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(texture.value,'4');assert.equal(texture.disabled,false);
+ texture.value='0';texture.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(quality.getAttribute('aria-valuetext'),'自定义');
+ quality.value='2';quality.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(texture.value,'3');assert.equal(texture.disabled,true);
+ quality.value='3';quality.dispatchEvent(new dom.window.Event('change',{bubbles:true}));assert.equal(texture.value,'0');
+ button('保存设置').click();await tick();assert.deepEqual(configCalls[0].values,{'worlds.figure.quality':'original','worlds.figure.texture':'512'});
 });
 
 test('adaptation depth is enabled only with AI and text plus images and retains its selected tier',async t=>{

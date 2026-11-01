@@ -15,6 +15,7 @@ export const LIVE2D: WorldDefinition<Live2dSection> = {
     workDir: '',
     cover: true,
     texture: 'original',
+    quality: 'balanced',
     clean: false,
     autoDelete: false,
     assistMotions: false,

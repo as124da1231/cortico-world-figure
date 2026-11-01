@@ -27,7 +27,8 @@ import {
 } from '../sdk/framework.js';
 import { SHADERS } from '../sdk/shaders.js';
 import { roleValue } from './role-values.js';
-import { createAdaptiveRenderer } from './render-config.js';
+import { createAdaptiveRenderer, resizeMaskBuffers } from './render-config.js';
+import { graphicsLimits, displayPixels, resolutionPlan, texturePlan } from './render-quality.js';
 import { createNativeActions, applyNativeValues } from './native-actions.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -35,7 +36,7 @@ const XHTML = 'http://www.w3.org/1999/xhtml';
 
 /** 角色在 256 logo 方格里的画布。 */
 const BOX = 256;
-const CANVAS_PX = 512;
+const INITIAL_CANVAS_PX = 512;
 /** 简易模式：只走 role + 通用配方 + SoulLink，不播任何原生 exp3 / motion / Idle。 */
 const SIMPLE = true;
 
@@ -90,8 +91,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
   // ---------- 画布（放 kit 的 SVG 组里） ----------
   const canvas = doc.createElementNS(XHTML, 'canvas');
-  canvas.width = CANVAS_PX;
-  canvas.height = CANVAS_PX;
+  canvas.width = INITIAL_CANVAS_PX;
+  canvas.height = INITIAL_CANVAS_PX;
   canvas.style.width = '100%';
   canvas.style.height = '100%';
   canvas.style.pointerEvents = 'none';
@@ -107,6 +108,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
     alpha: true, premultipliedAlpha: true, antialias: true,
   });
   if (!gl) throw new Error('这个环境无法启用 WebGL');
+  const limits = graphicsLimits(gl);
+  const renderPolicy = profile.render ?? {mode:'original',textureLimit:0,canvasLimit:0,strict:true};
 
   // ---------- 模型（官方双轨回退：优先 fetch 原生 moc3，失败回退到 base64 模块） ----------
   const resolveAsset = (rel) => {
@@ -173,18 +176,22 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
   // Complex models exceed the SDK's single-buffer limit (36 clipping groups).
   // Overflow aliases masks onto one region, corrupting faces/eyes/clothing.
-  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height);
+  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height, {strict:renderPolicy.strict});
   const { renderer, maskBuffers } = renderConfig;
-  let renderNotice = null;
-  if (renderConfig.warning) {
-    console.warn('[l2d]', renderConfig.warning);
-    renderNotice = doc.createElement('div');
-    renderNotice.setAttribute('role', 'status');
-    renderNotice.textContent = '兼容渲染 / Compatibility mode';
-    renderNotice.title = renderConfig.warning;
-    renderNotice.style.cssText = 'position:absolute;bottom:0;left:0;right:0;text-align:center;font:11px/1.5 sans-serif;color:#805500;background:#fff4d9dd;pointer-events:none';
-    host.root.appendChild(renderNotice);
-  }
+  const renderNotice = doc.createElement('div');
+  renderNotice.setAttribute('role','status'); renderNotice.hidden = true;
+  renderNotice.style.cssText = 'position:absolute;bottom:0;left:0;right:0;padding:4px;text-align:center;font:11px/1.5 sans-serif;color:#805500;background:#fff4d9ee;pointer-events:none';
+  host.root.appendChild(renderNotice);
+  const renderWarnings = new Set(); let renderFailure = '';
+  const showRenderNotice = (message, fatal = false) => {
+    if (fatal) renderFailure = message;
+    if (!renderWarnings.has(message)) console.warn('[l2d]',message);
+    renderWarnings.add(message); renderNotice.hidden = false;
+    renderNotice.textContent = (fatal ? '渲染受限：' : '') + message;
+    renderNotice.title = [...renderWarnings].join('\n');
+  };
+  if (renderConfig.warning) showRenderNotice(renderConfig.warning);
+  canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();showRenderNotice('图形上下文已丢失，请减小显示尺寸或降低画质后重新加载。',true);});
 
   // 着色器内联
   const shader = CubismShaderManager_WebGL.getInstance().getShader(gl);
@@ -195,18 +202,14 @@ export async function createLive2DBody(base, opts, entry, kit) {
   if (loading && typeof loading.then === 'function') await loading;
 
   // 贴图：后台加载，不阻塞 ready（8192² 在慢显卡上要几秒，kit 只等 20 秒）。
-  // 尺寸兜底：包里已经缩过图（convert --max-texture），但老包 / 别人给的包可能还是 4096~8192。
-  // 一张 8192² RGBA 显存 256 MB，桌宠实际只占 200 px 高——超过 maxTex 先在 2D canvas 里缩再上传。
-  const maxTex = Math.min(2048, Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 2048);
+  // 打包与播放使用同一精度约定；原图只受设备限制，不暗中降采样。
   const isPOT = (n) => n > 0 && (n & (n - 1)) === 0;
   const shrinkForUpload = (img) => {
     const w = img.naturalWidth || img.width;
     const h = img.naturalHeight || img.height;
-    const longest = Math.max(w, h);
-    if (longest <= maxTex) return { src: img, w, h };
-    const k = maxTex / longest;
-    const nw = Math.max(1, Math.round(w * k));
-    const nh = Math.max(1, Math.round(h * k));
+    const plan = texturePlan(w,h,renderPolicy,limits);
+    if (!plan.scaled) return { src: img, w, h };
+    const nw = plan.width, nh = plan.height;
     const c = doc.createElement('canvas');
     c.width = nw;
     c.height = nh;
@@ -214,11 +217,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
     cx.imageSmoothingEnabled = true;
     cx.imageSmoothingQuality = 'high';
     cx.drawImage(img, 0, 0, nw, nh);
-    console.warn(`[l2d] 贴图超上限，运行时缩到 ${nw}×${nh}（原 ${w}×${h}）：包里跑一次构建即可持久化`);
+    showRenderNotice(`按所选画质上传贴图 ${nw}×${nh}（文件 ${w}×${h}）。`);
     return { src: c, w: nw, h: nh };
   };
 
   let texturesReady = false;
+  const uploadedTextures = [];
   (async () => {
     for (let i = 0; i < entry.textures.length; i++) {
       const img = await opts.loadImage(new URL(`models/${entry.id}/${entry.textures[i]}`, base));
@@ -227,7 +231,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
-      // 缩小采样用 mipmap：8192→200 px 只用 LINEAR 会闪；缩到 2048 之后 mipmap 只要几毫秒。
+      if (gl.getError() !== gl.NO_ERROR) { gl.deleteTexture(tex); throw Error(`贴图 ${w}×${h} 上传失败，无法保持所选精度。`); }
+      uploadedTextures.push({file:entry.textures[i],width:w,height:h});
+      // 缩小时使用 mipmap，放大时仍采样原始上传级别。
       // 非 2 的幂（WebGL1）不能建 mipmap，退回 LINEAR。
       const pot = isPOT(w) && isPOT(h);
       if (pot) gl.generateMipmap(gl.TEXTURE_2D);
@@ -240,11 +246,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
         const max = gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) || 1;
         gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(4, max));
       }
+      if (gl.getError() !== gl.NO_ERROR) { gl.deleteTexture(tex); throw Error(`贴图 ${w}×${h} 的采样缓冲分配失败。`); }
       renderer.bindTexture(i, tex);
     }
     model.setInitialized(true);
     texturesReady = true;
-  })().catch((e) => console.error('贴图加载失败', e));
+  })().catch((e) => { showRenderNotice('贴图加载失败：'+e.message,true); console.error('贴图加载失败', e); });
 
   // ---------- 动作 ----------
   // 每条动作都必须 setEffectIds：CubismMotion 每帧读 _eyeBlinkParameterIds /
@@ -608,7 +615,48 @@ export async function createLive2DBody(base, opts, entry, kit) {
   }
 
   // ---------- 绘制 ----------
+  let resolutionCheckedAt = -Infinity, shrinkTarget = 0, shrinkAt = 0, allocationCeiling = Infinity, validateTargets = true;
+  function qualityInfo() {
+    return {mode:renderPolicy.mode,canvas:[canvas.width,canvas.height],maskSize:renderConfig.maskSize,
+      maskBuffers,textureLimit:renderPolicy.textureLimit,canvasLimit:renderPolicy.canvasLimit,
+      textures:uploadedTextures,limits,warnings:[...renderWarnings],error:renderFailure};
+  }
+  function ensureResolution() {
+    if (renderFailure) return false;
+    const now = doc.defaultView.performance.now();
+    if (now - resolutionCheckedAt < 250 || !fo.isConnected) return true;
+    resolutionCheckedAt = now;
+    const pixels = displayPixels(fo.getScreenCTM?.(),fo.getBoundingClientRect(),BOX);
+    const plan = resolutionPlan(pixels,doc.defaultView.devicePixelRatio,renderPolicy,limits);
+    if (plan.warning) showRenderNotice(plan.warning);
+    const size = Math.min(plan.size,allocationCeiling), previous = canvas.width;
+    if (size === previous) { shrinkTarget = 0; return true; }
+    if (size < previous) {
+      if (size > previous * .65) return true;
+      if (shrinkTarget !== size) { shrinkTarget = size; shrinkAt = now; return true; }
+      if (now - shrinkAt < 1200) return true;
+    }
+    const allocate = target => {
+      canvas.width = target; canvas.height = target;
+      if (gl.isContextLost() || gl.drawingBufferWidth !== target || gl.drawingBufferHeight !== target) throw Error(`画布 ${target}×${target} 分配失败`);
+      renderer.setRenderTargetSize(target,target);
+      validateTargets = true;
+      resizeMaskBuffers(renderConfig,model,gl,target,renderPolicy.strict);
+      if (renderConfig.warning) showRenderNotice(renderConfig.warning);
+    };
+    try { allocate(size); shrinkTarget = 0; }
+    catch (error) {
+      if (renderPolicy.strict || gl.isContextLost()) { showRenderNotice(error.message+'，无法保持所选精度。',true); return false; }
+      try {
+        const fallback = Math.max(128,Math.min(previous,Math.floor(size/2)));
+        allocate(fallback); allocationCeiling = fallback;
+        showRenderNotice(`请求 ${size}px 渲染失败，实际回退到 ${fallback}px。`);
+      } catch (failure) { showRenderNotice(failure.message,true); return false; }
+    }
+    return true;
+  }
   function render() {
+    if (!ensureResolution()) return false;
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -618,7 +666,16 @@ export async function createLive2DBody(base, opts, entry, kit) {
     projection.multiplyByMatrix(model._modelMatrix);
     renderer.setMvpMatrix(projection);
     renderer.setRenderState(gl.getParameter(gl.FRAMEBUFFER_BINDING), [0, 0, canvas.width, canvas.height]);
-    renderer.drawModel();
+    try { renderer.drawModel(); }
+    catch (error) { showRenderNotice('模型绘制失败：'+error.message,true); return false; }
+    if (validateTargets) {
+      validateTargets = false;
+      const targets = [...(renderer._modelRenderTargets || []),...(renderer._drawableMasks || []),...(renderer._offscreenMasks || [])];
+      if (targets.some(target=>!target?.isValid()) || gl.getError() !== gl.NO_ERROR) {
+        showRenderNotice('渲染缓冲分配或绘制失败，无法保持所选精度。',true); return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -642,8 +699,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     }
     applyCleanParams();
     model._model.update();
-    render();
-    return true;
+    return render();
   }
 
   function measureNeutralExtent() {
@@ -657,6 +713,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
    * 调用前必须刚 render 过，否则默认帧缓冲可能已被合成器清空。
    */
   function canvasPng(size = 512) {
+    if (renderFailure) throw Error(renderFailure);
     const w = canvas.width;
     const h = canvas.height;
     const src = new Uint8Array(w * h * 4);
@@ -820,6 +877,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       maskBuffers,
       renderMode: renderConfig.mode,
       renderWarning: renderConfig.warning,
+      renderQuality: qualityInfo(),
       expressions: [...expressions.keys()],
       idle: idleIds,
       motion: profile.motion?.kind === 'stand' ? 'stand' : 'roam',
@@ -901,7 +959,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
         const m = autoFitExtent({ height: 200, feet: 236, center: 128, maxWidth: 208 });
         if (!m) return null;
         if (!renderNeutralPose()) return null;
-        const png = canvasPng(canvas.width);
+        const png = canvasPng(512);
         const png128 = canvasPng(128);
         return png && png128 ? { png, png128 } : null;
       } catch (e) {
@@ -919,7 +977,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
     draw(petG, face, frame) {
       if (fo.parentNode !== petG) petG.appendChild(fo);
-      if (!texturesReady) return;
+      if (!texturesReady || renderFailure) return;
 
       const dt = clamp(frame.dt ?? 0.016, 0.001, 0.05);
 
@@ -999,6 +1057,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     return m;
   };
   globalThis.__l2dCover = figure.__cover;
+  globalThis.__l2dRenderQuality = qualityInfo;
   globalThis.__l2dExpr = figure.__expr;
 
   const body = kit.createBody(host, { figure, words, css: 'foreignObject{pointer-events:none}' });

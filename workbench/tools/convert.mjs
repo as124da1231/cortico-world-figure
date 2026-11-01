@@ -57,7 +57,7 @@ const OVERRIDES_PATH = arg('overrides');
 const MAX_TEX = Math.max(0, Number(arg('max-texture', 2048)) || 0);
 const CLEAN = flag('clean');
 /** 生成器配方版本：写进 build.json；工作台用它判断包是否过期 */
-const GENERATOR_VERSION = 'rt-2026-11-01.native.1';
+const GENERATOR_VERSION = 'rt-2026-11-01.quality.1';
 /** 简易模式：只做 role + 通用配方，不产出/不引用任何原生 exp3 / motion / pose 绑定。 */
 const SIMPLE = true;
 
@@ -659,6 +659,7 @@ export default {
 ${overrides.fit ? `  fit: ${JSON.stringify(overrides.fit)},` : "  fit: { mode: 'contain', anchor: 'bottom', padding: [0.04, 0.02], offset: [0, 0], zoom: 1 },"}
   // roam：跟随 Coo 的走动偏好；stand：固定站定（后端强制 roam off）
   motion: ${JSON.stringify(motion)},
+  render: ${JSON.stringify(overrides.render ?? {mode:'original',textureLimit:MAX_TEX,canvasLimit:0,strict:true})},
 ${overrides.extent ? `  extent: ${JSON.stringify(overrides.extent)},` : ''}
 ${overrides.anchors ? `  anchors: ${JSON.stringify(overrides.anchors)},` : ''}
   // 简易模式不播 motion，但 motion 里的 PartOpacity 是“中性姿势”的一部分：
@@ -720,7 +721,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/native-actions.js']) {
+for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js']) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);
