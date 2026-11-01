@@ -50,7 +50,7 @@ try {
   body.set?.({ roam: 'off' });
   await new Promise((r) => setTimeout(r, 1200));
   let fit = null;
-  try { globalThis.__l2dAutoFit?.(); fit = globalThis.__l2dFit?.get?.() ?? null; } catch (e) { fit = null; }
+  if (!__WARDROBE_ONLY__) try { globalThis.__l2dAutoFit?.(); fit = globalThis.__l2dFit?.get?.() ?? null; } catch (e) { fit = null; }
   await new Promise((r) => setTimeout(r, 400));
   const r = globalThis.__l2dCover?.();
   if (!r || !r.png) throw new Error('cover api unavailable');
@@ -60,7 +60,14 @@ try {
     if (!png) throw new Error('native sample api unavailable');
     evidence.push({ ...sample, png });
   }
-  await post({ png: r.png, png128: r.png128, fit, evidence });
+  const wardrobe = [];
+  for (const sample of __WARDROBE_SAMPLES__) {
+    await body.setScheme?.(sample.scheme);
+    const shot = globalThis.__l2dCover?.();
+    if (!shot?.png128) throw new Error('装扮缩略图渲染失败');
+    wardrobe.push({ ...sample, png: shot.png128 });
+  }
+  await post({ png: r.png, png128: r.png128, fit, evidence, wardrobe });
   document.title = 'done';
 } catch (e) {
   await post({ error: String((e && e.message) || e) }).catch(() => {});
@@ -74,6 +81,17 @@ export interface CoverResult {
   bytes?: number;
   fit?: { zoom?: number; offset?: [number, number]; autoFit?: boolean } | null;
   evidence?: Array<{id:string;time:number;png:string}>;
+  thumbnails?: number;
+}
+
+/** Use the host's axis order; all other axes remain at their default option. */
+export function wardrobeSamples(manifest:any,groups:any[]) {
+  const ids=new Set(groups.filter(g=>g.options?.length).map(g=>g.id)),axes=manifest.axes||[];
+  return axes.flatMap((axis:any,index:number)=>!ids.has(axis.id)?[]:axis.options.map((option:any)=>({axis:axis.id,option:option.id,scheme:axes.map((a:any,i:number)=>i===index?option.id:a.options[0].id).join('-')})));
+}
+
+export async function captureWardrobeThumbnails(packDir:string,workbenchDir:string,signal?:AbortSignal):Promise<CoverResult> {
+  return captureCover(packDir,workbenchDir,60000,[],signal,{wardrobe:true});
 }
 
 /** 系统里找一个 Chromium 内核的浏览器。 */
@@ -106,9 +124,15 @@ export async function captureCover(
   timeoutMs = 60000,
   samples: Array<{id:string;time:number}> = [],
   signal?: AbortSignal,
+  options: {wardrobe?:boolean} = {},
 ): Promise<CoverResult> {
   signal?.throwIfAborted();
   if (samples.length > 6) throw new Error('动作采样最多 6 帧');
+  const manifest=options.wardrobe?JSON.parse(await readFile(join(packDir,'figure.json'),'utf8')):null;
+  const library=options.wardrobe?JSON.parse(await readFile(join(packDir,'native-library.json'),'utf8')):null;
+  const wardrobe=options.wardrobe?wardrobeSamples(manifest,library.wardrobe||[]):[];
+  if(wardrobe.length>136)throw Error('装扮缩略图数量超出上限');
+  if(options.wardrobe&&!wardrobe.length)return {ok:true,thumbnails:0};
   const browser = findBrowser();
   if (!browser) return { ok: false, error: '没找到 Chrome / Edge，跳过封面' };
 
@@ -124,7 +148,7 @@ export async function captureCover(
       try {
         for await (const c of req) {
           raw += c;
-          if (raw.length > 4 * 1048576) { res.writeHead(413).end(); resolveResult({ ok: false, error: '封面数据过大' }); return; }
+          if (raw.length > (options.wardrobe?16:4) * 1048576) { res.writeHead(413).end(); resolveResult({ ok: false, error: '封面数据过大' }); return; }
         }
       } catch { resolveResult({ ok: false, error: '封面上传中断' }); return; }
       res.writeHead(200).end('ok');
@@ -136,13 +160,21 @@ export async function captureCover(
         const small = pngOf(body.png128);
         const dir = join(packDir, 'thumb');
         await mkdir(dir, { recursive: true });
-        await writeFile(join(dir, 'cover.png'), main);
-        await writeFile(join(dir, 'opt-model.png'), small);
+        if(!options.wardrobe){await writeFile(join(dir, 'cover.png'), main);await writeFile(join(dir, 'opt-model.png'), small);}
         const file = join(packDir, 'figure.json');
         const manifest = JSON.parse(await readFile(file, 'utf8'));
-        manifest.thumb = 'thumb/cover.png';
-        if (Array.isArray(manifest.axes) && manifest.axes[0]?.options?.[0]) {
+        if(!options.wardrobe)manifest.thumb = 'thumb/cover.png';
+        if (!options.wardrobe && Array.isArray(manifest.axes) && manifest.axes[0]?.options?.[0]) {
           manifest.axes[0].options[0].thumb = 'thumb/opt-model.png';
+        }
+        if(wardrobe.length){
+          if(!Array.isArray(body.wardrobe)||body.wardrobe.length!==wardrobe.length)throw Error('装扮缩略图不完整');
+          for(const [i,item]of body.wardrobe.entries()){
+            const expected=wardrobe[i];if(item.axis!==expected.axis||item.option!==expected.option)throw Error('装扮缩略图标识不一致');
+            const png=pngOf(item.png);if(png.length<24||png.length>131072||png.readUInt32BE(16)!==128||png.readUInt32BE(20)!==128)throw Error('装扮缩略图尺寸无效');
+            const path='thumb/wardrobe-'+i+'.png';await writeFile(join(packDir,path),png);
+            manifest.axes.find((a:any)=>a.id===expected.axis).options.find((o:any)=>o.id===expected.option).thumb=path;
+          }
         }
         await writeFile(file, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
         const evidence = samples.length ? body.evidence : [];
@@ -151,14 +183,14 @@ export async function captureCover(
           if (item.id !== samples[i].id || item.time !== samples[i].time) throw new Error('动作采样标识不一致');
           pngOf(item.png);
         }
-        resolveResult({ ok: true, bytes: main.length, fit, evidence });
+        resolveResult({ ok: true, bytes: main.length, fit, evidence,thumbnails:wardrobe.length });
       } catch (e) {
         resolveResult({ ok: false, error: String((e as Error)?.message ?? e) });
       }
       return;
     }
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(COVER_PAGE.replace('__NATIVE_SAMPLES__', JSON.stringify(samples)));
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(COVER_PAGE.replace('__NATIVE_SAMPLES__', JSON.stringify(samples)).replace('__WARDROBE_ONLY__',String(!!options.wardrobe)).replace('__WARDROBE_SAMPLES__',JSON.stringify(wardrobe)));
       return;
     }
     const isKit = url.pathname.startsWith('/kit/');

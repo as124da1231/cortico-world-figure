@@ -67,6 +67,7 @@ test('AI mode can execute with the legacy switch off, and switching to manual st
 async function editableWorld(t){
  const f=await fixture(t);await writeNativePack(f.pack,catalog,[]);
  const world=new Live2dWorld({getConfig:()=>({enabled:true,workDir:join(f.root,'work')}),persist(){},dataDir:f.root});
+ world.captureWardrobe=async()=>{}; // Transaction fixtures have no Core; real rendering is covered separately.
  const record={id:'existing',packDir:f.pack,at:1,bytes:1,words:0,cover:false,fit:false,manualAvailable:true};
  world.state={modelDir:'',builds:[record],build:record,distributionNotice:{revision:1,at:1}};
  t.after(()=>world.stop());const opened=await world.manual.open(f.pack,catalog,[],undefined,record.id);
@@ -103,4 +104,10 @@ test('wardrobe saves into host axes and runtime data; clearing axes keeps the re
  await world.saveManual(token,binding,groups);let pack=world.state.builds[0].packDir,m=JSON.parse(await readFile(join(pack,'figure.json')));assert.equal(m.axes[0].id,'lookarms');assert.deepEqual(m.axes[0].options.map(o=>o.id),['default','raised']);
  assert.match(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/wardrobe:.*"axisOffset":0/);const library=JSON.parse(await readFile(join(pack,LIBRARY)));assert.equal(library.wardrobe[0].options[0].resource,'wave');
  const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'手部');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes,[]);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
+});
+test('failed wardrobe thumbnail rendering keeps the original card and draft for retry',async t=>{
+ const {world,token,pack,root}=await editableWorld(t);world.captureWardrobe=async()=>{throw Error('thumbnail renderer unavailable');};
+ await assert.rejects(world.saveManual(token,binding,[{id:'lookarm',name:'装扮',options:[{id:'up',name:'抬手',resource:'wave'}]}]),/renderer unavailable/);
+ assert.equal(world.state.builds[0].packDir,pack);assert.equal(world.state.builds.length,1);assert.equal(world.manual.get(token).saving,false);assert.deepEqual(await readdir(join(root,'work','builds')),[]);
+ world.captureWardrobe=async()=>{};await world.saveManual(token,binding,[]);assert.equal(world.state.builds[0].id,'existing');
 });

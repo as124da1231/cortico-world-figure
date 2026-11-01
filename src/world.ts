@@ -21,7 +21,7 @@ import type {
 import type { ConfigGroup } from 'cortico/core/config-schema.ts';
 import { adaptationSummary, buildPack, dirSize, editPack, installPack, packDetail, scanModel, type ScanSummary } from './pipeline.ts';
 import { PackImporter, filesFromBundle, filesFromZip, thumbOf } from './import.ts';
-import { captureCover } from './cover.ts';
+import { captureCover,captureWardrobeThumbnails } from './cover.ts';
 import { readClipboardPaths } from './clipboard.ts';
 import { FigureAutomation, automationMode } from './automation.mjs';
 import {adaptationMode,aiEnabled} from './adaptation.mjs';
@@ -589,6 +589,7 @@ export class Live2dWorld implements World {
       const model = found.models.find((m:any)=>m.kind==='live2d');
       if(model){const catalog=await inspectNative(model);if(opts.fingerprint && catalog.fingerprint!==opts.fingerprint)throw Error('模型素材已变化，请重新打开编辑');await writeFile(join(finalDir,LIBRARY),JSON.stringify({version:1,catalog,bindings:(opts.native as any)?.bindings||[]}));}
       if(model&&opts.wardrobe)await writeNativePack(finalDir,await inspectNative(model),(opts.native as any)?.bindings||[],false,opts.wardrobe);
+      if(opts.wardrobe)await this.captureWardrobe(finalDir,opts.signal);
       const bytes = await dirSize(finalDir);
       const manifest = JSON.parse(await readFile(join(finalDir, 'figure.json'), 'utf8'));
       const words = Array.isArray(manifest.vocab) ? manifest.vocab.length : 0;
@@ -699,6 +700,11 @@ export class Live2dWorld implements World {
     }catch(e){await rm(scratch,{recursive:true,force:true});throw e;}
   }
 
+  private async captureWardrobe(pack:string,signal?:AbortSignal) {
+    const shot=await captureWardrobeThumbnails(pack,WORKBENCH_DIR,signal);
+    if(!shot.ok)throw Error('装扮缩略图生成失败：'+(shot.error||'未知原因'));
+  }
+
   private async saveManual(token:string,values:any[],groups?:any[]) {
     const receipt=this.manual.saved(token);if(receipt)return receipt;
     this.requireNotice();const {session,bindings}=await this.manual.validate(token,values);
@@ -718,6 +724,7 @@ export class Live2dWorld implements World {
       await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
       for(const file of ['live2d.js','native-actions.js','wardrobe.js','render-config.js','render-quality.js','role-values.js','soullink.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
       await writeNativePack(target,session.catalog,bindings,false,wardrobe);
+      await this.captureWardrobe(target);
       if(await packFingerprint(session.pack)!==session.hash)throw Error('形象包已变化，请重新打开编辑');
       const old=this.state.builds?.find(b=>b.id===session.buildId);if(!old)throw Error('原打包产物已移除');
       const rec={...old,packDir:target,bytes:await dirSize(target),words:JSON.parse(await readFile(join(target,'figure.json'),'utf8')).vocab.length,at:Date.now()};

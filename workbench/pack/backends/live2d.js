@@ -694,6 +694,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     resetNativeBase();
     applyFrame({}, {}, 1 / 60, true);
     applyPartOpacity(null);
+    wardrobe.apply();
     model._model.saveParameters();
     // 物理是有状态的：同一中性姿势也会因为上一帧的惯性读出不同包围盒。
     // 简单模式量取景不跑物理（脚底 / 躯干 / 高度不受头发尾巴滞后影响）。
@@ -702,6 +703,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       try { model._pose?.updateParameters(model._model, 1 / 60); } catch { /* 姿势失败不致命 */ }
     }
     applyCleanParams();
+    wardrobe.apply();
     model._model.update();
     return render();
   }

@@ -1,5 +1,15 @@
 # 本机开发记录
 
+## 2026-11-01：装扮选项缩略图与奶蛙名称修正
+
+用户指出原生装扮页应为「装扮 → 默认／无水印」并带图。实际包的分组名为用户草稿 wushuiying，选项沿用资源标题 expression1，上一轮生成 axes 时没有 thumb 字段。补齐保存链路：复用已有本地无头封面渲染，一次加载逐个 setScheme，按宿主轴顺序把其他组设为默认，每个选项含默认输出 128×128 真实 PNG，写入对应 option.thumb；保留主封面和模型选项图。中性取景过程也应用持久装扮，避免两张图都拍成默认外观。失败回滚暂存包、保留原卡与草稿供重试；无装扮组时不启动浏览器。未改变用户自定义分组的通用命名规则。
+
+全量 146 通过、3 项素材依赖跳过；Coo 自带 Node 24 相关 29 项通过，项目检查及官方 describe/check 通过。新增真实浏览器的独立颜色选项截图校验、轴顺序／默认组合测试与渲染失败事务回归。隔离复制真实奶蛙验证默认含原水印、原生无水印状态的两张图有差异，主封面字节不变，已查看实际图片。
+
+本机重载后通过现有 manualOpenBuild/manualSave 更新原奶蛙卡片的名称，再通过 install 同步已安装副本；ID 保留，当前 16 张卡片、配置摘要与须知一致，AstrBot enabled=true。变更前原包和状态备份 E:/Coopanion-dev/_tmp/figure-wardrobe-thumbs/before/；安装入口自动备份 E:/Coopanion/data/home/companion/data/figure-backups/model-d41bdc.bak-1793547129548-85019bcc-68df-417b-a543-4755bfc29eac/。正式版本仍为 2.0.0-dev.0。
+
+真实 renderer 保持用户的 workbench 路由、原生模块加载通过，inspector 已关闭。读取装扮 DOM 的检查因用户已切到 workbench 而停止，未导航用户窗口；另用独立只读浏览器访问实际 7797/dress，拦截全部 API 写请求，验证宿主显示「装扮」「默认」「无水印」及两张 naturalWidth=128 的图，保存 official-options.png 后关闭。实际 /api/figures 也返回两项 thumb。证据 E:/Coopanion-dev/_tmp/figure-wardrobe-thumbs/，未上传、未发布。
+
 ## 2026-11-01：动作与装扮双页编排
 
 用户授权开始后，按 Coo skill／Cortina World 流程在现有三栏弹窗左侧增加动作／装扮两页，共用预览和保存。装扮按用户命名的分组整理原生资源，exp3 保持参数、motion3 使用末帧；同组互斥，不同组叠加，禁止与其他组或动作及复位片段共用参数。默认预览可一键恢复且保留定义。分组写入 Coo 原生 axes，宿主用 setScheme 切换；试穿不持久化选中项，保存后从原卡片重新安装生效。不增加 AI 工具或提示词，沿用 2.0.0-dev.0。
