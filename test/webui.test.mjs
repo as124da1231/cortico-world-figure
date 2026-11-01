@@ -7,13 +7,11 @@ const tick = () => new Promise((r) => setTimeout(r, 15));
 async function mount(t, opts = {}) {
   const dom = new JSDOM('<main></main>', { url: 'http://localhost/' });
   globalThis.window = dom.window; globalThis.document = dom.window.document;
-  const calls = []; const toasts = []; const drawers = [];
+  const calls = []; const toasts = [];
   let ack = opts.ack ?? false;
   const root = document.querySelector('main');
   const ctx = {
     root, language: opts.language ?? 'zh',
-    pickPath: opts.pickPath,
-    interval: opts.interval,
     ui: {
       sheet: ({ title, desc }) => {
         const el = document.createElement('section');
@@ -21,7 +19,7 @@ async function mount(t, opts = {}) {
         const body = document.createElement('div'); el.append(head, body); return { el, body };
       },
       log: () => ({ el: document.createElement('div'), append() {}, clear() {} }),
-      toast: (...args) => toasts.push(args), confirm: async () => true, drawer: (...args) => drawers.push(args),
+      toast: (...args) => toasts.push(args), confirm: async () => true, drawer() {},
     },
     async invoke(method, args) {
       calls.push({ method, args });
@@ -42,11 +40,11 @@ async function mount(t, opts = {}) {
   t.after(() => { handle.dispose(); dom.window.close(); });
   await tick();
   const button = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent === label);
-  return { ctx, root, calls, toasts, drawers, button, handle, dom };
+  return { ctx, root, calls, toasts, button, handle, dom };
 }
 
-test('consent persists while the version offers a quiet manual notice fallback on standard hosts', async (t) => {
-  const { root, button, calls, drawers } = await mount(t);
+test('unacknowledged version opens notice; consent removes the workbench notice and keeps a static version', async (t) => {
+  const { root, button, calls } = await mount(t);
   assert.equal(root.querySelector('details').open, true);
   let badge = root.querySelector('.l2d-version-corner');
   assert.equal(badge.textContent, 'v1.4.2'); assert.equal(badge.tagName, 'BUTTON');
@@ -61,19 +59,16 @@ test('consent persists while the version offers a quiet manual notice fallback o
   assert.equal(badge.classList.contains('unack'), false);
   assert.equal(badge.parentElement, root.querySelector('.l2d-sheet'));
   assert.equal(root.querySelector('.l2d-notice-dock'), null);
-  assert.equal(badge.tagName, 'BUTTON');
-  assert.equal(badge.title, '查看须知');
-  assert.equal(document.activeElement, root.querySelector('.l2d-drop-zone'));
+  assert.equal(badge.tagName, 'SPAN');
+  assert.equal(badge.title, '');
+  assert.equal(document.activeElement, root.querySelector('.l2d-path'));
   assert.equal(root.querySelector('.l2d-notice'), null);
   badge.click(); assert.equal(root.querySelector('.l2d-notice'), null);
-  assert.equal(drawers.length, 1);
-  assert.match(drawers[0][1], /Live2D Cubism Core/);
   assert.equal(calls.filter((c) => c.method === 'noticeAccept').length, 1);
 });
 
 test('acknowledged users see only the version across upgrades, without the notice or ready-Core banner', async (t) => {
-  const { root, calls, drawers } = await mount(t, { ack: true, version: '1.4.99', language: 'en' });
-  assert.equal(drawers.length, 0);
+  const { root, calls } = await mount(t, { ack: true, version: '1.4.99', language: 'en' });
   assert.equal(root.querySelector('.l2d-version-corner').textContent, 'v1.4.99');
   assert.equal(root.querySelector('.l2d-version-corner').parentElement, root.querySelector('.l2d-sheet'));
   assert.equal(root.querySelector('.l2d-notice'), null);
@@ -127,20 +122,22 @@ test('unacknowledged config footer stays hidden and pending loads cannot restore
   dom.window.close();
 });
 
-test('pack cards explain adaptation without reusing the previous source report', async (t) => {
+test('automatic adaptation is explained inline without popups or parameter setup', async (t) => {
   const adaptation = { corrected: ['angleX'], limited: ['cheek', 'browAngle'], warnings: [] };
   const { root, toasts, dom } = await mount(t, {
     ack: true, builds: [{ id: 'a', bytes: 1, at: 1, adaptation }],
     invoke: m => m === 'state' ? { notice: { acknowledged: true }, version: 'test', scan: { adaptation } } : undefined,
   });
   const details = root.querySelectorAll('.l2d-adaptation');
-  assert.equal(details.length, 1);
+  assert.equal(details.length, 2);
   assert.equal(details[0].open, false);
   assert.match(details[0].textContent, /左右转头/);
   assert.match(details[0].textContent, /独立控制受限.*脸红/);
   assert.match(details[0].textContent, /无需手动配置参数/);
   assert.equal(toasts.length, 0);
-  assert.equal(root.querySelector('.l2d-path'), null);
+  const path = root.querySelector('.l2d-path'); path.value = 'new model';
+  path.dispatchEvent(new dom.window.Event('input'));
+  assert.equal(root.querySelectorAll('.l2d-adaptation').length, 1);
 });
 
 test('failed consent save leaves warning visible and permits retry', async (t) => {
@@ -155,10 +152,10 @@ test('failed consent save leaves warning visible and permits retry', async (t) =
   assert.equal(root.querySelector('.l2d-version-corner').textContent, 'v1.4.2');
 });
 
-test('packing requires a source; installation of an existing card does not require a model path', async (t) => {
+test('pack and import require notice; installation of existing card does not require model path', async (t) => {
   const builds = [{ id: 'sample-1', packId: 'sample', nameZh: '名字', at: 1, bytes: 5 }];
   const { button, calls } = await mount(t, { builds });
-  button('一键打包').click(); button('选择文件夹').click(); await tick();
+  button('打包').click(); button('导入').click(); await tick();
   assert.equal(calls.some((c) => c.method === 'build'), false);
   assert.equal(document.querySelector('.l2d-modal'), null);
   button('我已知晓，不再分发').click(); await tick();
@@ -179,159 +176,14 @@ test('edit validates name, locks close while saving, clears about, and disposes 
   name.value = '新名字'; modal.querySelector('textarea').value = '';
   button('保存').click(); await tick();
   button('取消').click(); assert.ok(document.querySelector('.l2d-modal'));
-  assert.equal(button('选择文件夹').disabled, true);
+  assert.equal(root.querySelector('input.l2d-path').disabled, true);
   finish({}); await tick();
   assert.equal(document.querySelector('.l2d-modal'), null);
   assert.equal(calls.find((c) => c.method === 'edit').args[1].aboutZh, '');
-  button('编辑').click(); await tick(); assert.ok(document.querySelector('[aria-modal="true"]'));
+  button('导入').click(); assert.ok(document.querySelector('[aria-modal="true"]'));
   document.querySelector('.l2d-modal').dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   assert.equal(document.querySelector('.l2d-modal'), null);
-  button('编辑').click(); await tick(); handle.dispose();
+  button('导入').click(); handle.dispose();
   assert.equal(document.querySelector('.l2d-modal'), null);
   assert.equal(root.hasAttribute('aria-busy'), false);
-});
-
-test('folder and ZIP selection are owned by the Coo browser window without the backend path picker', async (t) => {
-  const { root, button } = await mount(t, {
-    ack: true,
-    pickPath: async () => { throw new Error('must not use the backend picker'); },
-  });
-  assert.deepEqual([...root.querySelectorAll('.l2d-import-bar button')].map(b => b.textContent), ['选择文件夹', '选择 ZIP', '一键打包']);
-  assert.equal(root.querySelector('.l2d-path'), null);
-  assert.equal(button('扫描'), undefined);
-  assert.equal(button('一键打包').disabled, true);
-  const folder = root.querySelector('input[webkitdirectory]');
-  const zip = root.querySelector('input[accept=".zip,application/zip"]');
-  assert.equal(folder.webkitdirectory, true);
-  const opened = [];
-  folder.addEventListener('click', event => { event.preventDefault(); opened.push('folder'); });
-  zip.addEventListener('click', event => { event.preventDefault(); opened.push('zip'); });
-  button('选择文件夹').click(); button('选择 ZIP').click();
-  assert.deepEqual(opened, ['folder', 'zip']);
-});
-
-test('choosing a folder retains relative paths and imports the model with its sibling resources', async (t) => {
-  const { root, calls, dom, button } = await mount(t, {
-    ack: true,
-    invoke: method => method === 'importBegin' ? { token: 'folder' } : method === 'importFinish' ? { token: 'folder', models: [{ dir: 'role', title: '角色' }], packs: [] } : undefined,
-  });
-  const input = root.querySelector('input[webkitdirectory]');
-  const files = ['role/role.model3.json', 'role/role.moc3', 'role/textures/texture.png'].map(path => ({
-    name: path.split('/').at(-1), webkitRelativePath: path, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
-  }));
-  Object.defineProperty(input, 'files', { value: files });
-  input.dispatchEvent(new dom.window.Event('change')); await tick();
-  assert.deepEqual(calls.find(call => call.method === 'importAppend').args[1].map(file => file.path), files.map(file => file.webkitRelativePath));
-  assert.deepEqual(calls.find(call => call.method === 'importFinish').args, ['folder', true]);
-  assert.equal(button('一键打包').disabled, false);
-  assert.equal(calls.some(call => call.method === 'importBuild'), false);
-});
-
-function paste(dom, zone, text = '', files = []) {
-  const event = new dom.window.Event('paste', { bubbles: true, cancelable: true });
-  Object.defineProperty(event, 'clipboardData', { value: { getData: type => type === 'text/plain' ? text : '', files } });
-  zone.dispatchEvent(event);
-}
-
-test('pasting native copied folders is local and never starts packing or installation', async (t) => {
-  const { root, calls, dom } = await mount(t, {
-    ack: true,
-    invoke: method => method === 'clipboard' ? { paths: ['G:/models/role'] } : method === 'importPaths' ? { token: 'paste', models: [{ dir: 'role', title: '角色' }], packs: [] } : undefined,
-  });
-  const zone = root.querySelector('.l2d-drop-zone'); zone.click();
-  assert.equal(document.activeElement, zone);
-  paste(dom, zone); await tick();
-  assert.deepEqual(calls.find(c => c.method === 'importPaths').args, [['G:/models/role']]);
-  assert.equal(calls.some(c => ['build', 'importBuild', 'install', 'importInstall'].includes(c.method)), false);
-});
-
-test('one-click packing retries only failed models and keeps completed packs', async (t) => {
-  let attempts = 0;
-  const { root, button, calls, dom } = await mount(t, {
-    ack: true,
-    invoke: (method, args) => {
-      if (method === 'importPaths') return { token: 'batch', models: [{ dir: 'one', title: '一' }, { dir: 'two', title: '二' }], packs: [] };
-      if (method === 'importBuild' && args[1] === 'two' && attempts++ === 0) throw new Error('try again');
-      if (method === 'importBuild') return { buildId: args[1], log: [] };
-    },
-  });
-  paste(dom, root.querySelector('.l2d-drop-zone'), '"G:/models"'); await tick();
-  button('一键打包').click(); await tick();
-  assert.match(root.querySelector('.l2d-source-hint').textContent, /1 项失败/);
-  button('一键打包').click(); await tick();
-  assert.deepEqual(calls.filter(c => c.method === 'importBuild').map(c => c.args[1]), ['one', 'two', 'two']);
-  assert.equal(calls.some(c => c.method === 'install'), false);
-  assert.equal(button('一键打包').disabled, true);
-});
-
-test('failed imports keep the error visible and cannot package a stale selection', async (t) => {
-  const { root, button, dom } = await mount(t, { ack: true, invoke: method => { if (method === 'importPaths') throw new Error('目录不存在'); } });
-  paste(dom, root.querySelector('.l2d-drop-zone'), 'G:/missing'); await tick();
-  assert.match(root.querySelector('.l2d-source-hint').textContent, /目录不存在/);
-  assert.equal(button('一键打包').disabled, true);
-});
-
-test('dropping a ZIP recognizes it without opening an import dialog', async (t) => {
-  const { root, calls, dom, button } = await mount(t, {
-    ack: true,
-    invoke: method => method === 'importStage' ? { token: 'zip', models: [{ dir: 'role', title: '角色' }], packs: [] } : undefined,
-  });
-  const event = new dom.window.Event('drop', { bubbles: true, cancelable: true });
-  Object.defineProperty(event, 'dataTransfer', { value: { getData: () => '', items: [], files: [{ name: 'role.zip', arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }] } });
-  root.querySelector('.l2d-drop-zone').dispatchEvent(event); await tick();
-  assert.deepEqual(calls.find(c => c.method === 'importStage').args, ['AQID', 'zip']);
-  assert.equal(root.querySelector('[role="dialog"]'), null);
-  assert.equal(button('一键打包').disabled, false);
-});
-
-test('non-Live2D pack metadata can be saved without sending unsupported performance settings', async t => {
-  const {root,button,calls} = await mount(t,{ack:true,builds:[{id:'frames',at:1,bytes:5}],invoke:method=>method==='detail'?{nameZh:'图像形象',tunable:false}:undefined});
-  button('编辑').click();await tick();
-  const modal=root.querySelector('[role="dialog"]');assert(modal);
-  assert.equal(modal.querySelector('input[type="range"]').closest('.l2d-field').hidden,true);
-  button('保存').click();await tick();
-  const patch=calls.find(call=>call.method==='edit').args[1];
-  assert.equal('bodyGain' in patch,false);assert.equal('style' in patch,false);
-});
-
-test('a successful installation is not reported as failed when the result list cannot refresh',async t=>{
-  let lists=0;
-  const {button,toasts}=await mount(t,{ack:true,builds:[{id:'draft',at:1,bytes:5}],invoke:method=>{
-    if(method==='install')return {log:[]};
-    if(method==='list'&&lists++>0)throw Error('temporary read failure');
-  }});
-  button('安装').click();await tick();
-  assert(toasts.some(([message,tone])=>message==='安装 ✓'&&tone==='ok'));
-  assert(!toasts.some(([message])=>message==='安装 ✗'));
-});
-
-test('a reopened panel reflects a running backend action until it actually finishes',async t=>{
-  let busy=true,poll,cleared=false;
-  const {root,button}=await mount(t,{ack:true,interval:fn=>{poll=fn;return{dispose(){cleared=true;}};},invoke:method=>method==='state'?{notice:{acknowledged:true},version:'1.4.5',busy,steps:{build:{phase:busy?'loading':'done'}}}:undefined});
-  assert.equal(button('选择文件夹').disabled,true);assert.equal(root.getAttribute('aria-busy'),'true');
-  busy=false;await poll();
-  assert.equal(button('选择文件夹').disabled,false);assert.equal(root.getAttribute('aria-busy'),'false');assert.equal(cleared,true);
-});
-
-test('large individual textures are split into bounded requests while preserving relative paths',async t=>{
-  const {root,calls,dom}=await mount(t,{ack:true,invoke:method=>method==='importBegin'?{token:'chunks'}:method==='importFinish'?{token:'chunks',models:[{dir:'role',title:'角色'}],packs:[]}:undefined});
-  const length=5*1048576;
-  const files=[{name:'role.model3.json',webkitRelativePath:'role/role.model3.json',size:2,arrayBuffer:async()=>new TextEncoder().encode('{}').buffer},{name:'texture.png',webkitRelativePath:'role/textures/texture.png',size:length,slice:(start,end)=>({arrayBuffer:async()=>new Uint8Array(Math.min(end,length)-start).buffer})}];
-  const input=root.querySelector('input[webkitdirectory]');Object.defineProperty(input,'files',{value:files});
-  input.dispatchEvent(new dom.window.Event('change'));
-  for(let i=0;i<70&&!calls.some(call=>call.method==='importFinish');i++)await tick();
-  const chunks=calls.filter(call=>call.method==='importAppendChunk').map(call=>call.args[1]);
-  assert.deepEqual(chunks.map(chunk=>chunk.offset),[0,2*1048576,4*1048576]);
-  assert(chunks.every(chunk=>chunk.path==='role/textures/texture.png'&&chunk.b64.length<=3*1048576));
-  assert(calls.some(call=>call.method==='importFinish'));
-});
-
-test('leaving during folder reads stops subsequent transfer and cancels only that import token',async t=>{
-  let finish;
-  const {root,calls,dom,handle}=await mount(t,{ack:true,invoke:method=>method==='importBegin'?{token:'owned'}:undefined});
-  const file={name:'role.model3.json',webkitRelativePath:'role/role.model3.json',arrayBuffer:()=>new Promise(resolve=>{finish=resolve;})};
-  const input=root.querySelector('input[webkitdirectory]');Object.defineProperty(input,'files',{value:[file]});
-  input.dispatchEvent(new dom.window.Event('change'));await tick();handle.dispose();finish(new Uint8Array([1]).buffer);await tick();
-  assert(!calls.some(call=>call.method==='importAppend'||call.method==='importFinish'));
-  assert(calls.some(call=>call.method==='importCancel'&&call.args[0]==='owned'));
 });

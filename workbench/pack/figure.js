@@ -26,19 +26,14 @@ export async function createFigureBody(base, opts) {
   return createLive2DBody(base, opts, entry, kit);
 }
 
-const coreScripts = new Map();
 function loadScript(url) {
-  if (globalThis.Live2DCubismCore) return Promise.resolve();
-  if (coreScripts.has(url)) return coreScripts.get(url);
-  const pending = new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${url}"]`)) return resolve();
     const s = document.createElement('script');
     s.src = url;
     s.async = true;
     s.onload = () => resolve();
-    s.onerror = () => { s.remove(); reject(new Error(`加载失败：${url}`)); };
+    s.onerror = () => reject(new Error(`加载失败：${url}`));
     document.head.appendChild(s);
   });
-  const tracked = pending.catch(error => { coreScripts.delete(url); throw error; });
-  coreScripts.set(url, tracked);
-  return tracked;
 }

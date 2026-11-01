@@ -13,8 +13,8 @@
  */
 import http from 'node:http';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { dirname, extname, join, normalize, resolve, sep, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -754,15 +754,7 @@ async function install({ id, confirm, force }) {
     throw new Error('预检未通过：\n· ' + pf.fatal.join('\n· '));
   }
   const target = join(FIGURES, safeId);
-  if (existsSync(target) && (await lstat(target)).isSymbolicLink()) throw new Error('安装目标不能是符号链接');
-  const nonce = randomUUID();
-  const pending = join(FIGURES, `.${safeId}-install-${nonce}`);
-  const previous = join(FIGURES, `.${safeId}-previous-${nonce}`);
   let backup = null;
-  let moved = false;
-  try {
-  await cp(state.packDir, pending, { recursive: true });
-  if (JSON.parse(await readFile(join(pending,'figure.json'),'utf8')).id !== safeId) throw new Error('复制后的形象包校验失败');
   if (existsSync(target)) {
     // 备份放到 figures/ 外面：Coo 会把 figures/ 下每个目录都当形象包扫，.bak 会刷一堆
     // 「id 已被另一个形象包占用」的 WARN，还会拖慢启动。
@@ -780,11 +772,8 @@ async function install({ id, confirm, force }) {
       }
     } catch { /* 清理失败不影响安装 */ }
   }
-  if (existsSync(target)) { await rename(target,previous); moved = true; }
-  try { await rename(pending,target); }
-  catch (error) { if (moved) { await rename(previous,target); moved = false; } throw error; }
-  } finally { await rm(pending,{recursive:true,force:true}).catch(()=>{}); }
-  if (moved) await rm(previous,{recursive:true,force:true}).catch(()=>{});
+  await rm(target, { recursive: true, force: true });
+  await cp(state.packDir, target, { recursive: true });
   return { target, backup };
 }
 
@@ -852,15 +841,7 @@ const PREVIEW_CSP = [
 ].join('; ');
 
 const server = http.createServer(async (req, res) => {
-  let url;
-  try { url = new URL(req.url, 'http://127.0.0.1'); }
-  catch { return json(res,400,{error:'invalid URL'}); }
-  const local = value => {
-    try { const address = new URL(value); return address.protocol === 'http:' && ['127.0.0.1','localhost'].includes(address.hostname) && Number(address.port || 80) === actualPort; }
-    catch { return false; }
-  };
-  if (!local(`http://${req.headers.host || ''}`)) return json(res,421,{error:'invalid host'});
-  if (!['GET','HEAD','OPTIONS'].includes(req.method) && req.headers.origin && !local(req.headers.origin)) return json(res,403,{error:'cross-origin requests are not allowed'});
+  const url = new URL(req.url, 'http://x');
   const path = url.pathname;
   try {
     if (req.method === 'GET' && path === '/api/state') return json(res, 200, stateView());
@@ -909,9 +890,9 @@ const server = http.createServer(async (req, res) => {
       const u = new URL(req.url, 'http://x');
       const id = u.searchParams.get('id') || '';
       const rel = u.searchParams.get('rel') || '';
-      const base = resolve(IMPORT_ROOT, id);
+      const base = join(IMPORT_ROOT, id);
       const target = join(base, normalize(rel).replace(/^([/\\])+/, ''));
-      if (!id || !rel || !base.startsWith(IMPORT_ROOT + sep) || id !== basename(id) || !(target === base || target.startsWith(base + sep))) {
+      if (!id || !rel || !(target === base || target.startsWith(base + sep))) {
         return json(res, 400, { error: '路径非法' });
       }
       await mkdir(dirname(target), { recursive: true });

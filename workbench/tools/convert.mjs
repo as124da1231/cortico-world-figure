@@ -26,9 +26,9 @@
 import { inferRoles, ROLE_RULES } from './parameter-mapping.mjs';
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +55,7 @@ const OVERRIDES_PATH = arg('overrides');
  * 6 张就是 1.5 GB，还会拖慢首帧。2048² 仍有 8~10 倍过采样，肉眼无损。
  */
 const MAX_TEX = Math.max(0, Number(arg('max-texture', 2048)) || 0);
+/** 清理：打包时把水印 / 文字类部件和参数按作者给的“关掉”状态固定住。 */
 const CLEAN = flag('clean');
 /** 生成器配方版本：写进 build.json；工作台用它判断包是否过期 */
 const GENERATOR_VERSION = 'rt-2026-10-31.mapping.1';
@@ -65,15 +66,12 @@ const readJson = async (p) => JSON.parse((await readFile(p, 'utf8')).replace(/^\
 
 /** 读 PNG 头拿尺寸（只读 24 字节，不解码整图）。非 PNG 返回 null。 */
 const pngSize = (file) => {
-  let fd;
   try {
-    fd = openSync(file, 'r');
-    const head = Buffer.alloc(24);
-    if (readSync(fd, head, 0, 24, 0) !== 24 || head[0] !== 0x89 || head[1] !== 0x50) return null;
-    if (head.toString('ascii', 12, 16) !== 'IHDR') return null;
-    return { w: head.readUInt32BE(16), h: head.readUInt32BE(20) };
+    const fd = readFileSync(file, { flag: 'r' });
+    if (fd.length < 24 || fd[0] !== 0x89 || fd[1] !== 0x50) return null;
+    if (fd.toString('ascii', 12, 16) !== 'IHDR') return null;
+    return { w: fd.readUInt32BE(16), h: fd.readUInt32BE(20) };
   } catch { return null; }
-  finally { if (fd !== undefined) closeSync(fd); }
 };
 const fmtMB = (n) => `${(n / 1048576).toFixed(1)} MB`;
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
@@ -114,15 +112,12 @@ const OUT = resolve(arg('out', join(HERE, '..', 'build', id)));
 
 // ---------------------------------------------------------------- 模型资产
 const resolveAsset = (p) => {
-  if (typeof p !== 'string' || isAbsolute(p) || /[:\u0000-\u001f]/.test(p) || p.split(/[\\/]/).some(part => part === '..' || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) return null;
+  if (typeof p !== 'string' || isAbsolute(p) || p.split(/[\\/]/).includes('..')) return null;
   const direct = resolve(modelDir, p);
-  const safe = (file) => {
-    try {
-      const real = realpathSync(file), rel = relative(realpathSync(modelDir), real);
-      return rel && rel.split(sep)[0] !== '..' && !isAbsolute(rel) && statSync(real).isFile() ? real : null;
-    } catch { return null; }
-  };
-  return safe(direct) || safe(join(modelDir, basename(p)));
+  if (relative(modelDir, direct).startsWith('..')) return null;
+  if (existsSync(direct)) return direct;
+  const flat = join(modelDir, basename(p));
+  return existsSync(flat) ? flat : null;
 };
 
 const mocName = files.Moc ?? files.MocFile;
@@ -131,19 +126,16 @@ if (!mocPath) {
   console.error('没找到 moc3（model3.json 的 FileReferences.Moc）：', mocName);
   process.exit(1);
 }
-const mocBytes = await readFile(mocPath);
-if (mocBytes.length < 64 || mocBytes.toString('ascii', 0, 4) !== 'MOC3') throw new Error('模型的 moc3 文件无效或不完整，请重新获取完整素材');
 
 const physicsPath = files.Physics ? resolveAsset(files.Physics) : null;
 const posePath = files.Pose ? resolveAsset(files.Pose) : null;
-const textureRefs = Array.isArray(files.Textures) ? files.Textures : [];
-const textures = textureRefs.map((t) => resolveAsset(t));
-if (!textures.length || textures.some(p => !p)) throw new Error('模型缺少贴图文件，请导入包含全部配套资源的完整文件夹');
+const textures = (files.Textures ?? []).map((t) => resolveAsset(t)).filter(Boolean);
 
 const cdiPath = (() => {
   const declared = files.DisplayInfo ? resolveAsset(files.DisplayInfo) : null;
   if (declared) return declared;
-  return resolveAsset(basename(mocPath).replace(/\.moc3$/i, '.cdi3.json'));
+  const guess = join(modelDir, basename(mocPath).replace(/\.moc3$/i, '.cdi3.json'));
+  return existsSync(guess) ? guess : null;
 })();
 
 const display = cdiPath ? await readJson(cdiPath) : { Parameters: [], ParameterGroups: [] };
@@ -154,6 +146,7 @@ const paramMeta = new Map((display.Parameters ?? []).map((p) => [
   { label: p.Name ?? p.Id, group: groups.get(p.GroupId) ?? '' },
 ]));
 
+// ---------------------------------------------------------------- 清理（水印 / 文字类）
 const CLEAN_KEYS = ['水印', 'watermark', '版权', '须知', '说明', 'readme', '署名', '公告', 'logo'];
 const isCleanKey = (text) => {
   const t = String(text ?? '').toLowerCase();
@@ -166,7 +159,7 @@ if (CLEAN) {
   for (const p of display.Parts ?? []) {
     if (p?.Id && isCleanKey(p.Name)) cleanParts[p.Id] = 0;
   }
-  // 2) 表情 / 热键命中 → 读作者设好的参数值
+  // 2) 表情 / 热键命中 → 读作者设好的参数值（这就是“关掉水印”的状态）
   for (const e of await collectExpressions()) {
     if (!isCleanKey(e.name) && !isCleanKey(basename(e.path))) continue;
     const raw = await readJson(e.path).catch(() => null);
@@ -474,7 +467,7 @@ for (const r of resources) {
  * 混进 GENERATOR_VERSION 会让升级转换器把所有手工校准（role 归类 / 取景 / 绑词）一起作废；
  * 生成器版本由 signatureOf() 单独参与过期判断。 */
 const sha = (buf) => createHash('sha1').update(buf).digest('hex');
-const hashParts = [`model3:${sha(JSON.stringify(model3))}`, `moc3:${sha(mocBytes)}`];
+const hashParts = [`model3:${sha(JSON.stringify(model3))}`, `moc3:${sha(await readFile(mocPath))}`];
 if (physicsPath) hashParts.push(`physics:${sha(JSON.stringify(await readJson(physicsPath)))}`);
 if (vts) hashParts.push(`vts:${sha(JSON.stringify(vts.ParameterSettings ?? []))}`);
 if (cdiPath) hashParts.push(`cdi3:${sha(JSON.stringify(display))}`);
@@ -556,10 +549,10 @@ if (!SIMPLE) await mkdir(join(OUT, 'models', id, 'motions'), { recursive: true }
 await mkdir(join(OUT, 'models', id, 'textures'), { recursive: true });
 
 // 1) moc3 原始文件（供 Coopanion 0.2.14+ 原生 fetch） + base64 模块（旧版本回退）
-await writeFile(join(OUT, 'models', id, 'model.moc3'), mocBytes);
+await copyFile(mocPath, join(OUT, 'models', id, 'model.moc3'));
 await writeFile(
   join(OUT, 'models', id, 'moc3.js'),
-  `// ${basename(mocPath)}（base64：旧版本沙箱不能 fetch 二进制时的回退兜底）\nexport default "${mocBytes.toString('base64')}";\n`,
+  `// ${basename(mocPath)}（base64：旧版本沙箱不能 fetch 二进制时的回退兜底）\nexport default "${(await readFile(mocPath)).toString('base64')}";\n`,
   'utf8',
 );
 
@@ -663,7 +656,7 @@ ${overrides.anchors ? `  anchors: ${JSON.stringify(overrides.anchors)},` : ''}
   // 少了它，hiyori 这类模型会同时显示 PartArmA / PartArmB（四只手）。
   parts: { base: ${JSON.stringify(guessBaseParts(motions))} },
 ${Object.keys(cleanParts).length || Object.keys(cleanParams).length
-    ? `  clean: { parts: ${JSON.stringify(cleanParts)}, params: ${JSON.stringify(cleanParams)} },\n`
+    ? `  // 清理：水印 / 文字类部件与参数（打包时 --clean 写入，运行时每帧固定）\n  clean: { parts: ${JSON.stringify(cleanParts)}, params: ${JSON.stringify(cleanParams)} },\n`
     : ''}  roles: {
 ${Object.entries(roles).map(([n, r]) => `    ${n}: ${JSON.stringify(r)},`).join('\n')}
   },
@@ -856,7 +849,6 @@ await writeFile(join(OUT, 'build.json'), JSON.stringify({
   at: new Date().toISOString(),
   maxTexture: MAX_TEX,
   ...(textureShrink ? { textureShrink } : {}),
-  model: {id,title,params:params.length,roles:Object.keys(roles).length,expressions:Object.keys(expressions).length,textures:textureFiles.length},
   mappingDiagnostics,
   mappingWarnings,
   resourceRoles: Object.fromEntries(resources.filter((r) => r.custom).map((r) => [r.file, r.cls])),
