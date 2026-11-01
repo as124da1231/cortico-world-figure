@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import {
   cp, mkdir, readFile, readdir, rename, rm, writeFile,
 } from 'node:fs/promises';
-import { dirname, join, basename } from 'node:path';
+import { dirname, join, basename, relative, resolve, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   World, WorldHost, WorldWebUiDecl, ToolDef, WorldStreamSocket,
@@ -23,6 +23,7 @@ import { adaptationSummary, buildPack, dirSize, editPack, installPack, packDetai
 import { PackImporter, filesFromBundle, filesFromZip, thumbOf } from './import.ts';
 import { captureCover } from './cover.ts';
 import { readClipboardPaths } from './clipboard.ts';
+import { FigureAutomation, automationMode } from './automation.mjs';
 import {
   CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
   coreState, ensureCore,
@@ -46,6 +47,10 @@ export interface Live2dSection {
   /** 贴图最长边：2048 / 1024 / 512 / 4096，original = 原精度不缩放。 */
   texture?: string;
   clean?: boolean;
+  assistMotions?: boolean;
+  assistGear?: string;
+  assistAuto?: boolean;
+  modelRoots?: string;
 }
 
 type Phase = 'idle' | 'loading' | 'done' | 'error';
@@ -69,6 +74,9 @@ interface BuildState {
 interface BuildRecord extends BuildState {
   id: string;
 }
+
+interface AutomationModel { id: string; kind: 'pack' | 'live2d'; title: string; dir: string; file: string }
+interface NativeConfig { version: number; bindings: unknown[]; resources: unknown[] }
 
 interface Persisted {
   modelDir: string;
@@ -103,20 +111,30 @@ export class Live2dWorld implements World {
   private coreReady = false;
   /** 导入待装清单（zip / 文件夹）。 */
   private importer = new PackImporter();
+  private host: WorldHost | null = null;
+  private automation: FigureAutomation;
 
   constructor(opts: Live2dWorld['opts']) {
     this.opts = opts;
+    this.automation = new FigureAutomation({
+      getConfig: () => this.opts.getConfig(), getHost: () => this.host, dataDir: opts.dataDir,
+      recentRoots: () => { const dir = this.state.modelDir || this.opts.getConfig().modelDir; return dir ? [dir] : []; },
+      warn: (message: string) => this.say(message),
+      execute: (model: AutomationModel, native: NativeConfig, signal?: AbortSignal) => this.executeAutomation(model, native, signal),
+      evidence: (catalog: {model: AutomationModel}, native: unknown, samples: Array<{id:string;time:number}>, signal?: AbortSignal) => this.actionEvidence(catalog.model, native, samples, signal),
+    });
   }
 
   envPromptVars(): Record<string, string> | null {
-    return null;
+    return {};
   }
 
   tools(): ToolDef[] {
-    return [];
+    return this.automation.tools() as ToolDef[];
   }
 
   async start(_host: WorldHost): Promise<void> {
+    this.host = _host;
     this.stopping = false;
     const saved = await this.readState();
     if (saved) {
@@ -136,14 +154,18 @@ export class Live2dWorld implements World {
       if (dir) this.state.modelDir = dir;
     }
     this.coreReady = (await coreState(this.coreDir())).ok;
+    await this.automation.start();
+    await this.importer.pruneAutomationInputs(join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
     await this.activeAction?.catch(() => {});
+    await this.automation.stop();
     await this.saveQueue.catch(() => {});
     this.streams.clear();
     await this.importer.cancel();
+    this.host = null;
   }
 
   /** figures/ 里已装的 id → 版本，导入时标「已装」。 */
@@ -165,10 +187,6 @@ export class Live2dWorld implements World {
   webUi(language?: string): WorldWebUiDecl {
     const zh = (language ?? 'zh').toLowerCase().startsWith('zh');
     const s = this.state;
-    // Hosts with footer support mount this beside configuration; the version opens a manual fallback.
-    const noticePanel = {
-      id: 'config-notice', title: zh ? '须知' : 'Notice', slot: 'config-footer',
-    };
     return {
       label: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
       badges: [
@@ -196,7 +214,7 @@ export class Live2dWorld implements World {
         id: 'workbench',
         title: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
         description: zh ? '拖入、粘贴或选择文件夹 / ZIP，一键打包' : 'Drop, paste or choose a folder / ZIP, then pack',
-      }, noticePanel],
+      }],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
       stream: (panel, socket) => {
         if (panel !== 'workbench') return;
@@ -205,13 +223,21 @@ export class Live2dWorld implements World {
         for (const line of this.log.slice(-50)) socket.send?.(line);
       },
       config: [CONFIG_GROUP(zh)],
+      promptDocs: [{ key: 'worlds.figure.envPrompt', title: zh ? '模型自动化' : 'Figure automation', description: zh ? '模型识别、动作分析、确认安装与换装的工具流程' : 'Model discovery, action analysis, approved installation and wardrobe workflow', path: join(PACKAGE_DIR, 'src', 'ENV_PROMPT.md'), role: 'envPrompt' }],
     };
   }
 
   private async invoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    const readOnly = ['state', 'list', 'license', 'core', 'detail'].includes(method);
+    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState'].includes(method);
     if (this.stopping) throw new Error('扩展正在停止');
     if (readOnly) return this.dispatch(panel, method, args);
+    if (panel === 'workbench' && method === 'assistApprove') {
+      await this.automation.approve(String(args[0] || ''));
+      const result = await this.automation.install(String(args[0] || ''));
+      try { await this.host?.pushEvent?.({type:'figure.installed',source:this.id,origin:'external',ts:new Date().toISOString(),text:'A figure was installed after the person approved the panel proposal. '+JSON.stringify(result)},{trigger:'debounce'}); }
+      catch (error) { this.say(`! 安装已完成，Coo 通知未送达：${errText(error)}`); }
+      return result;
+    }
     if (this.busy) throw new Error('上一个动作还没结束');
     this.busy = true;
     const action = this.dispatch(panel, method, args);
@@ -221,12 +247,25 @@ export class Live2dWorld implements World {
   }
 
   private async dispatch(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    if (panel === 'config-notice' && method === 'state') return { notice: this.noticePayload() };
     if (panel !== 'workbench') throw new Error(`未知面板：${panel}`);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();
 
     if (method === 'state') {
       return { ...this.snapshot(), log: this.log.slice(-20) };
+    }
+    if (method === 'settings') {
+      const cfg = this.opts.getConfig();
+      return { cover: cfg.cover !== false, texture: cfg.texture || 'original', clean: Boolean(cfg.clean),
+        autoDelete: Boolean(cfg.autoDelete), figuresDir: cfg.figuresDir || '',
+        assistMotions: cfg.assistMotions === true, assistGear: automationMode(cfg).gear, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
+    }
+    if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending() };
+    if (method === 'assistReject') return this.automation.reject(String(args[0] || ''));
+    if (method === 'assistAnalyze') {
+      const token = String(args[0] || '');
+      const dirs = (value: unknown) => Array.isArray(value) ? value.filter((v):v is string => typeof v === 'string').slice(0,20).map(dir=>({dir})) : [];
+      this.automation.check();
+      return this.queueAnalysis({token,models:dirs(args[1]),packs:dirs(args[2])},true);
     }
 
     if (method === 'noticeAccept') {
@@ -288,6 +327,7 @@ export class Live2dWorld implements World {
       const paths = Array.isArray(args[0]) ? args[0].filter((v): v is string => typeof v === 'string') : [];
       const result = await this.importer.stageLocal(paths, await this.installedVersions());
       if ('error' in result) throw new Error(result.error);
+      await this.notifyImported(result);
       return result;
     }
     if (method === 'importKeep') {
@@ -338,6 +378,7 @@ export class Live2dWorld implements World {
       const r = await this.importer.stage(files, kind === 'folder', installed);
       if ('error' in r) throw new Error(r.error);
       this.say(`读到 ${r.packs.length} 个模型包`);
+      await this.notifyImported(r);
       return r;
     }
     if (method === 'importInstall') {
@@ -414,6 +455,7 @@ export class Live2dWorld implements World {
       const r = await this.importer.finishUpload(token, fromFolders, installed);
       if ('error' in r) throw new Error(r.error);
       this.say(`读到 ${r.models.length + r.packs.length} 个模型 / 模型包`);
+      await this.notifyImported(r);
       return r;
     }
     if (method === 'detail') {
@@ -468,7 +510,8 @@ export class Live2dWorld implements World {
     }
   }
 
-  private async doBuild(dir: string, opts: { remember?: boolean } = {}): Promise<unknown> {
+  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; modelFile?: string; signal?: AbortSignal } = {}): Promise<unknown> {
+    opts.signal?.throwIfAborted();
     this.guard(dir);
     this.requireNotice();
     // Core 不随包分发：没下载/没校验过就不打包，别产出跑不起来的形象包
@@ -476,6 +519,8 @@ export class Live2dWorld implements World {
     if (!core.ok) throw new Error('缺少 Live2D 核心组件：先在面板上方同意许可并获取');
     const logs: string[] = [];
     const push = (line: string) => { logs.push(line); this.say(line); };
+    const temporary = new Set<string>();
+    let committed = false;
     try {
       this.steps.build = { phase: 'loading', hint: '打包中…' };
       this.steps.install = { ...IDLE, hint: '打包后需要安装' };
@@ -484,14 +529,16 @@ export class Live2dWorld implements World {
       let t0 = Date.now();
       const maxTexture = textureLimit(this.opts.getConfig().texture);
       const clean = this.opts.getConfig().clean === true;
-      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { maxTexture, clean, corePath: core.file });
+      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+      temporary.add(packDir);
       push(`初版包就绪 · ${Date.now() - t0} ms`);
 
       this.steps.build = { phase: 'loading', hint: '量尺寸 / 拍封面…' };
       t0 = Date.now();
       const shot = this.opts.getConfig().cover === false
         ? { ok: false, error: '设置里关闭了封面', fit: null as unknown }
-        : await captureCover(packDir, WORKBENCH_DIR);
+        : await captureCover(packDir, WORKBENCH_DIR, 60000, [], opts.signal);
+      opts.signal?.throwIfAborted();
       if (shot.ok) push(`封面 + 尺寸 · ${Date.now() - t0} ms`);
       else push(`! 封面跳过：${shot.error ?? '未知原因'}`);
 
@@ -499,7 +546,8 @@ export class Live2dWorld implements World {
       let finalDir = packDir;
       if (shot.fit) {
         t0 = Date.now();
-        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit, maxTexture, clean, corePath: core.file });
+        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { fit: shot.fit, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+        temporary.add(rebuilt);
         // 封面跟着走
         const thumb = join(packDir, 'thumb');
         if (existsSync(thumb)) {
@@ -517,6 +565,7 @@ export class Live2dWorld implements World {
         push(`按量出的取景重建 · ${Date.now() - t0} ms`);
       }
 
+      opts.signal?.throwIfAborted();
       const bytes = await dirSize(finalDir);
       const manifest = JSON.parse(await readFile(join(finalDir, 'figure.json'), 'utf8'));
       const words = Array.isArray(manifest.vocab) ? manifest.vocab.length : 0;
@@ -545,9 +594,9 @@ export class Live2dWorld implements World {
       catch (error) {
         this.state.modelDir = previous.modelDir; this.state.builds = previous.builds; this.state.build = previous.build;
         this.state.scan = previous.scan; this.steps.scan = previous.scanStep;
-        await rm(finalDir, {recursive:true,force:true}).catch(()=>{});
         throw error;
       }
+      committed = true;
       push(`打包完成 · ${hint}`);
       const adaptation = report ? adaptationSummary(report) : undefined;
       return { state: this.snapshot(), log: logs, adaptation, warn: shot.ok ? undefined : `封面跳过：${shot.error ?? ''}` };
@@ -555,10 +604,16 @@ export class Live2dWorld implements World {
       this.steps.build = { phase: 'error', hint: errText(e) };
       push(`打包失败 · ${errText(e)}`);
       throw e;
+    } finally {
+      if (!committed) for (const target of temporary) {
+        const rel = relative(resolve(this.workRoot(), 'builds'), resolve(target));
+        if (rel && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel)) await rm(target, {recursive:true,force:true}).catch(()=>{});
+      }
     }
   }
 
-  private async doInstall(dir: string, buildId?: string): Promise<unknown> {
+  private async doInstall(dir: string, buildId?: string, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted();
     this.requireNotice();
     const chosen = buildId
       ? (this.state.builds ?? []).find((b) => b.id === buildId)
@@ -570,6 +625,7 @@ export class Live2dWorld implements World {
       const target = await installPack(chosen.packDir, figures, {
         backupRoot: join(dirname(figures), 'figure-backups'),
         keep: 2,
+        signal,
       });
       this.steps.install = { phase: 'done', hint: target, at: Date.now() };
       this.state.install = { target, at: Date.now(), buildId };
@@ -591,6 +647,66 @@ export class Live2dWorld implements World {
       this.say(`安装失败 · ${errText(e)}`);
       throw e;
     }
+  }
+
+  private async notifyImported(result: any): Promise<void> {
+    try { const notified = await this.queueAnalysis(result); if(notified?.queued&&'count' in notified)this.say(`已交给 Coo 分析 · ${notified.count} 个模型`); }
+    catch (error) { this.say(`! 导入成功，AI 分析通知未送达：${errText(error)}`); }
+  }
+
+  private async queueAnalysis(result: {token:string;models?:Array<{dir:string}>;packs?:Array<{dir:string}>},repeat=false) {
+    if(this.opts.getConfig().assistMotions!==true||!result.token)return {queued:false};
+    const paths=await this.importer.preserveForAutomation(result.token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
+    return this.automation.imported(result,(_token:string,dir:string)=>paths.get(dir),repeat);
+  }
+
+  private async exclusive<T>(action: () => Promise<T>): Promise<T> {
+    if (this.stopping || this.busy) throw new Error('上一个动作还没结束，请稍后重试');
+    this.busy = true;
+    const pending = action(); this.activeAction = pending;
+    try { return await pending; }
+    finally { this.busy = false; this.activeAction = null; }
+  }
+
+  private actionEvidence(model: AutomationModel, native: unknown, samples: Array<{id:string;time:number}>, signal?: AbortSignal) {
+    return this.exclusive(async () => {
+      signal?.throwIfAborted();
+      const core = await coreState(this.coreDir());
+      if (!core.ok) throw new Error('尚未获取 Live2D Core，使用文本分析');
+      const scratch = join(this.workRoot(), `analysis-${randomUUID()}`);
+      try {
+        this.say('生成动作关键帧…');
+        const pack = await buildPack(WORKBENCH_DIR, model.dir, scratch, {native,modelFile:model.file,maxTexture:1024,corePath:core.file,signal});
+        const result = await captureCover(pack, WORKBENCH_DIR, 45000, samples, signal);
+        signal?.throwIfAborted();
+        if (!result.ok) throw new Error(result.error || '关键帧渲染失败');
+        return result.evidence || [];
+      } finally { await rm(scratch,{recursive:true,force:true}).catch(()=>{}); }
+    });
+  }
+
+  private executeAutomation(model: AutomationModel, native: NativeConfig, signal?: AbortSignal) {
+    return this.exclusive(async () => {
+      this.requireNotice(); signal?.throwIfAborted();
+      if (this.opts.getConfig().assistMotions !== true) throw new Error('AI 自动适配已关闭');
+      if (model.kind === 'pack') {
+        const target = await installPack(model.dir, await resolveFigures(this.opts.getConfig(),this.opts.dataDir), {backupRoot:join(this.opts.dataDir,'figure-backups'),keep:2,signal});
+        const manifest = JSON.parse(await readFile(join(target,'figure.json'),'utf8'));
+        this.state.install = {target,at:Date.now()};
+        let warning;
+        try { await this.save(); } catch (error) { warning = `形象已安装，但安装记录保存失败：${errText(error)}`; this.say(`! ${warning}`); }
+        return {figureId:manifest.id,target,installed:true,mappings:[],warning};
+      }
+      await this.doBuild(model.dir, {native,modelFile:model.file,remember:false,signal});
+      signal?.throwIfAborted();
+      if (this.opts.getConfig().assistMotions !== true) throw new Error('AI 自动适配已关闭，打包产物保留，尚未安装');
+      const record = this.state.builds?.[0];
+      if (!record) throw new Error('打包未产出可安装模型');
+      const manifest = JSON.parse(await readFile(join(record.packDir,'figure.json'),'utf8'));
+      signal?.throwIfAborted();
+      await this.doInstall(model.dir,record.id,signal);
+      return {figureId:manifest.id,target:this.state.install?.target,installed:true,mappings:native.bindings};
+    });
   }
 
   /** 打包历史，最新在前。卡片封面用 128 小图，转 data URL 给面板。 */
@@ -662,6 +778,7 @@ export class Live2dWorld implements World {
       builds: (s.builds ?? []).map((b) => ({ id: b.id, bytes: b.bytes, at: b.at })),
       autoDelete: Boolean(this.opts.getConfig().autoDelete),
       coreReady: this.coreReady,
+      automation: { ...automationMode(this.opts.getConfig()), plans: this.automation.pending() },
       version: VERSION,
       notice: this.noticePayload(),
       busy: this.busy,
@@ -833,6 +950,10 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           'x-hot': true,
           'x-path': { kind: 'directory' },
         },
+        'worlds.figure.assistMotions': {type:'boolean',title:zh?'AI 自动适配':'AI action mapping',description:zh?'让 Coo 分析原生动作、生成方案并协助安装':'Let Coo inspect native actions, prepare a proposal and install it','x-hot':true},
+        'worlds.figure.assistGear': {type:'string',enum:['auto','text','image'],title:zh?'分析方式':'Analysis mode','x-hot':true},
+        'worlds.figure.assistAuto': {type:'boolean',title:zh?'全自动执行':'Automatic execution',description:zh?'高置信度方案直接安装；不确定动作保留通用表现':'Install confident mappings directly; keep generic behavior for uncertain actions','x-hot':true},
+        'worlds.figure.modelRoots': {type:'string',title:zh?'模型搜索目录':'Model search folders',description:zh?'每行一个目录，仅在这些目录和最近使用的模型目录内按名字查找':'One folder per line; name searches stay within these and recent model folders','x-hot':true},
       },
     },
   };

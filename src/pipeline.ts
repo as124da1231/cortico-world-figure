@@ -61,7 +61,8 @@ export interface RunResult {
 }
 
 /** 跑一次 node 脚本，收集输出。 */
-export function runNode(args: string[], cwd: string): Promise<RunResult> {
+export function runNode(args: string[], cwd: string, signal?: AbortSignal): Promise<RunResult> {
+  signal?.throwIfAborted();
   return new Promise((resolve) => {
     const child = spawn(process.execPath, args, {
       cwd,
@@ -70,10 +71,12 @@ export function runNode(args: string[], cwd: string): Promise<RunResult> {
     });
     let out = '';
     let err = '';
+    const abort = () => { child.kill(); };
+    signal?.addEventListener('abort', abort, {once:true});
     child.stdout?.on('data', (b: Buffer) => { out += b.toString(); });
     child.stderr?.on('data', (b: Buffer) => { err += b.toString(); });
     child.once('error', (e) => resolve({ code: -1, out, err: String(e?.message ?? e) }));
-    child.once('close', (code) => resolve({ code: code ?? -1, out, err }));
+    child.once('close', (code) => { signal?.removeEventListener('abort',abort); resolve({ code: code ?? -1, out, err }); });
   });
 }
 
@@ -131,7 +134,7 @@ export async function buildPack(
   workbenchDir: string,
   modelDir: string,
   workDir: string,
-  opts: { fit?: unknown; maxTexture?: number; clean?: boolean; corePath?: string } = {},
+  opts: { fit?: unknown; native?: unknown; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; signal?: AbortSignal } = {},
 ): Promise<string> {
   const builds = join(workDir, 'builds');
   await mkdir(builds, { recursive: true });
@@ -144,15 +147,17 @@ export async function buildPack(
     '--max-texture', String(Math.max(0, Math.trunc(opts.maxTexture ?? 2048))),
   ];
   if (opts.corePath) args.push('--core', opts.corePath);
+  if (opts.modelFile) args.push('--model-file', opts.modelFile);
   if (opts.clean) args.push('--clean');
   let overrideFile = '';
-  if (opts.fit) {
-    overrideFile = join(workDir, `overrides-${Date.now()}.json`);
-    await writeFile(overrideFile, JSON.stringify({ fit: opts.fit }, null, 2), 'utf8');
+  if (opts.fit || opts.native) {
+    overrideFile = join(workDir, `overrides-${randomUUID()}.json`);
+    await writeFile(overrideFile, JSON.stringify({ ...(opts.fit ? {fit:opts.fit} : {}), ...(opts.native ? {native:opts.native} : {}) }, null, 2), 'utf8');
     args.push('--overrides', overrideFile);
   }
   try {
-    const r = await runNode(args, workbenchDir);
+    const r = await runNode(args, workbenchDir, opts.signal);
+    opts.signal?.throwIfAborted();
     if (r.code !== 0) throw new Error((r.err || r.out || '构建失败').trim().slice(0, 400));
     if (!existsSync(join(out, 'figure.json'))) throw new Error('构建没有产出 figure.json');
   } catch (e) {
@@ -168,8 +173,9 @@ export async function buildPack(
 export async function installPack(
   packDir: string,
   figuresDir: string,
-  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void } = {},
+  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal } = {},
 ): Promise<string> {
+  opts.signal?.throwIfAborted();
   await assertRegularTree(packDir);
   const manifest = JSON.parse(await readFile(join(packDir, 'figure.json'), 'utf8'));
   const id = packId(manifest.id);
@@ -190,6 +196,7 @@ export async function installPack(
     await cp(source, pending, { recursive: true, dereference: false });
     const copied = JSON.parse(await readFile(join(pending, 'figure.json'), 'utf8'));
     if (copied.id !== id) throw new Error('复制后的形象包校验失败');
+    opts.signal?.throwIfAborted();
     if (existsSync(target)) {
       if ((await lstat(target)).isSymbolicLink()) throw new Error('安装目标不能是符号链接');
       if (opts.backupRoot) {
@@ -198,6 +205,7 @@ export async function installPack(
         await mkdir(opts.backupRoot, { recursive: true });
         await cp(target, backup, { recursive: true });
       }
+      opts.signal?.throwIfAborted();
       await rename(target, previous);
       moved = true;
     }

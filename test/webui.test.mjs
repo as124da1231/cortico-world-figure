@@ -8,12 +8,14 @@ async function mount(t, opts = {}) {
   const dom = new JSDOM('<main></main>', { url: 'http://localhost/' });
   globalThis.window = dom.window; globalThis.document = dom.window.document;
   const calls = []; const toasts = []; const drawers = [];
+  const configCalls = [];
   let ack = opts.ack ?? false;
   const root = document.querySelector('main');
   const ctx = {
     root, language: opts.language ?? 'zh',
     pickPath: opts.pickPath,
     interval: opts.interval,
+    async setConfig(group, values) { configCalls.push({group, values}); if (opts.setConfig) return opts.setConfig(group, values); return 'saved'; },
     ui: {
       sheet: ({ title, desc }) => {
         const el = document.createElement('section');
@@ -21,7 +23,8 @@ async function mount(t, opts = {}) {
         const body = document.createElement('div'); el.append(head, body); return { el, body };
       },
       log: () => ({ el: document.createElement('div'), append() {}, clear() {} }),
-      toast: (...args) => toasts.push(args), confirm: async () => true, drawer: (...args) => drawers.push(args),
+      toast: (...args) => toasts.push(args), confirm: async () => true,
+      drawer: (...args) => { drawers.push(args); const body = args[1]; if (typeof body !== 'string') root.append(body); return {dispose(){body?.remove?.();}}; },
     },
     async invoke(method, args) {
       calls.push({ method, args });
@@ -33,8 +36,9 @@ async function mount(t, opts = {}) {
       if (method === 'state') return { notice, version: opts.version ?? '1.4.2' };
       if (method === 'core') return { ok: opts.core ?? true, version: 'Cubism 5.3' };
       if (method === 'noticeAccept') { ack = true; return { acknowledged: true, revision: 1 }; }
-      if (method === 'list') return { dir: '', figuresDir: 'E:/test/figures', builds: opts.builds ?? [], installed: null };
+      if (method === 'list') return { dir: '', figuresDir: 'E:/test/figures', builds: opts.builds ?? [], installed: null, automation: opts.automation ?? {enabled:false,plans:[]} };
       if (method === 'detail') return { nameZh: '名字', aboutZh: '简介' };
+      if (method === 'settings') return { cover: true, clean: true, texture: 'original', autoDelete: false, figuresDir: '' };
       return { builds: opts.builds ?? [] };
     },
   };
@@ -42,7 +46,7 @@ async function mount(t, opts = {}) {
   t.after(() => { handle.dispose(); dom.window.close(); });
   await tick();
   const button = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent === label);
-  return { ctx, root, calls, toasts, drawers, button, handle, dom };
+  return { ctx, root, calls, configCalls, toasts, drawers, button, handle, dom };
 }
 
 test('consent persists while the version offers a quiet manual notice fallback on standard hosts', async (t) => {
@@ -67,7 +71,7 @@ test('consent persists while the version offers a quiet manual notice fallback o
   assert.equal(root.querySelector('.l2d-notice'), null);
   badge.click(); assert.equal(root.querySelector('.l2d-notice'), null);
   assert.equal(drawers.length, 1);
-  assert.match(drawers[0][1], /Live2D Cubism Core/);
+  assert.match(drawers[0][1].textContent, /Live2D Cubism Core/);
   assert.equal(calls.filter((c) => c.method === 'noticeAccept').length, 1);
 });
 
@@ -90,41 +94,73 @@ test('acknowledged users can still fetch a missing Core without redisplaying the
   assert.equal(button('同意并获取').hidden, false);
 });
 
-test('acknowledged notice is a collapsed two-character entry in the config footer, without a version', async (t) => {
-  const dom = new JSDOM('<footer></footer>');
-  const root = dom.window.document.querySelector('footer');
-  const handle = panel.panels['config-notice'].mount({
-    root, language: 'zh', ui: { toast() { throw new Error('unexpected toast'); } },
-    invoke: async () => ({ notice: { acknowledged: true, revision: 1 } }),
-  });
-  t.after(() => { handle.dispose(); dom.window.close(); });
-  await tick();
-  const details = root.querySelector('details');
-  assert.equal(details.hidden, false);
-  assert.equal(details.open, false);
-  assert.equal(details.querySelector('summary').textContent, '须知');
-  assert.equal(root.querySelector('.l2d-version-corner'), null);
-  details.open = true;
-  assert.match(details.querySelector('p').textContent, /Live2D Cubism Core/);
-  handle.dispose();
-  assert.equal(root.childElementCount, 0);
+test('notice lives in the workbench footer and opens only on demand after agreement', async t => {
+  const {root, drawers, handle} = await mount(t, {ack:true});
+  assert.equal(panel.panels['config-notice'], undefined);
+  const entry=root.querySelector('.l2d-foot .l2d-notice-entry');
+  assert.equal(entry.textContent,'须知'); assert.equal(entry.hidden,false);
+  assert.equal(drawers.length,0); entry.click();
+  assert.equal(drawers.length,1); assert.match(drawers[0][1].textContent,/Live2D Cubism Core/);
+  handle.dispose(); assert.equal(root.childElementCount,0);
 });
 
-test('unacknowledged config footer stays hidden and pending loads cannot restore disposed content', async () => {
-  const dom = new JSDOM('<footer></footer>');
-  const root = dom.window.document.querySelector('footer');
-  const ctx = { root, language: 'zh', ui: { toast() {} }, invoke: async () => ({ notice: { acknowledged: false } }) };
-  const first = panel.panels['config-notice'].mount(ctx);
-  await tick();
-  assert.equal(root.querySelector('details').hidden, true);
-  first.dispose();
-  let resolve;
-  const second = panel.panels['config-notice'].mount({ ...ctx, invoke: () => new Promise((r) => { resolve = r; }) });
-  second.dispose();
-  resolve({ notice: { acknowledged: true } });
-  await tick();
-  assert.equal(root.childElementCount, 0);
-  dom.window.close();
+test('settings save only changed fields through the host configuration contract', async t => {
+  const {root,button,configCalls} = await mount(t,{ack:true});
+  button('打包设置').click(); await tick();
+  const clean=root.querySelector('input[aria-label="清理"]');
+  assert.equal(clean.closest('label').textContent,'清理');
+  const auto=root.querySelector('input[aria-label="安装后删除打包产物"]');
+  auto.click(); button('保存设置').click(); await tick();
+  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.autoDelete':true}}]);
+  assert.equal(root.querySelector('.l2d-settings'),null);
+});
+
+test('failed settings writes keep the form editable for retry', async t => {
+  const {root,button,toasts} = await mount(t,{ack:true,setConfig:async()=>{throw Error('write failed');}});
+  button('打包设置').click(); await tick();
+  root.querySelector('input[aria-label="安装后删除打包产物"]').click();
+  button('保存设置').click(); await tick();
+  assert.ok(root.querySelector('.l2d-settings'));
+  assert.equal(button('保存设置').disabled,false);
+  assert.ok(toasts.some(([s])=>s==='write failed'));
+});
+
+test('AI analysis settings use the existing settings dialog and save only explicit choices', async t => {
+  const {root,button,configCalls,dom}=await mount(t,{ack:true});
+  button('打包设置').click();await tick();
+  root.querySelector('input[aria-label="交给 Coo 适配"]').click();
+  const gear=root.querySelector('select[aria-label="分析方式"]');
+  assert.deepEqual([...gear.options].map(o=>o.value),['auto','text','image']);
+  gear.value='image';gear.dispatchEvent(new dom.window.Event('change'));
+  button('保存设置').click();await tick();
+  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.assistMotions':true,'worlds.figure.assistGear':'image'}}]);
+});
+
+test('AI-enabled imports are submitted for analysis rather than silently dropping native actions',async t=>{
+  const {root,dom,button,calls}=await mount(t,{ack:true,automation:{enabled:true,plans:[]},invoke:method=>method==='importPaths'?{token:'ai-source',models:[{dir:'role',title:'角色'}],packs:[]}:undefined});
+  paste(dom,root.querySelector('.l2d-drop-zone'),'G:/models/role');await tick();
+  button('AI 适配').click();await tick();
+  assert.deepEqual(calls.find(c=>c.method==='assistAnalyze').args,['ai-source',['role'],[]]);
+  assert(!calls.some(c=>c.method==='importBuild'));
+});
+
+test('a pending AI proposal shows its mapping and approval acts only on that proposal',async t=>{
+  const {root,button,calls}=await mount(t,{ack:true,automation:{enabled:true,plans:[{id:'pending',status:'pending',question:'方案确认',summary:[{source:'脸红',word:'shy',reason:'表情对应'}]}]}});
+  assert.match(root.querySelector('.l2d-assist-dock').textContent,/脸红 → shy/);
+  button('同意安装').click();await tick();
+  assert.deepEqual(calls.find(c=>c.method==='assistApprove').args,['pending']);
+});
+
+test('search and sorting preserve the underlying pack list and editing stays in the workspace', async t => {
+  const {root,dom,button,calls}=await mount(t,{ack:true,builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1},{id:'b',nameZh:'Beta',at:2,bytes:1}]});
+  assert.equal(root.querySelector('.l2d-card').dataset.id,'b');
+  const search=root.querySelector('.l2d-search');search.value='Alpha'; search.dispatchEvent(new dom.window.Event('input'));
+  assert.equal(root.querySelectorAll('.l2d-card').length,1);
+  button('编辑').click();await tick();
+  assert.equal(calls.find(c=>c.method==='detail').args[0],'a');
+  assert.ok(root.querySelector('.l2d-workspace > .l2d-modal'));
+  button('取消').click();search.value='';search.dispatchEvent(new dom.window.Event('input'));
+  assert.equal(root.querySelectorAll('.l2d-card').length,2);
 });
 
 test('pack cards explain adaptation without reusing the previous source report', async (t) => {
@@ -183,7 +219,7 @@ test('edit validates name, locks close while saving, clears about, and disposes 
   finish({}); await tick();
   assert.equal(document.querySelector('.l2d-modal'), null);
   assert.equal(calls.find((c) => c.method === 'edit').args[1].aboutZh, '');
-  button('编辑').click(); await tick(); assert.ok(document.querySelector('[aria-modal="true"]'));
+  button('编辑').click(); await tick(); assert.ok(document.querySelector('[aria-modal="false"]'));
   document.querySelector('.l2d-modal').dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   assert.equal(document.querySelector('.l2d-modal'), null);
   button('编辑').click(); await tick(); handle.dispose();

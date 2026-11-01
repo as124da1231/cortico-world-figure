@@ -57,7 +57,7 @@ const OVERRIDES_PATH = arg('overrides');
 const MAX_TEX = Math.max(0, Number(arg('max-texture', 2048)) || 0);
 const CLEAN = flag('clean');
 /** 生成器配方版本：写进 build.json；工作台用它判断包是否过期 */
-const GENERATOR_VERSION = 'rt-2026-10-31.mapping.1';
+const GENERATOR_VERSION = 'rt-2026-11-01.native.1';
 /** 简易模式：只做 role + 通用配方，不产出/不引用任何原生 exp3 / motion / pose 绑定。 */
 const SIMPLE = true;
 
@@ -92,7 +92,9 @@ async function findModel3(dir) {
   return null;
 }
 
-const model3Path = await findModel3(MODEL_DIR);
+const explicitModel = arg('model-file');
+if (explicitModel && (basename(explicitModel) !== explicitModel || !explicitModel.toLowerCase().endsWith('.model3.json'))) throw new Error('模型入口必须是所选目录内的 .model3.json 文件');
+const model3Path = explicitModel ? join(MODEL_DIR, explicitModel) : await findModel3(MODEL_DIR);
 if (!model3Path) {
   console.error('没找到 *.model3.json：', MODEL_DIR);
   process.exit(1);
@@ -675,6 +677,7 @@ ${!SIMPLE && Object.keys(nativeMap).length
     : ''}  // 表演层（SoulLink）：情绪词 → 连续参数。不写就用通用默认；
   // 换模型先调这里（强度/过渡），不要改 backends/ 里的渲染代码。
   performance: ${JSON.stringify(performance, null, 2)},
+${overrides.native?.version === 1 ? `  native: ${JSON.stringify(overrides.native)},` : ''}
 };
 `;
 await writeFile(join(OUT, 'models', id, 'profile.js'), profileJs, 'utf8');
@@ -717,7 +720,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js']) {
+for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/native-actions.js']) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);
@@ -848,6 +851,14 @@ const figureJson = {
   sounds: {},
   can: { walk: motion.kind === 'roam' },
 };
+for (const b of overrides.native?.bindings ?? []) {
+  if (b.word === 'idle' || figureJson.vocab.some(v => v.id === b.word)) continue;
+  const resource = overrides.native.resources?.find(r => r.id === b.resource);
+  if (!resource) continue;
+  const names = {nod:['点头','Nod'],shake:['摇头','Shake'],wave:['招手','Wave'],bow:['鞠躬','Bow'],cheer:['欢呼','Cheer'],dance:['跳舞','Dance'],jump:['跳跃','Jump'],sit:['坐下','Sit'],stretch:['伸展','Stretch'],shiver:['发抖','Shiver']};
+  const labels = names[b.word] ?? [b.word,b.word];
+  figureJson.vocab.push({id:b.word,kind:resource.kind === 'expression' ? 'expression' : 'motion',names:{zh:[labels[0]],en:[labels[1]]},about:{zh:`自动适配的${labels[0]}`,en:`Mapped native ${labels[1]}`},seconds:Math.max(.1,resource.seconds || 1)});
+}
 await writeFile(join(OUT, 'figure.json'), JSON.stringify(figureJson, null, 2) + '\n', 'utf8');
 await writeFile(join(OUT, 'build.json'), JSON.stringify({
   tool: 'cortico-live2d-pack',

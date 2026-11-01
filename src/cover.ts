@@ -54,7 +54,13 @@ try {
   await new Promise((r) => setTimeout(r, 400));
   const r = globalThis.__l2dCover?.();
   if (!r || !r.png) throw new Error('cover api unavailable');
-  await post({ png: r.png, png128: r.png128, fit });
+  const evidence = [];
+  for (const sample of __NATIVE_SAMPLES__) {
+    const png = globalThis.__l2dNativeSample?.(sample.id, sample.time);
+    if (!png) throw new Error('native sample api unavailable');
+    evidence.push({ ...sample, png });
+  }
+  await post({ png: r.png, png128: r.png128, fit, evidence });
   document.title = 'done';
 } catch (e) {
   await post({ error: String((e && e.message) || e) }).catch(() => {});
@@ -67,6 +73,7 @@ export interface CoverResult {
   error?: string;
   bytes?: number;
   fit?: { zoom?: number; offset?: [number, number]; autoFit?: boolean } | null;
+  evidence?: Array<{id:string;time:number;png:string}>;
 }
 
 /** 系统里找一个 Chromium 内核的浏览器。 */
@@ -97,7 +104,11 @@ export async function captureCover(
   packDir: string,
   workbenchDir: string,
   timeoutMs = 60000,
+  samples: Array<{id:string;time:number}> = [],
+  signal?: AbortSignal,
 ): Promise<CoverResult> {
+  signal?.throwIfAborted();
+  if (samples.length > 6) throw new Error('动作采样最多 6 帧');
   const browser = findBrowser();
   if (!browser) return { ok: false, error: '没找到 Chrome / Edge，跳过封面' };
 
@@ -134,14 +145,20 @@ export async function captureCover(
           manifest.axes[0].options[0].thumb = 'thumb/opt-model.png';
         }
         await writeFile(file, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-        resolveResult({ ok: true, bytes: main.length, fit });
+        const evidence = samples.length ? body.evidence : [];
+        if (!Array.isArray(evidence) || evidence.length !== samples.length) throw new Error('动作采样不完整');
+        for (const [i, item] of evidence.entries()) {
+          if (item.id !== samples[i].id || item.time !== samples[i].time) throw new Error('动作采样标识不一致');
+          pngOf(item.png);
+        }
+        resolveResult({ ok: true, bytes: main.length, fit, evidence });
       } catch (e) {
         resolveResult({ ok: false, error: String((e as Error)?.message ?? e) });
       }
       return;
     }
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(COVER_PAGE);
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(COVER_PAGE.replace('__NATIVE_SAMPLES__', JSON.stringify(samples)));
       return;
     }
     const isKit = url.pathname.startsWith('/kit/');
@@ -167,6 +184,8 @@ export async function captureCover(
   let profile = '';
   let child: ReturnType<typeof spawn> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const abort = () => { child?.kill(); resolveResult({ok:false,error:'任务已停止'}); };
+  signal?.addEventListener('abort',abort,{once:true});
   try {
     profile = await mkdtemp(join(tmpdir(), 'l2d-cover-'));
     child = spawn(browser, [
@@ -190,6 +209,7 @@ export async function captureCover(
   } catch (e) {
     return { ok: false, error: `启动浏览器失败：${(e as Error).message}` };
   } finally {
+    signal?.removeEventListener('abort',abort);
     clearTimeout(timer);
     try { child?.kill(); } catch { /* already exited */ }
     server.closeAllConnections();

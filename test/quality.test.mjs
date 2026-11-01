@@ -25,6 +25,20 @@ async function pack(root, id = 'sample') {
 }
 const file = (path, data) => ({ path, bytes: bytes(data) });
 
+test('workbench settings expose only declared editable values and the notice has no separate tab', async t => {
+  const root = await fixture(t);
+  const cfg = { enabled: true, modelDir: 'private-source', workDir: root, cover: false, autoDelete: true };
+  const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({});
+  t.after(() => world.stop());
+  const page = world.webUi('zh');
+  assert.deepEqual(page.panels.map(p => p.id), ['workbench']);
+  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',clean:false,autoDelete:true,figuresDir:'',assistMotions:false,assistGear:'auto',assistAuto:false,modelRoots:'' });
+  cfg.clean=true; cfg.texture='1024';
+  const next=await page.invoke('workbench', 'settings', []);
+  assert.equal(next.clean,true); assert.equal(next.texture,'1024');
+  assert.equal('modelDir' in next,false); assert.equal('workDir' in next,false);
+});
+
 test('zip/bundle parsing rejects malformed data and traversal without touching neighboring files', async (t) => {
   const root = await fixture(t);
   const marker = join(root, 'keep.txt'); await writeFile(marker, 'safe');

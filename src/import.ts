@@ -8,9 +8,9 @@ import { installPack } from './pipeline.ts';
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { unzipSync } from 'fflate';
 
 /** 一次 zip 导入最多这么多（未解压）。 */
@@ -168,6 +168,41 @@ export async function thumbOf(dir: string, file: unknown): Promise<string | null
 export class PackImporter {
   private staged: { token: string; root: string; packs: Set<string>; models:Set<string>;local?:Map<string,string> } | null = null;
   private uploads = new Map<string, { root: string; bytes: number; paths: Set<string>; chunks: Map<string,{written:number;total:number}> }>();
+
+  /** AI jobs outlive the panel's import token. Keep only owned upload data in a separate cache. */
+  async preserveForAutomation(token: string, cacheRoot: string, activePaths:string[]=[]): Promise<Map<string,string>> {
+    const staged = this.staged;
+    if (!staged || staged.token !== token) throw new Error('这次导入已经过期，重新选一次');
+    await this.pruneAutomationInputs(cacheRoot,activePaths);
+    const base = resolve(cacheRoot), destination = join(base, token), paths = new Map<string,string>();
+    const inside = (root:string,file:string) => { const rel=relative(root,file);return !rel || rel !== '..' && !rel.startsWith('..'+sep) && !isAbsolute(rel); };
+    const owned = [...new Set([...staged.models,...staged.packs])].map(dir=>({dir,source:this.resolve(token,dir)!}));
+    if (owned.some(item=>inside(staged.root,item.source))) {
+      if (inside(staged.root,destination) || inside(destination,staged.root)) throw new Error('自动化缓存与导入目录不能重叠');
+      if (!existsSync(join(destination,'.figure-import-cache'))) {
+        if(existsSync(destination))throw new Error('自动化缓存路径已占用');
+        await mkdir(base,{recursive:true});
+        await mkdir(destination);
+        try { await cp(staged.root,destination,{recursive:true,force:false,errorOnExist:true});await writeFile(join(destination,'.figure-import-cache'),'1'); }
+        catch(error){const rel=relative(base,resolve(destination));if(rel&&rel!== '..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel))await rm(destination,{recursive:true,force:true}).catch(()=>{});throw error;}
+      }
+    }
+    for(const {dir,source} of owned) paths.set(dir,inside(staged.root,source)?join(destination,relative(staged.root,source)):source);
+    return paths;
+  }
+
+  /** Only our marked, expired UUID caches can be removed; user model folders are never targets. */
+  async pruneAutomationInputs(cacheRoot:string,activePaths:string[]=[]):Promise<void> {
+    const base=resolve(cacheRoot);
+    for(const entry of await readdir(base,{withFileTypes:true}).catch(()=>[])) {
+      if(!entry.isDirectory()||entry.isSymbolicLink()||! /^[a-f0-9-]{36}$/i.test(entry.name))continue;
+      const target=resolve(base,entry.name),rel=relative(base,target),marker=join(target,'.figure-import-cache');
+      if(!rel||rel==='..'||rel.startsWith('..'+sep)||isAbsolute(rel))continue;
+      if(activePaths.some(path=>{const child=relative(target,resolve(path));return !child||child!=='..'&&!child.startsWith('..'+sep)&&!isAbsolute(child);}))continue;
+      const info=await lstat(marker).catch(()=>null);
+      if(info?.isFile()&&!info.isSymbolicLink()&&Date.now()-info.mtimeMs>60*60000)await rm(target,{recursive:true,force:true}).catch(()=>{});
+    }
+  }
 
   /** Local clipboard/picker input stays read-only; only the owned temp root is removed. */
   async stageLocal(paths:string[],installed:Map<string,string>):Promise<StageResult|{error:string}> {

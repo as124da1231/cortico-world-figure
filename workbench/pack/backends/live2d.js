@@ -28,6 +28,7 @@ import {
 import { SHADERS } from '../sdk/shaders.js';
 import { roleValue } from './role-values.js';
 import { createAdaptiveRenderer } from './render-config.js';
+import { createNativeActions, applyNativeValues } from './native-actions.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
@@ -155,8 +156,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
   };
   applyFit();
 
+  const nativePhysicsOutputs = new Set();
   if (entry.physics) {
     const phys = (await import(new URL(`models/${entry.id}/${entry.physics}`, base))).default;
+    for (const setting of phys.PhysicsSettings ?? []) for (const output of setting.Output ?? []) {
+      if (output.Destination?.Id) nativePhysicsOutputs.add(output.Destination.Id);
+    }
     const bytes = new TextEncoder().encode(JSON.stringify(phys));
     model.loadPhysics(bytes.buffer, bytes.length);
   }
@@ -404,6 +409,18 @@ export async function createLive2DBody(base, opts, entry, kit) {
   for (let i = 0; i < model._model.getPartCount(); i++) {
     partIndex.set(model._model.getPartId(i).getString(), i);
   }
+  const native = profile.native?.version === 1 ? createNativeActions(profile.native) : null;
+  const nativeParams = new Set(), nativeParts = new Map();
+  for (const resource of profile.native?.resources ?? []) {
+    for (const p of resource.kind === 'expression' ? (resource.data.Parameters ?? []).map(p => ({Id:p.Id,Target:'Parameter'})) : resource.data.Curves ?? []) {
+      if (p.Target === 'Parameter' && paramIndex.has(p.Id)) nativeParams.add(paramIndex.get(p.Id));
+      if (p.Target === 'PartOpacity' && partIndex.has(p.Id)) { const i = partIndex.get(p.Id); nativeParts.set(i, model._model.getPartOpacityByIndex(i)); }
+    }
+  }
+  function resetNativeBase() {
+    for (const i of nativeParams) model._model.setParameterValueByIndex(i, model._model.getParameterDefaultValue(i));
+    for (const [i, value] of nativeParts) model._model.setPartOpacityByIndex(i, value);
+  }
   const partTargets = new Map((entry.motions ?? []).map((m) => [m.id, m.partOpacity ?? null]));
   const baseParts = profile.parts?.base ?? { PartArmA: 1, PartArmB: 0 };
 
@@ -611,6 +628,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   function renderNeutralPose() {
     if (!texturesReady) return false;
     model._model.loadParameters();
+    resetNativeBase();
     applyFrame({}, {}, 1 / 60, true);
     applyPartOpacity(null);
     model._model.saveParameters();
@@ -904,12 +922,19 @@ export async function createLive2DBody(base, opts, entry, kit) {
       const dt = clamp(frame.dt ?? 0.016, 0.001, 0.05);
 
       model._model.loadParameters();
+      resetNativeBase();
       applyFrame(face, frame, dt, !extent);
       stepMotion(frame, dt);
       stepExpression(frame.face, dt);
       applyPartOpacity(currentId);
+      let nativeValues = [];
+      if (native && extent) {
+        try { nativeValues = native.update(frame, dt); applyNativeValues(nativeValues.filter(v => !nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex); }
+        catch (error) { console.warn('[l2d] Native update failed; generic behavior retained', error); }
+      }
       model._model.saveParameters();            // ← 必须在 physics 之前
       try { model._physics?.evaluate(model._model, dt); } catch { /* 物理失败不致命 */ }
+      if (nativeValues.length) applyNativeValues(nativeValues.filter(v => nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex);
       try { model._pose?.updateParameters(model._model, dt); } catch { /* 姿势失败不致命 */ }
       applyCleanParams();
       model._model.update();
@@ -921,6 +946,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
         idleCount: idleIds.length,
         expr: currentExpr,
         exprCount: expressions.size,
+        native: native?.state() ?? null,
       };
 
       // 贴图就绪后的第 3 帧量一次可见范围（等姿势稳定，别量到眨眼/动作的瞬间）
@@ -955,6 +981,11 @@ export async function createLive2DBody(base, opts, entry, kit) {
   for (const m of entry.motions ?? []) {
     words[m.id] = { motion: { seconds: m.duration || 3 } };
   }
+  for (const binding of profile.native?.bindings ?? []) {
+    const resource = profile.native.resources.find(r => r.id === binding.resource);
+    if (resource) words[binding.word] = resource.kind === 'expression' ? { expression: {} }
+      : { motion: { seconds: (resource.seconds || 1) + (resource.classification === 'pose' ? 2 : .25) } };
+  }
 
   publishInfo();
   globalThis.__l2dDrive = figure.__roles;
@@ -969,6 +1000,20 @@ export async function createLive2DBody(base, opts, entry, kit) {
   globalThis.__l2dExpr = figure.__expr;
 
   const body = kit.createBody(host, { figure, words, css: 'foreignObject{pointer-events:none}' });
+  if (native) {
+    const doBase = body.do.bind(body);
+    body.do = (word) => { const accepted = doBase(word); if (accepted !== false) native.trigger(word); return accepted; };
+    globalThis.__l2dNativeSample = (id, time) => {
+      if (!texturesReady) return null;
+      model._model.loadParameters();
+      for (let i = 0; i < model._model.getParameterCount(); i++) model._model.setParameterValueByIndex(i, model._model.getParameterDefaultValue(i));
+      resetNativeBase();
+      applyFrame({}, {}, 1 / 60, true); applyPartOpacity(null);
+      native.sample(id, time);
+      try { applyNativeValues(native.update({},0),model._model,paramIndex,partIndex); model._model.update();render();return canvasPng(384); }
+      finally { native.clearSample(); }
+    };
+  }
   const motionKind = profile.motion?.kind === 'stand' ? 'stand' : 'roam';
   if (SIMPLE && motionKind === 'stand') {
     // 站定：无论 Coo / 预览传什么 roam，都强制 off；正面立绘也不镜像。
