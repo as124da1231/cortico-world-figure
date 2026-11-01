@@ -303,7 +303,7 @@ export default {
         progress.appendChild(progressBar);
         operationBottom.appendChild(progress);
 
-        // Cards flow with the page; the editor appears beside them when needed.
+        // Cards keep their page layout while editing in a modal dialog.
         const head = el('div', 'l2d-head');
         const libraryTitle = el('div', 'l2d-library-title');
         const countLabel = el('span', 'l2d-count', '0');
@@ -710,9 +710,9 @@ export default {
           if (state.busy) return;
           if (modal) {
             const previousId = editingId;
-            modal.remove(); modal = null; editingId = null; workspace.classList.remove('editing'); renderGrid();
+            modal.close(); modal.remove(); modal = null; editingId = null; renderGrid();
             const previous = [...grid.querySelectorAll('.l2d-card')].find(card => card.dataset.id === previousId);
-            (previous?.querySelector('button.title') || editReturnFocus)?.focus();
+            (previous?.querySelector('button.title') || editReturnFocus)?.focus({ preventScroll: true });
           }
         }
 
@@ -729,16 +729,21 @@ export default {
           editLoading = false;
           if (disposed || state.busy) return;
           if (!d) { ui.toast(t('读不到这份打包的信息', 'Cannot read this pack'), 'bad'); return; }
-          modal?.remove();
+          modal?.close(); modal?.remove();
 
           editingId = b.id;
-          modal = el('aside', 'l2d-modal');
-          workspace.classList.add('editing'); renderGrid();
+          modal = el('dialog', 'l2d-modal');
+          for (const card of grid.querySelectorAll('.l2d-card')) card.classList.toggle('selected', card.dataset.id === editingId);
           accessibleModal(modal, t('编辑形象信息', 'Edit figure'));
           const card = el('div', 'l2d-modal-card');
           const head2 = el('div', 'l2d-modal-head');
-          head2.appendChild(el('div', 'l2d-modal-title', t('编辑形象信息', 'Edit figure')));
-          head2.appendChild(el('div', 'l2d-modal-sub', b.id.replace(/(-\d{6,})+$/, '')));
+          const heading = el('div', 'l2d-modal-heading');
+          heading.appendChild(el('div', 'l2d-modal-title', t('编辑形象信息', 'Edit figure')));
+          heading.appendChild(el('div', 'l2d-modal-sub', b.id.replace(/(-\d{6,})+$/, '')));
+          const close = el('button', 'l2d-btn quiet l2d-modal-close', '×');
+          close.setAttribute('aria-label', t('关闭编辑', 'Close editor'));
+          close.addEventListener('click', closeEdit);
+          head2.append(heading, close);
           card.appendChild(head2);
 
           const fields = {};
@@ -810,7 +815,11 @@ export default {
           card.appendChild(actions);
 
           cancel.addEventListener('click', closeEdit);
-          modal.addEventListener('click', (e) => { if (e.target === modal) closeEdit(); });
+          modal.addEventListener('click', (e) => {
+            if (e.target !== modal) return;
+            const bounds = modal.getBoundingClientRect();
+            if (e.clientX < bounds.left || e.clientX > bounds.right || e.clientY < bounds.top || e.clientY > bounds.bottom) closeEdit();
+          });
 
           save.addEventListener('click', async () => {
             if (state.busy) return;
@@ -843,7 +852,8 @@ export default {
           });
 
           modal.appendChild(card);
-          workspace.appendChild(modal);
+          shell.appendChild(modal);
+          modal.showModal();
           fields.name.focus();
         }
 
@@ -1057,12 +1067,12 @@ export default {
 
         function accessibleModal(node, title) {
           node.setAttribute('role', 'dialog');
-          node.setAttribute('aria-modal', 'false');
+          node.setAttribute('aria-modal', 'true');
           node.setAttribute('aria-label', title);
           node.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && !state.busy) { e.preventDefault(); closeEdit(); }
-
+            if (e.key === 'Escape') { e.preventDefault(); closeEdit(); }
           });
+          node.addEventListener('cancel', (e) => { e.preventDefault(); closeEdit(); });
         }
 
         // ---------------- 绑定 ----------------
@@ -1198,7 +1208,7 @@ export default {
           stopTicker();
           stopResume();
           assistTimer?.dispose?.();
-          modal?.remove();
+          modal?.close(); modal?.remove();
           observer?.disconnect(); win.removeEventListener('resize', resize);
           for (const handle of ownedOverlays) handle.dispose?.();
           shell.remove();

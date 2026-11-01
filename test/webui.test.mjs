@@ -7,6 +7,9 @@ const tick = () => new Promise((r) => setTimeout(r, 15));
 async function mount(t, opts = {}) {
   const dom = new JSDOM('<main></main>', { url: 'http://localhost/' });
   globalThis.window = dom.window; globalThis.document = dom.window.document;
+  // jsdom has no top-layer implementation; real modality is checked in the browser.
+  dom.window.HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  dom.window.HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
   const calls = []; const toasts = []; const drawers = [];
   const configCalls = [];
   let ack = opts.ack ?? false;
@@ -201,14 +204,18 @@ test('an eligible stalled import can resubmit analysis from the current workbenc
  assert.deepEqual(calls.find(c=>c.method==='assistAnalyze').args,['retry',['role'],[]]);
 });
 
-test('search and sorting preserve the underlying pack list and editing stays in the workspace', async t => {
+test('search and sorting preserve the pack list while editing opens a modal outside the grid', async t => {
   const {root,dom,button,calls}=await mount(t,{ack:true,builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1},{id:'b',nameZh:'Beta',at:2,bytes:1}]});
   assert.equal(root.querySelector('.l2d-card').dataset.id,'b');
   const search=root.querySelector('.l2d-search');search.value='Alpha'; search.dispatchEvent(new dom.window.Event('input'));
   assert.equal(root.querySelectorAll('.l2d-card').length,1);
+  const card=root.querySelector('.l2d-card');
   button('编辑').click();await tick();
   assert.equal(calls.find(c=>c.method==='detail').args[0],'a');
-  assert.ok(root.querySelector('.l2d-workspace > .l2d-modal'));
+  assert.ok(root.querySelector('dialog.l2d-modal[open][aria-modal="true"]'));
+  assert.equal(root.querySelector('.l2d-workspace .l2d-modal'), null);
+  assert.equal(root.querySelector('.l2d-workspace').classList.contains('editing'), false);
+  assert.equal(root.querySelector('.l2d-card'),card);
   button('取消').click();search.value='';search.dispatchEvent(new dom.window.Event('input'));
   assert.equal(root.querySelectorAll('.l2d-card').length,2);
 });
@@ -265,16 +272,31 @@ test('edit validates name, locks close while saving, clears about, and disposes 
   name.value = '新名字'; modal.querySelector('textarea').value = '';
   button('保存').click(); await tick();
   button('取消').click(); assert.ok(document.querySelector('.l2d-modal'));
+  modal.dispatchEvent(new dom.window.Event('cancel', {cancelable:true})); assert.equal(modal.open, true);
+  button('×').click(); assert.equal(modal.open, true);
   assert.equal(button('选择文件夹').disabled, true);
   finish({}); await tick();
   assert.equal(document.querySelector('.l2d-modal'), null);
   assert.equal(calls.find((c) => c.method === 'edit').args[1].aboutZh, '');
-  button('编辑').click(); await tick(); assert.ok(document.querySelector('[aria-modal="false"]'));
+  button('编辑').click(); await tick(); assert.ok(document.querySelector('dialog[open][aria-modal="true"]'));
   document.querySelector('.l2d-modal').dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   assert.equal(document.querySelector('.l2d-modal'), null);
   button('编辑').click(); await tick(); handle.dispose();
   assert.equal(document.querySelector('.l2d-modal'), null);
   assert.equal(root.hasAttribute('aria-busy'), false);
+});
+
+test('editor close buttons and native cancellation discard without writing and restore focus', async t => {
+  const {root,button,calls,dom}=await mount(t,{ack:true,builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1}]});
+  for(const action of ['cancel','close','native']){
+    button('编辑').click();await tick();
+    const modal=root.querySelector('dialog');modal.querySelector('input').value='Unsaved';
+    if(action==='native')modal.dispatchEvent(new dom.window.Event('cancel',{cancelable:true}));
+    else button(action==='cancel'?'取消':'×').click();
+    assert.equal(root.querySelector('dialog'),null);
+    assert.equal(dom.window.document.activeElement,root.querySelector('.l2d-card .title'));
+  }
+  assert.equal(calls.some(c=>c.method==='edit'),false);
 });
 
 test('folder and ZIP selection are owned by the Coo browser window without the backend path picker', async (t) => {
