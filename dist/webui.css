@@ -64,13 +64,23 @@
 .l2d-btn.sm { height: 26px; padding: 0 8px; font-size: 11.5px; border-radius: 7px; }
 .l2d-wide { width: 100%; }
 
-.l2d-path {
-  flex: 1; min-width: 200px; height: 30px; padding: 0 10px;
-  border: 1px solid var(--line-2, #d0d2d0); border-radius: 8px;
-  background: var(--sheet, #fbfbfb); color: var(--ink, #1b1a1e);
-  font: 12px/1 ui-monospace, Consolas, monospace;
+.l2d-import-bar { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: 18px; margin: 16px 0 12px; }
+.l2d-drop-zone {
+  box-sizing: border-box; min-height: 104px; min-width: 0; padding: 16px 20px;
+  display: flex; flex-direction: column; justify-content: center; gap: 8px;
+  border: 1px dashed var(--line-2, #d0d2d0); border-radius: 16px;
+  background: var(--sheet, #fbfbfb); cursor: text; overflow-wrap: anywhere;
 }
-.l2d-path:focus { outline: none; border-color: var(--accent, #00a870); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #00a870) 14%, transparent); }
+.l2d-drop-zone:focus-visible { outline: 2px solid var(--accent, #00a870); outline-offset: 3px; }
+.l2d-drop-zone.over { border-color: var(--accent, #00a870); background: color-mix(in srgb, var(--accent, #00a870) 7%, var(--sheet, #fbfbfb)); }
+.l2d-drop-zone.ready { border-style: solid; }
+.l2d-drop-zone.bad { border-color: var(--danger, #b45950); }
+.l2d-drop-zone[aria-disabled="true"] { cursor: progress; }
+.l2d-source-title { font-size: 14px; font-weight: 500; line-height: 1.5; }
+.l2d-source-hint { font-size: 12px; line-height: 1.6; color: var(--ink-dim, #8b8b8f); }
+.l2d-import-controls { align-self: center; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.l2d-import-controls .l2d-btn { width: 100%; height: 38px; }
+.l2d-import-controls .primary { grid-column: 1 / -1; }
 
 /* 状态 */
 .l2d-status { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 12px; color: var(--ink-soft, #5c5c60); }
@@ -123,6 +133,7 @@
 .l2d-modal-sub { font: 11px/1 ui-monospace, Consolas, monospace; color: var(--ink-dim, #8b8b8f); }
 
 .l2d-field { display: flex; flex-direction: column; gap: 6px; }
+.l2d-field[hidden] { display: none; }
 .l2d-label { font-size: 12px; color: var(--ink-soft, #5c5c60); }
 .l2d-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .l2d-input {
@@ -214,11 +225,14 @@ textarea.l2d-input { height: auto; padding: 7px 10px; line-height: 1.5; resize: 
 .l2d-packrow-tag { font-size: 11px; color: #9a6b16; }
 .l2d-packrow .l2d-btn { min-width: 64px; }
 .l2d-modal-card.drop { outline: 2px dashed var(--accent, #00a870); outline-offset: -6px; }
+@media (max-width: 640px) {
+  .l2d-import-bar { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .l2d-drop-zone { min-height: 96px; padding: 16px; }
+}
 @media (max-width: 480px) {
   .l2d-modal { padding: 12px; }
   .l2d-modal-card { padding: 14px; max-height: calc(100dvh - 24px); }
   .l2d-modal-head { flex-wrap: wrap; }
-  .l2d-path { min-width: 0; flex-basis: calc(100% - 90px); }
   .l2d-target { max-width: 100%; }
   .l2d-grid { grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr)); }
 }

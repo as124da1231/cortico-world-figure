@@ -2,13 +2,14 @@
  * Live2D 模型一键安装 World。
  *
  * 交互全在面板里（dist/webui.js，手写 ESM，不打 bundle）：
- *   选择目录 → 扫描 → 打包 → 安装
- * 每一步单独触发，结果写回面板的日志与状态灯；重启 Coo 不重跑。
+ *   拖入 / 粘贴 / 选择文件 → 一键打包 → 卡片安装
+ * 导入自动识别，打包与安装独立触发；重启 Coo 不重跑。
  *
  * 打包做两遍：先出默认取景的包，再去无头 Chrome 里量尺寸 + 拍封面，
  * 带着量出来的 fit 重建一次，最后把封面拷回去。
  */
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import {
   cp, mkdir, readFile, readdir, rename, rm, writeFile,
 } from 'node:fs/promises';
@@ -18,9 +19,10 @@ import type {
   World, WorldHost, WorldWebUiDecl, ToolDef, WorldStreamSocket,
 } from 'cortico/core/types.ts';
 import type { ConfigGroup } from 'cortico/core/config-schema.ts';
-import { adaptationSummary, buildPack, dirSize, editPack, installPack, scanModel, type ScanSummary } from './pipeline.ts';
-import { PackImporter, filesFromBundle, filesFromZip } from './import.ts';
+import { adaptationSummary, buildPack, dirSize, editPack, installPack, packDetail, scanModel, type ScanSummary } from './pipeline.ts';
+import { PackImporter, filesFromBundle, filesFromZip, thumbOf } from './import.ts';
 import { captureCover } from './cover.ts';
+import { readClipboardPaths } from './clipboard.ts';
 import {
   CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
   coreState, ensureCore,
@@ -43,7 +45,6 @@ export interface Live2dSection {
   cover?: boolean;
   /** 贴图最长边：2048 / 1024 / 512 / 4096，original = 原精度不缩放。 */
   texture?: string;
-  /** 清理水印 / 文字类部件与参数（默认关）。 */
   clean?: boolean;
 }
 
@@ -164,7 +165,7 @@ export class Live2dWorld implements World {
   webUi(language?: string): WorldWebUiDecl {
     const zh = (language ?? 'zh').toLowerCase().startsWith('zh');
     const s = this.state;
-    // Hosts without footer support expose this as a normal notice tab.
+    // Hosts with footer support mount this beside configuration; the version opens a manual fallback.
     const noticePanel = {
       id: 'config-notice', title: zh ? '须知' : 'Notice', slot: 'config-footer',
     };
@@ -194,7 +195,7 @@ export class Live2dWorld implements World {
       panels: [{
         id: 'workbench',
         title: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
-        description: zh ? '选目录、扫描、打包、安装' : 'Pick, scan, build, install',
+        description: zh ? '拖入、粘贴或选择文件夹 / ZIP，一键打包' : 'Drop, paste or choose a folder / ZIP, then pack',
       }, noticePanel],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
       stream: (panel, socket) => {
@@ -282,6 +283,41 @@ export class Live2dWorld implements World {
     if (method === 'core') {
       return this.corePayload();
     }
+    if (method === 'clipboard') return { paths: await readClipboardPaths() };
+    if (method === 'importPaths') {
+      const paths = Array.isArray(args[0]) ? args[0].filter((v): v is string => typeof v === 'string') : [];
+      const result = await this.importer.stageLocal(paths, await this.installedVersions());
+      if ('error' in result) throw new Error(result.error);
+      return result;
+    }
+    if (method === 'importKeep') {
+      this.requireNotice();
+      const source = this.importer.resolvePack(String(args[0] ?? ''), String(args[1] ?? ''));
+      if (!source) throw new Error('这次导入已经过期，重新选一次');
+      const parent = join(this.workRoot(), 'builds', `import-${randomUUID()}`);
+      let committed = false;
+      try {
+        const packDir = await installPack(source, parent);
+        const manifest = JSON.parse(await readFile(join(packDir, 'figure.json'), 'utf8'));
+        const at = Date.now();
+        const record = {
+          id: `${manifest.id}-${at}-${randomUUID().slice(0, 8)}`,
+          packDir, at, bytes: await dirSize(packDir),
+          words: Array.isArray(manifest.vocab) ? manifest.vocab.length : 0,
+          cover: Boolean(manifest.thumb), fit: false,
+        };
+        const previous = { build: this.state.build, builds: this.state.builds };
+        this.state.build = record;
+        this.state.builds = [record, ...(previous.builds ?? [])];
+        try { await this.save(); }
+        catch (e) { this.state.build = previous.build; this.state.builds = previous.builds; throw e; }
+        committed = true;
+        this.say(`已加入打包列表 · ${manifest.id}`);
+        return { buildId: record.id, state: this.snapshot() };
+      } finally {
+        if (!committed) await rm(parent, { recursive: true, force: true }).catch(() => {});
+      }
+    }
     if (method === 'coreAccept') {
       if (args[0] !== true) throw new Error('需要先同意 Live2D 许可');
       this.say('获取 Live2D 核心组件…');
@@ -322,9 +358,11 @@ export class Live2dWorld implements World {
         const last = r.installed[r.installed.length - 1];
         this.state.install = { target: last.target, at: Date.now() };
         this.steps.install = { phase: 'done', hint: last.target, at: Date.now() };
-        await this.save();
+        let warn;
+        try { await this.save(); }
+        catch (error) { warn = `形象已安装，但安装记录保存失败：${errText(error)}`; this.say(`! ${warn}`); }
         this.say(`导入完成 · ${r.installed.map((x) => x.id).join('、')}`);
-        return { installed: r.installed.map((x) => x.id), state: this.snapshot() };
+        return { installed: r.installed.map((x) => x.id), state: this.snapshot(), warn };
       } catch (e) {
         this.steps.install = { phase: 'error', hint: errText(e) };
         this.say(`导入失败 · ${errText(e)}`);
@@ -332,7 +370,7 @@ export class Live2dWorld implements World {
       }
     }
     if (method === 'importCancel') {
-      await this.importer.cancel();
+      await this.importer.cancel(typeof args[0] === 'string' ? args[0] : undefined);
       return { ok: true };
     }
     if (method === 'importBuild') {
@@ -362,6 +400,13 @@ export class Live2dWorld implements World {
       if ('error' in r) throw new Error(r.error);
       return r;
     }
+    if (method === 'importAppendChunk') {
+      const file = args[1] as Record<string, unknown> | undefined;
+      if (!file || typeof file.path !== 'string' || typeof file.b64 !== 'string') throw new Error('文件分块无效');
+      const result = await this.importer.appendChunk(String(args[0] ?? ''), {path:file.path,bytes:Buffer.from(file.b64,'base64')}, Number(file.offset), Number(file.total));
+      if ('error' in result) throw new Error(result.error);
+      return result;
+    }
     if (method === 'importFinish') {
       const token = String(args[0] ?? '');
       const fromFolders = Boolean(args[1]);
@@ -375,27 +420,7 @@ export class Live2dWorld implements World {
       const id = String(args[0] ?? '');
       const rec = (this.state.builds ?? []).find((b) => b.id === id);
       if (!rec || !existsSync(rec.packDir)) throw new Error('没有这份打包产物');
-      const m = JSON.parse(await readFile(join(rec.packDir, 'figure.json'), 'utf8'));
-      let bodyGain = 1.8;
-      let style = 'natural';
-      try {
-        const models = join(rec.packDir, 'models');
-        for (const d of await readdir(models)) {
-          const prof = join(models, d, 'profile.js');
-          if (!existsSync(prof)) continue;
-          const s = await readFile(prof, 'utf8');
-          const g = /"bodyGain":\s*([-\d.]+)/.exec(s);
-          const st = /"style":\s*"([^"]+)"/.exec(s);
-          if (g) bodyGain = Number(g[1]);
-          if (st) style = st[1];
-          break;
-        }
-      } catch { /* 没 profile 就用默认 */ }
-      return {
-        nameZh: m.name?.zh ?? '', nameEn: m.name?.en ?? '',
-        aboutZh: m.about?.zh ?? '', aboutEn: m.about?.en ?? '',
-        bodyGain, style,
-      };
+      return packDetail(rec.packDir);
     }
     if (method === 'edit') {
       const id = String(args[0] ?? '');
@@ -499,6 +524,13 @@ export class Live2dWorld implements World {
         + (shot.ok ? ' · 封面 ✓' : '')
         + (shot.fit ? ' · 已贴合' : '');
       this.steps.build = { phase: 'done', hint, at: Date.now() };
+      let report;
+      try { report = JSON.parse(await readFile(join(finalDir, 'build.json'), 'utf8')); } catch { /* Optional for older converters. */ }
+      const previous = {modelDir:this.state.modelDir,builds:this.state.builds,build:this.state.build,scan:this.state.scan,scanStep:this.steps.scan};
+      if (report?.model) {
+        this.state.scan = {...report.model,unmapped:report.unmapped??[],adaptation:adaptationSummary(report),at:Date.now()};
+        this.steps.scan = {phase:'done',hint:`${report.model.title} · ${report.model.params} 参数 / ${report.model.roles} role`,at:Date.now()};
+      } else { delete this.state.scan; this.steps.scan = {...IDLE}; }
       if (opts.remember !== false) this.state.modelDir = dir;
       const rec: BuildRecord = {
         id: `${manifest.id || 'pack'}-${Date.now()}`,
@@ -509,9 +541,16 @@ export class Live2dWorld implements World {
       this.state.build = {
         packDir: finalDir, bytes, words, cover: shot.ok, fit: Boolean(shot.fit), at: Date.now(),
       };
-      await this.save();
+      try { await this.save(); }
+      catch (error) {
+        this.state.modelDir = previous.modelDir; this.state.builds = previous.builds; this.state.build = previous.build;
+        this.state.scan = previous.scan; this.steps.scan = previous.scanStep;
+        await rm(finalDir, {recursive:true,force:true}).catch(()=>{});
+        throw error;
+      }
       push(`打包完成 · ${hint}`);
-      return { state: this.snapshot(), log: logs, warn: shot.ok ? undefined : `封面跳过：${shot.error ?? ''}` };
+      const adaptation = report ? adaptationSummary(report) : undefined;
+      return { state: this.snapshot(), log: logs, adaptation, warn: shot.ok ? undefined : `封面跳过：${shot.error ?? ''}` };
     } catch (e) {
       this.steps.build = { phase: 'error', hint: errText(e) };
       push(`打包失败 · ${errText(e)}`);
@@ -542,9 +581,11 @@ export class Live2dWorld implements World {
           catch (e) { this.say(`! 安装已完成，清理打包产物失败：${errText(e)}`); }
         }
       }
-      await this.save();
+      let warn;
+      try { await this.save(); }
+      catch (error) { warn = `形象已安装，但安装记录保存失败：${errText(error)}`; this.say(`! ${warn}`); }
       this.say(`安装完成 · ${target}`);
-      return { state: this.snapshot(), log: [`安装到 ${target}`] };
+      return { state: this.snapshot(), log: [`安装到 ${target}`], warn };
     } catch (e) {
       this.steps.install = { phase: 'error', hint: errText(e) };
       this.say(`安装失败 · ${errText(e)}`);
@@ -555,16 +596,11 @@ export class Live2dWorld implements World {
   /** 打包历史，最新在前。卡片封面用 128 小图，转 data URL 给面板。 */
   private async listBuilds(): Promise<Array<Record<string, unknown>>> {
     const out: Array<Record<string, unknown>> = [];
-    const alive: BuildRecord[] = [];
     let dropped = false;
     for (const b of this.state.builds ?? []) {
       if (!existsSync(b.packDir)) { dropped = true; continue; }
-      alive.push(b);
       let thumb = '';
-      try {
-        const png = await readFile(join(b.packDir, 'thumb', 'opt-model.png'));
-        thumb = 'data:image/png;base64,' + png.toString('base64');
-      } catch { /* 没封面就不给图 */ }
+      thumb = await thumbOf(b.packDir, 'thumb/opt-model.png') ?? '';
       let packId = '';
       let nameZh = '';
       let nameEn = '';
@@ -573,6 +609,7 @@ export class Live2dWorld implements World {
       catch { /* older or imported packs may not include a build report */ }
       try {
         const m = JSON.parse(await readFile(join(b.packDir, 'figure.json'), 'utf8'));
+        if (!thumb) thumb = await thumbOf(b.packDir, m.thumb) ?? '';
         packId = typeof m.id === 'string' ? m.id : '';
         nameZh = typeof m.name?.zh === 'string' ? m.name.zh : '';
         nameEn = typeof m.name?.en === 'string' ? m.name.en : '';
@@ -584,6 +621,8 @@ export class Live2dWorld implements World {
       });
     }
     if (dropped) {
+      // Reads above yield to an in-flight build; prune the current list, never an older snapshot.
+      const alive = (this.state.builds ?? []).filter((b) => existsSync(b.packDir));
       this.state.builds = alive;
       if (this.state.build && !alive.some((b) => b.packDir === this.state.build!.packDir)) {
         delete this.state.build;
@@ -779,13 +818,12 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
         'worlds.figure.clean': {
           type: 'boolean',
           title: zh ? '清理' : 'Clean',
-          description: zh ? '隐藏水印 / 文字类部件，按作者提供的状态固定相关参数' : 'Hide watermark / text parts using author-provided parameter states',
           'x-hot': true,
         },
         'worlds.figure.autoDelete': {
           type: 'boolean',
           title: zh ? '安装后删除打包产物' : 'Delete the pack after install',
-          description: zh ? '装完只留 figures 那一份，省一半磁盘' : 'Keep only the installed copy',
+          description: zh ? '仅在安装成功后删除对应打包产物，保留原始素材。' : 'Delete the corresponding pack only after installation succeeds; keep source files.',
           'x-hot': true,
         },
         'worlds.figure.figuresDir': {

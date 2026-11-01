@@ -1,9 +1,9 @@
 /**
  * Coo 魔术人偶工坊 面板（浏览器端，手写 ESM，不打 bundle）。
  *
- * 一行：[选择目录…][路径][扫描][打包][导入…]
+ * 导入区：[拖入 / 点击后粘贴] [选择文件夹 / ZIP] [一键打包]
  * 卡片：[安装][编辑][删除]；编辑弹层直接改 figure.json / profile.js，不重新打包。
- * 导入弹层：zip / 文件夹 / 直接拖入，照 Coopanion 桌宠的做法。
+ * 原始模型打包、现成形象包入库，均保留卡片上的安装操作。
  */
 const NOTICE_TEXT = {
   zh: '本功能生成的形象包包含 Live2D Cubism Core。请仅在本机使用，不要将这些形象包上传、分享或再次分发给他人。模型、贴图和第三方组件仍各自受原许可约束。',
@@ -37,10 +37,12 @@ export default {
     workbench: {
       mount(ctx) {
         const ui = ctx.ui;
+        const doc = ctx.root.ownerDocument;
+        const win = doc.defaultView;
         const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
         const t = (a, b) => (zh ? a : b);
         const el = (tag, cls, text) => {
-          const n = document.createElement(tag);
+          const n = doc.createElement(tag);
           if (cls) n.className = cls;
           if (text != null) n.textContent = text;
           return n;
@@ -50,6 +52,11 @@ export default {
         let initialized = false;
         let notice = null;
         let version = '';
+        let activeImportToken = null;
+        let resumeHandle = null;
+        let resuming = false;
+        let resumePolling = false;
+        let resumePhase;
         const state = { dir: '', busy: false, phase: '', builds: [], installed: null, figuresDir: '' };
 
         // ---- Live2D 核心组件：不随扩展分发，同意许可后从官方地址取 ----
@@ -76,7 +83,7 @@ export default {
         coreLicA.addEventListener('click', () => openLicense('core'));
         coreLicB.addEventListener('click', () => openLicense('sdk'));
         coreHome.addEventListener('click', () => {
-          if (core.home) window.open(core.home, '_blank', 'noreferrer');
+          if (core.home) win.open(core.home, '_blank', 'noreferrer');
         });
 
         function paintCore() {
@@ -129,8 +136,8 @@ export default {
           title: t('Live2D 模型一键安装', 'Live2D One-Click Install'),
           en: t('Coo 魔术人偶工坊', 'Coo Marionette Atelier'),
           desc: t(
-            '把 Live2D 模型整理成 Coo 能用的形象：扫描、打包、安装。',
-            'Turn a Live2D model into a Coo figure: scan, pack, install.',
+            '拖入或粘贴模型，一键打包后安装到 Coo。',
+            'Drop or paste a model, pack it, then install it into Coo.',
           ),
         });
         ctx.root.appendChild(sheet.el);
@@ -156,16 +163,13 @@ export default {
           if (ack) {
             noticeDetails.open = false;
             noticeDetails.remove();
-            if (versionCorner.tagName === 'BUTTON') {
-              const label = el('span', 'l2d-version-corner');
-              versionCorner.replaceWith(label);
-              versionCorner = label;
-            }
           }
           versionCorner.textContent = version ? `v${version}` : '…';
           versionCorner.classList.toggle('unack', !ack);
           versionCorner.classList.toggle('ack', ack);
-          versionCorner.title = ack ? '' : t('请阅读并确认须知', 'Read and acknowledge the notice');
+          versionCorner.title = ack ? t('查看须知', 'Read notice') : t('请阅读并确认须知', 'Read and acknowledge the notice');
+          versionCorner.disabled = !notice || state.busy;
+          if (ack) { versionCorner.removeAttribute('aria-controls'); versionCorner.removeAttribute('aria-expanded'); }
           versionCorner.setAttribute('aria-label', `${versionCorner.textContent} · ${ack ? t('已确认', 'Acknowledged') : t('未确认', 'Not acknowledged')}`);
           acknowledge.hidden = ack;
           acknowledge.disabled = !notice || state.busy;
@@ -175,7 +179,7 @@ export default {
           }
         }
         versionCorner.addEventListener('click', () => {
-          if (notice?.acknowledged) return;
+          if (notice?.acknowledged) { ui.drawer(t('须知', 'Notice'), t(NOTICE_TEXT.zh, NOTICE_TEXT.en)); return; }
           noticeDetails.open = !noticeDetails.open;
           noticeDetails.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
           paintNotice();
@@ -192,7 +196,7 @@ export default {
           finally {
             setBusy(false);
             paintNotice();
-            if (notice?.acknowledged) path.focus({ preventScroll: true });
+            if (notice?.acknowledged) dropZone.focus({ preventScroll: true });
           }
         });
         function ensureNotice() {
@@ -205,17 +209,48 @@ export default {
         }
 
 
-        // ---- 一行 ----
-        const bar = el('div', 'l2d-bar');
-        const path = el('input', 'l2d-path');
-        path.placeholder = t('模型目录（含 .model3.json）', 'Model folder (.model3.json)');
-        path.spellcheck = false;
-        path.setAttribute('aria-label', path.placeholder);
-        const scan = el('button', 'l2d-btn', t('扫描', 'Scan'));
-        const pack = el('button', 'l2d-btn primary', t('打包', 'Pack'));
-        const importBtn = el('button', 'l2d-btn', t('导入', 'Import'));
-        bar.append(importBtn, path, scan, pack);
+        // ---- 导入区与两个主操作 ----
+        const bar = el('div', 'l2d-import-bar');
+        const dropZone = el('div', 'l2d-drop-zone');
+        dropZone.tabIndex = 0;
+        dropZone.setAttribute('role', 'region');
+        dropZone.setAttribute('aria-label', t('模型导入区域，点击后可粘贴', 'Model import area; click to paste'));
+        const sourceTitle = el('div', 'l2d-source-title');
+        const sourceHint = el('div', 'l2d-source-hint');
+        dropZone.append(sourceTitle, sourceHint);
+        const actions = el('div', 'l2d-import-controls');
+        const chooseFolder = el('button', 'l2d-btn', t('选择文件夹', 'Choose folder'));
+        const chooseZip = el('button', 'l2d-btn', t('选择 ZIP', 'Choose ZIP'));
+        const pack = el('button', 'l2d-btn primary', t('一键打包', 'Pack models'));
+        const folderInput = doc.createElement('input');
+        folderInput.type = 'file';
+        folderInput.webkitdirectory = true;
+        folderInput.setAttribute('webkitdirectory', '');
+        folderInput.hidden = true;
+        const zipInput = doc.createElement('input');
+        zipInput.type = 'file';
+        zipInput.accept = '.zip,application/zip';
+        zipInput.hidden = true;
+        actions.append(chooseFolder, chooseZip, pack);
+        bar.append(dropZone, actions, folderInput, zipInput);
         sheet.body.appendChild(bar);
+        let staged = null;
+        const completed = new Set();
+        function paintSource() {
+          const models = staged?.models ?? [];
+          const packs = staged?.packs ?? [];
+          const count = models.length + packs.length;
+          const names = [...models.map(m => m.title), ...packs.map(p => (zh ? p.nameZh : p.nameEn) || p.id)];
+          sourceTitle.textContent = count ? names.slice(0, 3).join('、') + (count > 3 ? t(` 等 ${count} 项`, ` and ${count - 3} more`) : '') : t('拖入模型或 ZIP', 'Drop a model folder or ZIP');
+          sourceTitle.title = names.join('\n');
+          sourceHint.textContent = count
+            ? (completed.size === count ? t('已加入下方卡片，可编辑或安装；也可拖入其他模型', 'Added below; edit or install, or drop another model') : t(`已识别 ${count} 项，点击右侧一键打包`, `${count} recognized; pack using the button on the right`))
+            : t('点击此区域后，按 Ctrl+V 粘贴文件或目录路径', 'Click here, then press Ctrl+V to paste files or a local path');
+          dropZone.classList.toggle('ready', count > 0);
+          dropZone.setAttribute('aria-disabled', String(state.busy));
+          pack.disabled = state.busy || !count || completed.size === count;
+        }
+        paintSource();
 
         // ---- 状态 + 进度 ----
         const status = el('div', 'l2d-status');
@@ -309,14 +344,19 @@ export default {
         function setBusy(on, base, hint, phase = '') {
           if (disposed) return;
           state.busy = on;
-          path.disabled = on;
+          folderInput.disabled = on;
+          zipInput.disabled = on;
           coreGet.disabled = on;
+          versionCorner.disabled = on || !notice;
           acknowledge.disabled = on || !notice;
           ctx.root.setAttribute('aria-busy', String(on));
           state.phase = on ? phase : '';
-          for (const b of [scan, pack, importBtn, clearAll]) b.disabled = on;
+          for (const b of [pack, chooseFolder, chooseZip, clearAll]) b.disabled = on;
+          dropZone.setAttribute('aria-disabled', String(on));
+          const count = (staged?.models?.length || 0) + (staged?.packs?.length || 0);
+          pack.disabled = on || !count || completed.size === count;
           for (const b of grid.querySelectorAll('button')) b.disabled = on;
-          for (const b of importModal?.querySelectorAll('button, input') ?? []) b.disabled = on;
+          for (const input of modal?.querySelectorAll('button, input, textarea, select') ?? []) input.disabled = on;
           status.classList.toggle('busy', on);
           progress.classList.toggle('on', on);
           if (on) {
@@ -355,14 +395,14 @@ export default {
               grid.appendChild(ghost);
               return;
             }
-            grid.appendChild(el('div', 'l2d-empty', t('还没有打包产物，先点「打包」', 'No packs yet — hit Pack')));
+            grid.appendChild(el('div', 'l2d-empty', t('导入模型后，点击「一键打包」', 'Import a model, then pack it')));
             return;
           }
           const installedId = state.installed?.buildId;
           for (const b of state.builds) {
             const card = el('div', 'l2d-card' + (installedId === b.id ? ' installed' : ''));
             if (b.thumb) {
-              const img = document.createElement('img');
+              const img = doc.createElement('img');
               img.src = b.thumb;
               img.alt = '';
               card.appendChild(img);
@@ -422,7 +462,6 @@ export default {
           const d = r.dir ?? '';
           if (!initialized && d) {
             state.dir = d;
-            path.value = d;
           }
           initialized = true;
           paint();
@@ -431,7 +470,7 @@ export default {
         async function run(kind, id) {
           if (state.busy) return;
           if (kind !== 'scan' && !ensureNotice()) return;
-          if (kind !== 'install' && !state.dir) { ui.toast(t('先选模型目录', 'Pick a folder first'), 'bad'); return; }
+          if (kind !== 'install' && !state.dir) return;
           if (kind === 'build' && !coreReady()) {
             ui.toast(t('先获取 Live2D 核心组件', 'Fetch the Live2D core first'), 'bad');
             coreCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -443,12 +482,12 @@ export default {
           try {
             const args = kind === 'install' && id ? [state.dir, id] : [state.dir];
             const r = await ctx.invoke(kind, args);
-            if (r.state?.scan) showAdaptation(r.state.scan.adaptation);
+            if (disposed) return;
             for (const line of r.log ?? []) log.append(line, 'dim');
             log.append(`✓ ${label} · ${((performance.now() - startedAt) / 1000).toFixed(1)}s`, 'plain');
             ui.toast(`${label} ✓`, 'ok');
             if (r.warn) log.append('! ' + r.warn, 'warn');
-            await refresh();
+            await refresh().catch(e => log.append(t('操作已完成，列表刷新失败：', 'Completed, but the list could not refresh: ') + text(e), 'warn'));
           } catch (e) {
             const s = text(e);
             say(`${label} ✗ ${s}`, true);
@@ -470,7 +509,7 @@ export default {
 
         async function openEdit(b, cardEl) {
           if (state.busy || modal) return;
-          editReturnFocus = document.activeElement;
+          editReturnFocus = doc.activeElement;
           const d = await ctx.invoke('detail', [b.id]).catch(() => null);
           if (disposed || state.busy || modal) return;
           if (!d) { ui.toast(t('读不到这份打包的信息', 'Cannot read this pack'), 'bad'); return; }
@@ -488,7 +527,7 @@ export default {
             const wrap = el('div', 'l2d-field');
             const labelEl = el('label', 'l2d-label', label);
             wrap.appendChild(labelEl);
-            const input = multiline ? document.createElement('textarea') : document.createElement('input');
+            const input = multiline ? doc.createElement('textarea') : doc.createElement('input');
             input.id = `l2d-edit-${key}`;
             labelEl.htmlFor = input.id;
             input.maxLength = key === 'name' ? 120 : 1000;
@@ -508,7 +547,7 @@ export default {
           const gainOut = el('output', 'l2d-out', Number(d.bodyGain ?? 1.8).toFixed(2));
           gainTop.appendChild(gainOut);
           gainWrap.appendChild(gainTop);
-          const gain = document.createElement('input');
+          const gain = doc.createElement('input');
           gain.type = 'range';
           gain.setAttribute('aria-label', t('身体幅度', 'Body gain'));
           gain.min = '0.5';
@@ -518,25 +557,27 @@ export default {
           gain.className = 'l2d-range';
           gain.addEventListener('input', () => { gainOut.textContent = Number(gain.value).toFixed(2); });
           gainWrap.appendChild(gain);
+          gainWrap.hidden = d.tunable === false;
           card.appendChild(gainWrap);
 
           const styleWrap = el('div', 'l2d-field');
           styleWrap.appendChild(el('div', 'l2d-label', t('动作风格', 'Motion style')));
-          const style = document.createElement('select');
+          const style = doc.createElement('select');
           style.className = 'l2d-input';
           style.setAttribute('aria-label', t('动作风格', 'Motion style'));
           for (const [v, label] of [['natural', t('自然', 'Natural')], ['lively', t('活泼', 'Lively')], ['calm', t('安静', 'Calm')], ['shy', t('害羞', 'Shy')]]) {
-            const o = document.createElement('option');
+            const o = doc.createElement('option');
             o.value = v;
             o.textContent = label;
             style.appendChild(o);
           }
           style.value = d.style ?? 'natural';
           styleWrap.appendChild(style);
+          styleWrap.hidden = d.tunable === false;
           card.appendChild(styleWrap);
 
           card.appendChild(el('div', 'l2d-hint', t(
-            '保存不重新打包，1 秒内生效。若这份已安装，需再点一次「安装」同步到 Coo。',
+            '直接保存到该份打包产物。若这份已安装，需再点一次「安装」同步到 Coo。',
             'Saves without repacking. Re-install to sync if already installed.',
           )));
 
@@ -560,8 +601,7 @@ export default {
               await ctx.invoke('edit', [b.id, {
                 nameZh: name, nameEn: name,
                 aboutZh: about, aboutEn: about,
-                bodyGain: Number(gain.value),
-                style: style.value,
+                ...(d.tunable === false ? {} : {bodyGain:Number(gain.value),style:style.value}),
               }]);
               // 先就地更新卡片，再拉一次完整列表
               if (cardEl && name) {
@@ -581,7 +621,7 @@ export default {
           });
 
           modal.appendChild(card);
-          document.body.appendChild(modal);
+          ctx.root.appendChild(modal);
           fields.name.focus();
         }
 
@@ -636,297 +676,155 @@ export default {
           return out;
         }
 
-        let importModal = null;
-
-        function closeImport() {
-          if (state.busy) return;
-          if (!importModal) return;
-          importModal.remove();
-          importModal = null;
-          importBtn.focus();
-          ctx.invoke('importCancel', []).catch(() => {});
+        function cancelOwnedImport(token = activeImportToken) {
+          if (!token) return;
+          if (disposed && ctx.notifyOnUnmount) ctx.notifyOnUnmount('importCancel', [token]);
+          else ctx.invoke('importCancel', [token]).catch(() => {});
         }
 
-        async function stageBytes(bytes, kind, view) {
-          if (bytes.byteLength > MAX_MB * 1048576) {
-            view.note(t('文件太大', 'Too big'), t(`超过 ${MAX_MB} MB，换个小一点的`, `Over ${MAX_MB} MB`), true);
-            return;
-          }
-          if (state.busy) return;
-          setBusy(true, t('导入…', 'Importing…'), undefined, 'import');
-          view.loading(kind === 'zip' ? t('解包中…', 'Unpacking…') : t('读取文件夹…', 'Reading folder…'));
+        const importView = {
+          loading(label) { sourceTitle.textContent = label; sourceHint.textContent = ''; },
+          note(title, detail, bad) {
+            staged = null; completed.clear(); paintSource();
+            sourceHint.textContent = [title, detail].filter(Boolean).join('：');
+            dropZone.classList.toggle('bad', Boolean(bad));
+          },
+          result(result) {
+            if (disposed) { cancelOwnedImport(result.token); return; }
+            activeImportToken = result.token;
+            staged = result; completed.clear(); dropZone.classList.remove('bad');
+            showAdaptation(null); paintSource();
+            if (!(result.models?.length || result.packs?.length)) {
+              sourceHint.textContent = result.problems?.map(p => p.reason).join('；') || t('未找到 .model3.json 或 figure.json', 'No .model3.json or figure.json found');
+            }
+          },
+        };
+
+        function clearSource() {
+          staged = null; completed.clear(); showAdaptation(null); paintSource();
+          dropZone.classList.remove('bad');
+        }
+
+        async function stageZip(file) {
+          if (state.busy || disposed) return;
+          if (file.size > MAX_MB * 1048576) { importView.note(t('ZIP 太大', 'ZIP too large'), t('请解压后选择文件夹', 'Extract it and choose the folder'), true); return; }
+          clearSource(); setBusy(true, t('读取 ZIP…', 'Reading ZIP…'), undefined, 'import');
+          importView.loading(t('解包中…', 'Unpacking…'));
           try {
-            const r = await ctx.invoke('importStage', [toBase64(bytes), kind]);
-            view.result(r);
-          } catch (e) {
-            await ctx.invoke('importCancel', []).catch(() => {});
-            view.note(t('导入失败', 'Import failed'), text(e), true);
-          } finally { setBusy(false); }
+            const bytes = await file.arrayBuffer();
+            if (disposed) return;
+            if (bytes.byteLength > MAX_MB * 1048576) throw new Error(t('ZIP 超过 32 MB，请解压后导入文件夹', 'ZIP exceeds 32 MB; import the extracted folder'));
+            importView.result(await ctx.invoke('importStage', [toBase64(bytes), 'zip']));
+          } catch (error) { if (!disposed) importView.note(t('导入失败', 'Import failed'), text(error), true); }
+          finally { setBusy(false); }
         }
 
         async function stageFolder(files, view) {
+          if (state.busy || disposed) return;
           const picked = packFiles(files, 3);
-          if (!picked.length) {
-            view.note(t('这里没有模型包', 'No model pack here'), t('没有找到 .model3.json，也没有 figure.json。', 'No .model3.json and no figure.json.'), false);
-            return;
-          }
-          if (state.busy) return;
-          setBusy(true, t('导入…', 'Importing…'), undefined, 'import');
+          if (!picked.length) { view.note(t('这里没有模型包', 'No model pack here'), t('没有找到 .model3.json 或 figure.json', 'No .model3.json or figure.json found'), false); return; }
+          if (picked.length > 20000 || picked.reduce((n, f) => n + (Number(f.file.size) || 0), 0) > 512 * 1048576) { view.note(t('目录过大', 'Folder too large'), t('请改用粘贴本机目录路径', 'Paste its local directory path instead'), true); return; }
+          clearSource(); setBusy(true, t('读取文件夹…', 'Reading folder…'), undefined, 'import');
           view.loading(t('读取文件夹…', 'Reading folder…'));
+          let token;
           try {
-            const { token } = await ctx.invoke('importBegin', []);
-            let batch = [];
-            let bytes = 0;
-            for (const f of picked) {
-              const b64 = toBase64(await f.file.arrayBuffer());
-              batch.push({ path: f.path, b64 });
-              bytes += b64.length;
-              if (bytes > 6 * 1048576) {
-                await ctx.invoke('importAppend', [token, batch]);
-                batch = []; bytes = 0;
+            token = (await ctx.invoke('importBegin', [])).token;
+            activeImportToken = token;
+            let batch = [], bytes = 0;
+            const flush = async () => { if (batch.length) { await ctx.invoke('importAppend', [token, batch]); batch = []; bytes = 0; } };
+            for (const item of picked) {
+              if (disposed) return;
+              if (item.file.size > 4 * 1048576 && typeof item.file.slice === 'function') {
+                await flush();
+                for (let offset = 0; offset < item.file.size; offset += 2 * 1048576) {
+                  const data = await item.file.slice(offset, offset + 2 * 1048576).arrayBuffer();
+                  if (disposed) return;
+                  await ctx.invoke('importAppendChunk', [token, {path:item.path,offset,total:item.file.size,b64:toBase64(data)}]);
+                }
+              } else {
+                const data = await item.file.arrayBuffer();
+                if (disposed) return;
+                const b64 = toBase64(data); batch.push({path:item.path,b64}); bytes += b64.length;
+                if (bytes >= 4 * 1048576) await flush();
               }
             }
-            if (batch.length) await ctx.invoke('importAppend', [token, batch]);
-            const r = await ctx.invoke('importFinish', [token, true]);
-            view.result(r);
-          } catch (e) {
-            await ctx.invoke('importCancel', []).catch(() => {});
-            view.note(t('导入失败', 'Import failed'), text(e), true);
-          } finally { setBusy(false); }
+            await flush();
+            if (!disposed) view.result(await ctx.invoke('importFinish', [token, true]));
+          } catch (error) { if (!disposed) view.note(t('导入失败', 'Import failed'), text(error), true); if (token) cancelOwnedImport(token); }
+          finally { if (disposed && token) cancelOwnedImport(token); setBusy(false); }
         }
 
-        function openImport() {
-          if (state.busy || !ensureNotice()) return;
-          if (importModal) { importModal.remove(); importModal = null; }
+        async function importPaths(paths) {
+          if (state.busy || disposed || !paths.length) return;
+          clearSource();
+          setBusy(true, t('读取…', 'Reading…'), undefined, 'import');
+          importView.loading(t('识别模型…', 'Recognizing model…'));
+          try { const result = await ctx.invoke('importPaths', [paths]); if (!disposed) importView.result(result); }
+          catch (e) { if (!disposed) importView.note(t('导入失败', 'Import failed'), text(e), true); }
+          finally { setBusy(false); }
+        }
 
-          importModal = el('div', 'l2d-modal');
-          accessibleModal(importModal, t('导入模型包', 'Import a model pack'));
-          const card = el('div', 'l2d-modal-card l2d-import');
-          const head2 = el('div', 'l2d-modal-head');
-          head2.appendChild(el('div', 'l2d-modal-title', t('导入模型包', 'Import a model pack')));
-          card.appendChild(head2);
-          card.appendChild(el('div', 'l2d-import-lead', t(
-            '选 zip 或文件夹。Live2D 模型会打包，打好的包会直接安装。',
-            'Pick a zip or folder: models get packed, finished packs get installed.',
-          )));
-
-          const actions = el('div', 'l2d-import-actions');
-          const zipBtn = el('button', 'l2d-btn primary', t('选择 zip 文件', 'Choose zip'));
-          const dirBtn = el('button', 'l2d-btn', t('选择文件夹', 'Choose folder'));
-          actions.append(zipBtn, dirBtn);
-          card.appendChild(actions);
-          card.appendChild(el('div', 'l2d-import-hint', t('也可以直接拖进来。', 'You can also drop it in.')));
-
-          const body = el('div', 'l2d-import-body');
-          card.appendChild(body);
-
-          const foot2 = el('div', 'l2d-modal-actions');
-          const cancel = el('button', 'l2d-btn', t('取消', 'Cancel'));
-          foot2.appendChild(cancel);
-          card.appendChild(foot2);
-
-          const zipInput = document.createElement('input');
-          zipInput.type = 'file';
-          zipInput.accept = '.zip,application/zip';
-          zipInput.hidden = true;
-          const dirInput = document.createElement('input');
-          dirInput.type = 'file';
-          dirInput.webkitdirectory = true;
-          dirInput.hidden = true;
-          card.append(zipInput, dirInput);
-
-          const view = {
-            loading(label) {
-              body.replaceChildren();
-              const row = el('div', 'l2d-import-loading');
-              row.append(el('span', 'l2d-spinner on'), el('span', null, label));
-              body.appendChild(row);
-            },
-            note(title, detail, bad) {
-              body.replaceChildren();
-              body.appendChild(el('div', 'l2d-import-note' + (bad ? ' bad' : ''), title));
-              if (detail) body.appendChild(el('div', 'l2d-hint', detail));
-            },
-            result(r) {
-              body.replaceChildren();
-              const packs = r.packs ?? [];
-              const models = r.models ?? [];
-              const problems = r.problems ?? [];
-              if (!packs.length && !models.length) {
-                body.appendChild(el('div', 'l2d-import-note', t('这里没有模型包', 'No model pack here')));
-                for (const p of problems) body.appendChild(el('div', 'l2d-hint', `${p.dir || '.'} · ${p.reason}`));
-                return;
-              }
-
-              if (models.length) {
-                body.appendChild(el('div', 'l2d-import-note', t(`Live2D 模型 ${models.length} 个`, `${models.length} model(s)`)));
-                for (const m of models) {
-                  const row = el('div', 'l2d-packrow');
-                  row.appendChild(el('div', 'l2d-packrow-empty', t('模型', 'model')));
-                  const info = el('div', 'l2d-packrow-info');
-                  info.appendChild(el('div', 'l2d-packrow-name', m.title));
-                  info.appendChild(el('div', 'l2d-packrow-meta',
-                    [m.dir || '.', t(`${m.files} 个文件`, `${m.files} files`), `${(m.bytes / 1048576).toFixed(1)} MB`].join(' · ')));
-                  info.appendChild(el('div', 'l2d-packrow-tag', t('打包后可以改名字和参数，再安装', 'pack first, edit, then install')));
-                  row.appendChild(info);
-                  const go = el('button', 'l2d-btn sm primary', t('打包', 'Pack'));
-                  go.addEventListener('click', async () => {
-                    if (state.busy || !ensureNotice()) return;
-                    if (!coreReady()) { ui.toast(t('先获取 Live2D 核心组件', 'Fetch the Live2D core first'), 'bad'); return; }
-                    setBusy(true, t('打包…', 'Packing…'), undefined, 'build');
-                    go.disabled = true;
-                    go.textContent = t('打包中…', 'Packing…');
-                    try {
-                      const out = await ctx.invoke('importBuild', [r.token, m.dir, false]);
-                      for (const line of out.log ?? []) log.append(line, 'dim');
-                      log.append(t('导入模型 · ', 'Imported model · ') + m.title, 'dim');
-                      log.append(t('已排到「已打包」，可以点编辑改名或调参数', 'Packed; edit it from the pack card'), 'dim');
-                      ui.toast(t('已打包', 'Packed'), 'ok');
-                      setBusy(false);
-                      closeImport();
-                      await refresh();
-                    } catch (e) {
-                      ui.toast(text(e), 'bad');
-                      go.disabled = false;
-                      go.textContent = t('打包', 'Pack');
-                    } finally { setBusy(false); }
-                  });
-                  row.appendChild(go);
-                  body.appendChild(row);
-                }
-              }
-
-              if (packs.length) {
-                body.appendChild(el('div', 'l2d-import-note', t(`已打好的包 ${packs.length} 个`, `${packs.length} finished pack(s)`)));
-                for (const p of packs) {
-                  const row = el('div', 'l2d-packrow');
-                  if (p.thumb) {
-                    const img = document.createElement('img');
-                    img.src = p.thumb;
-                    img.alt = '';
-                    row.appendChild(img);
-                  } else {
-                    row.appendChild(el('div', 'l2d-packrow-empty'));
-                  }
-                  const info = el('div', 'l2d-packrow-info');
-                  info.appendChild(el('div', 'l2d-packrow-name', zh ? p.nameZh : p.nameEn));
-                  const meta = [
-                    p.id,
-                    p.version ? `v${p.version}` : '',
-                    `${(p.bytes / 1048576).toFixed(1)} MB`,
-                    t(`${p.axes} 选项`, `${p.axes} axes`),
-                    t(`${p.words} 词`, `${p.words} words`),
-                  ].filter(Boolean).join(' · ');
-                  info.appendChild(el('div', 'l2d-packrow-meta', meta));
-                  if (p.installed) {
-                    info.appendChild(el('div', 'l2d-packrow-tag', t(`已装 ${p.installed}，安装会替换`, `installed ${p.installed}, will replace`)));
-                  }
-                  row.appendChild(info);
-                  const go = el('button', 'l2d-btn sm primary', t('安装', 'Install'));
-                  go.addEventListener('click', async () => {
-                    if (state.busy || !ensureNotice()) return;
-                    let replace = [];
-                    if (p.installed) {
-                      const ok = await ui.confirm({
-                        title: t('替换已装的这份？', 'Replace the installed pack?'),
-                        body: t(`「${zh ? p.nameZh : p.nameEn}」已经装过，安装会用新的覆盖它（旧的那份先备份）。`, 'A pack with this id is installed; the new one replaces it after a backup.'),
-                        danger: true,
-                      });
-                      if (!ok) return;
-                      replace = [p.id];
-                    }
-                    go.disabled = true;
-                    setBusy(true, t('安装…', 'Installing…'), undefined, 'install');
-                    go.textContent = t('安装中…', 'Installing…');
-                    try {
-                      let out = await ctx.invoke('importInstall', [r.token, [p.dir], replace]);
-                      if (out?.conflicts) {
-                        const ok = await ui.confirm({ title: t('替换已装的这份？', 'Replace installed pack?'), body: t('同名形象已存在，旧包会先备份。', 'An installed pack now exists. It will be backed up before replacement.'), danger: true });
-                        if (ok) out = await ctx.invoke('importInstall', [r.token, [p.dir], out.conflicts]);
-                        else return;
-                      }
-                      if (out && out.conflicts) {
-                        ui.toast(t('同名已存在', 'Id already installed'), 'bad');
-                        go.disabled = false;
-                        go.textContent = t('安装', 'Install');
-                        return;
-                      }
-                      ui.toast(t('已导入', 'Imported'), 'ok');
-                      log.append(t('导入 · ', 'Imported · ') + p.id, 'dim');
-                      setBusy(false);
-                      closeImport();
-                      await refresh();
-                    } catch (e) {
-                      ui.toast(text(e), 'bad');
-                      go.disabled = false;
-                      go.textContent = t('安装', 'Install');
-                    } finally { setBusy(false); }
-                  });
-                  row.appendChild(go);
-                  body.appendChild(row);
-                }
-              }
-
-              for (const p of problems) body.appendChild(el('div', 'l2d-hint', `${p.dir || '.'} · ${p.reason}`));
-            },
-          };
-
-          zipBtn.addEventListener('click', () => zipInput.click());
-          dirBtn.addEventListener('click', () => dirInput.click());
-          dirInput.addEventListener('change', async () => {
-            const files = [...(dirInput.files ?? [])].map((f) => ({ path: f.webkitRelativePath || f.name, file: f }));
-            if (!files.length) return;
-            await stageFolder(files, view);
-          });
-          zipInput.addEventListener('change', async () => {
-            const f = zipInput.files?.[0];
-            if (!f) return;
-            await stageBytes(await f.arrayBuffer(), 'zip', view);
-          });
-
-          // 拖入
-          const over = (on) => card.classList.toggle('drop', on);
-          card.addEventListener('dragover', (e) => { e.preventDefault(); over(true); });
-          card.addEventListener('dragleave', (e) => { if (!card.contains(e.relatedTarget)) over(false); });
-          card.addEventListener('drop', async (e) => {
-            e.preventDefault();
-            over(false);
-            if (state.busy) return;
-            const dt = e.dataTransfer;
-            if (!dt) return;
-            const entries = [...(dt.items ?? [])]
-              .filter((i) => i.kind === 'file')
-              .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
-              .filter(Boolean);
-            if (entries.length === 1 && entries[0].isFile) {
-              const f = await new Promise((ok, bad) => entries[0].file(ok, bad));
-              if (f.name.toLowerCase().endsWith('.zip')) {
-                await stageBytes(await f.arrayBuffer(), 'zip', view);
-                return;
-              }
+        function textPaths(value) {
+          const paths = [];
+          for (let path of String(value || '').split(/\r?\n/)) {
+            path = path.trim().replace(/^["']|["']$/g, '');
+            if (/^file:/i.test(path)) {
+              try {
+                const url = new URL(path);
+                if (url.hostname && url.hostname !== 'localhost') continue;
+                path = decodeURIComponent(url.pathname);
+                if (/^\/[a-z]:\//i.test(path)) path = path.slice(1);
+              } catch { continue; }
             }
-            const files = [];
-            for (const entry of entries) {
-              if (entry.isFile) files.push({ path: entry.name, file: await new Promise((ok, bad) => entry.file(ok, bad)) });
-              else if (entry.isDirectory) files.push(...await droppedFiles(entry, entry.name, 3));
-            }
-            if (!files.length) {
-              const plain = [...(dt.files ?? [])].map((f) => ({ path: f.name, file: f }));
-              if (plain.length === 1 && plain[0].file.name.toLowerCase().endsWith('.zip')) {
-                await stageBytes(await plain[0].file.arrayBuffer(), 'zip', view);
-                return;
-              }
-              view.note(t('没读到内容', 'Nothing to read'), t('换一个文件夹试试。', 'Try another folder.'), true);
-              return;
-            }
-            await stageFolder(files, view);
-          });
+            if (!/[\x00-\x1f]/.test(path) && (/^[a-z]:[\\/]/i.test(path) || path.startsWith('/'))) paths.push(path);
+          }
+          return [...new Set(paths)].slice(0, 16);
+        }
 
-          cancel.addEventListener('click', closeImport);
-          importModal.addEventListener('click', (e) => { if (e.target === importModal) closeImport(); });
-          importModal.appendChild(card);
-          document.body.appendChild(importModal);
-          zipBtn.focus();
+        async function importFiles(files) {
+          if (state.busy || disposed || !files.length) return;
+          const local = files.map(f => f.path || f.file.path).filter(p => /^[a-z]:[\\/]/i.test(p || '') || p?.startsWith('/'));
+          if (local.length === files.length) return importPaths(local);
+          if (files.length === 1 && /\.zip$/i.test(files[0].path)) return stageZip(files[0].file);
+          if (files.length === 1 && /\.json$/i.test(files[0].path)) {
+            importView.note(t('缺少同目录资源', 'Sibling files required'), t('请选择入口文件的完整路径，或拖入整个模型文件夹', 'Choose the entry file by its local path, or drop the whole model folder'), true); return;
+          }
+          return stageFolder(files, importView);
+        }
+
+        async function buildSources() {
+          if (state.busy || !staged || !ensureNotice()) return;
+          if (staged.models?.length && !coreReady()) { ui.toast(t('先获取 Live2D 核心组件', 'Fetch the Live2D core first'), 'bad'); return; }
+          const pending = [
+            ...(staged.models ?? []).map(item => ({ ...item, method: 'importBuild' })),
+            ...(staged.packs ?? []).map(item => ({ ...item, method: 'importKeep' })),
+          ];
+          const token = staged.token;
+          setBusy(true, t('打包…', 'Packing…'), undefined, 'build');
+          let failed = 0;
+          for (const item of pending) {
+            if (disposed) break;
+            const key = item.method + ':' + item.dir;
+            if (completed.has(key)) continue;
+            try {
+              const result = await ctx.invoke(item.method, [token, item.dir, false]);
+              completed.add(key);
+              for (const line of result.log ?? []) log.append(line, 'dim');
+              if (result.adaptation) showAdaptation(result.adaptation);
+              if (result.warn) log.append('! ' + result.warn, 'warn');
+            } catch (e) {
+              failed++; log.append(`! ${item.title || item.id || item.dir} · ${text(e)}`, 'bad');
+            }
+          }
+          try { await refresh(); }
+          catch (e) { log.append('! ' + text(e), 'warn'); }
+          finally { setBusy(false); }
+          if (disposed) { ctx.invoke('importCancel', []).catch(() => {}); return; }
+          sourceHint.textContent = failed
+            ? t(`${failed} 项失败；再次点击只重试未完成项，详情见日志`, `${failed} failed; click again to retry unfinished items; see the log`)
+            : t('已加入下方卡片，可编辑或安装', 'Added below; edit or install');
+          dropZone.classList.toggle('bad', failed > 0);
+          ui.toast(failed ? t('部分打包失败', 'Some items failed') : t('打包完成', 'Packing complete'), failed ? 'bad' : 'ok');
         }
 
         function accessibleModal(node, title) {
@@ -934,27 +832,86 @@ export default {
           node.setAttribute('aria-modal', 'true');
           node.setAttribute('aria-label', title);
           node.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && !state.busy) { e.preventDefault(); node === modal ? closeEdit() : closeImport(); }
+            if (e.key === 'Escape' && !state.busy) { e.preventDefault(); closeEdit(); }
             if (e.key === 'Tab') {
               const items = [...node.querySelectorAll('button, input, textarea, select')].filter((n) => !n.disabled && !n.hidden);
               if (!items.length) return;
               const next = e.shiftKey ? items.at(-1) : items[0];
-              if (document.activeElement === (e.shiftKey ? items[0] : items.at(-1))) { e.preventDefault(); next.focus(); }
+              if (doc.activeElement === (e.shiftKey ? items[0] : items.at(-1))) { e.preventDefault(); next.focus(); }
             }
           });
         }
 
         // ---------------- 绑定 ----------------
-        path.addEventListener('input', () => { state.dir = path.value.trim(); showAdaptation(null); });
-        path.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' && state.dir) {
-            if (state.busy) return;
-            ctx.invoke('setDir', [state.dir]).catch((err) => ui.toast(text(err), 'bad'));
-          }
+        // Browser inputs are owned by the Coo window and open its native system dialogs.
+        chooseFolder.addEventListener('click', () => { if (!state.busy) folderInput.click(); });
+        chooseZip.addEventListener('click', () => { if (!state.busy) zipInput.click(); });
+        folderInput.addEventListener('change', async () => {
+          if (disposed || state.busy) return;
+          const files = [...(folderInput.files ?? [])].map(file => ({ path: file.webkitRelativePath || file.name, file }));
+          if (!files.length) return;
+          try { await stageFolder(files, importView); }
+          catch (e) { importView.note(t('导入失败', 'Import failed'), text(e), true); }
+          finally { folderInput.value = ''; }
         });
-        scan.addEventListener('click', () => run('scan'));
-        pack.addEventListener('click', () => run('build'));
-        importBtn.addEventListener('click', openImport);
+        zipInput.addEventListener('change', async () => {
+          if (disposed || state.busy) return;
+          try { await importFiles([...(zipInput.files ?? [])].map(file => ({ path: file.name, file }))); }
+          catch (e) { importView.note(t('导入失败', 'Import failed'), text(e), true); }
+          finally { zipInput.value = ''; }
+        });
+        pack.addEventListener('click', buildSources);
+        dropZone.addEventListener('click', () => dropZone.focus({ preventScroll: true }));
+        dropZone.addEventListener('paste', async (event) => {
+          event.preventDefault();
+          if (state.busy) return;
+          const data = event.clipboardData;
+          const clipboardFiles = [...(data?.files ?? [])];
+          const clipboardText = data?.getData('text/plain') || data?.getData('text/uri-list');
+          try {
+            let paths = textPaths(clipboardText);
+            if (!paths.length) {
+              setBusy(true, t('读取剪贴板…', 'Reading clipboard…'), undefined, 'import');
+              try { paths = (await ctx.invoke('clipboard', [])).paths ?? []; }
+              catch (e) { if (!clipboardFiles.length) throw e; }
+              finally { setBusy(false); }
+            }
+            if (disposed) return;
+            if (paths.length) return await importPaths(paths);
+            const files = clipboardFiles.map(file => ({ path: file.name, file }));
+            if (files.length) return await importFiles(files);
+            importView.note(t('未读到模型', 'No model found'), t('请复制文件、文件夹，或其完整路径后粘贴', 'Copy files, a folder, or their full local path, then paste'), false);
+          } catch (e) { importView.note(t('粘贴失败', 'Paste failed'), text(e), true); }
+        });
+        dropZone.addEventListener('dragover', event => { event.preventDefault(); if (!state.busy) dropZone.classList.add('over'); });
+        dropZone.addEventListener('dragleave', event => { if (!dropZone.contains(event.relatedTarget)) dropZone.classList.remove('over'); });
+        dropZone.addEventListener('drop', async event => {
+          event.preventDefault(); dropZone.classList.remove('over');
+          if (state.busy || disposed) return;
+          const data = event.dataTransfer;
+          if (!data) return;
+          // Capture all handles synchronously; the drag data store closes after this event.
+          const paths = textPaths(data.getData('text/plain') || data.getData('text/uri-list'));
+          const entries = [...(data.items ?? [])].filter(item => item.kind === 'file').map(item => item.webkitGetAsEntry?.()).filter(Boolean);
+          const plain = [...(data.files ?? [])].map(file => ({path:file.name,file}));
+          if (paths.length) return importPaths(paths);
+          setBusy(true, t('读取拖入内容…', 'Reading dropped files…'), undefined, 'import');
+          try {
+            const files = [];
+            for (const entry of entries) {
+              if (disposed) return;
+              if (entry.isDirectory) files.push(...await droppedFiles(entry, entry.name, 3));
+              else files.push({path:entry.name,file:await new Promise((ok,bad)=>entry.file(ok,bad))});
+            }
+            setBusy(false);
+            if (!disposed) {
+              const captured = files.length ? files : plain;
+              if (!captured.length) throw new Error(t('未读到文件，请拖入模型文件夹或 ZIP', 'No files found; drop a model folder or ZIP'));
+              await importFiles(captured);
+            }
+          } catch (error) { if (!disposed) importView.note(t('导入失败', 'Import failed'), text(error), true); }
+          finally { setBusy(false); }
+        });
         clearAll.addEventListener('click', async () => {
           if (state.busy) return;
           const ok = await ui.confirm({
@@ -975,25 +932,50 @@ export default {
           } finally { setBusy(false); }
         });
 
+        function stopResume() {
+          if (resumeHandle?.dispose) resumeHandle.dispose();
+          else if (resumeHandle) win.clearInterval(resumeHandle);
+          resumeHandle = null;
+        }
+        async function pollResume() {
+          if (disposed || !resuming || resumePolling) return;
+          resumePolling = true;
+          try {
+            const remote = await ctx.invoke('state', []);
+            if (disposed || remote.busy) return;
+            resuming = false; stopResume(); setBusy(false);
+            await refresh();
+            const completed = resumePhase && remote.steps?.[resumePhase];
+            if (completed?.phase === 'error') say(completed.hint, true);
+          } catch (error) { if (!disposed) say(t('等待后台任务结果…', 'Waiting for the background task…')); }
+          finally { resumePolling = false; }
+        }
+
         // Host calls the returned disposer when switching panels.
         setBusy(true, t('读取…', 'Loading…'));
         Promise.all([loadCore(), ctx.invoke('state', [])]).then(async ([, initial]) => {
           if (disposed) return;
           notice = initial.notice;
           version = initial.version;
-          showAdaptation(initial.scan?.adaptation);
+
           noticeDetails.open = !notice?.acknowledged;
           paintNotice();
           for (const line of initial.log ?? []) log.append(line, 'dim');
           await refresh();
-        }).catch((e) => say(text(e), true)).finally(() => { setBusy(false); paintNotice(); });
+          if (initial.busy) {
+            resuming = true;
+            resumePhase = Object.keys(initial.steps ?? {}).find(key => initial.steps[key].phase === 'loading');
+            setBusy(true, t('后台任务处理中…', 'Background task running…'), undefined, 'build');
+            resumeHandle = ctx.interval ? ctx.interval(pollResume, 800) : win.setInterval(pollResume, 800);
+          }
+        }).catch((e) => { if (!disposed) say(text(e), true); }).finally(() => { if (!resuming) setBusy(false); paintNotice(); });
         return { dispose() {
           if (disposed) return;
           disposed = true;
           clearInterval(ticker);
+          stopResume();
           modal?.remove();
-          importModal?.remove();
-          ctx.invoke('importCancel', []).catch(() => {});
+          cancelOwnedImport();
           ctx.root.removeAttribute('aria-busy');
         } };
       },
