@@ -49,7 +49,7 @@ const root = document.getElementById('root');
 let body = null, dead = false, bounds = { W: 0, H: 0, floorY: 0, S: .42 }, desk = null;
 /** The stage's size from the page, with the windows when there are any. */
 const setBounds = (b) => { bounds = desk ? { ...b, ...desk } : { ...b }; };
-let events = [], sounds = [];
+let events = [], sounds = [], reportPreview=false;
 const post = (m) => parent.postMessage(m, '*');
 function fail(err) {
   if (dead) return;
@@ -99,10 +99,16 @@ addEventListener('message', async (e) => {
       globalThis.__l2dPreview?.play(m.resource,m.word,m.bindings,m.raw);
     } else if (m.t === 'preview-stop' && body) {
       globalThis.__l2dPreview?.stop();
+    } else if (m.t === 'preview-wardrobe' && body) {
+      globalThis.__l2dPreview?.wardrobe(m.groups,m.picks);
+      reportPreview=true;
+    } else if (m.t === 'preview-info' && body) {
+      reportPreview=true;
     } else if (!body) {
       // calls that come before the body is ready have nothing to act on
     } else if (m.t === 'tick') {
       body.step(m.dt);
+      if(reportPreview){reportPreview=false;post({t:'preview-info',picks:globalThis.__l2dWardrobe?.(),values:globalThis.__l2dWardrobeValues?.(),quality:globalThis.__l2dRenderQuality?.()});}
       post({ t: 'frame', layout: body.layout(), events, sounds, z: body.z ?? null });
       events = []; sounds = [];
     } else if (m.t === 'scheme') {

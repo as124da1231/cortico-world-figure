@@ -29,6 +29,7 @@ import {ManualSessions,LIBRARY,writeNativePack} from './manual.ts';
 import {findModels,inspectNative,nativeConfig} from '../workbench/tools/native-catalog.mjs';
 import {packFingerprint} from './pack-fingerprint.ts';
 import { qualityPolicy } from '../workbench/pack/backends/render-quality.js';
+import {wardrobeConfig} from '../workbench/pack/backends/wardrobe.js';
 import {
   CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
   coreState, ensureCore,
@@ -275,7 +276,7 @@ export class Live2dWorld implements World {
     if (method === 'manualClose') { await this.manual.close(String(args[0])); return {ok:true}; }
     if (method === 'manualKeepAlive') { this.manual.get(String(args[0])); return {ok:true}; }
     if (method === 'manualOpen' || method === 'manualOpenBuild') return this.openManual(method,args);
-    if (method === 'manualSave') return this.saveManual(String(args[0]),args[1] as any[]);
+    if (method === 'manualSave') return this.saveManual(String(args[0]),args[1] as any[],args[2] as any[]|undefined);
     if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() };
     if (method === 'assistReject') return this.automation.reject(String(args[0] || ''));
     if (method === 'assistAnalyze') {
@@ -527,7 +528,7 @@ export class Live2dWorld implements World {
     }
   }
 
-  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; modelFile?: string; fingerprint?: string; signal?: AbortSignal } = {}): Promise<unknown> {
+  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; wardrobe?:any[]; modelFile?: string; fingerprint?: string; signal?: AbortSignal } = {}): Promise<unknown> {
     opts.signal?.throwIfAborted();
     this.guard(dir);
     this.requireNotice();
@@ -587,6 +588,7 @@ export class Live2dWorld implements World {
       const found = await findModels(opts.modelFile ? join(dir,opts.modelFile) : dir);
       const model = found.models.find((m:any)=>m.kind==='live2d');
       if(model){const catalog=await inspectNative(model);if(opts.fingerprint && catalog.fingerprint!==opts.fingerprint)throw Error('模型素材已变化，请重新打开编辑');await writeFile(join(finalDir,LIBRARY),JSON.stringify({version:1,catalog,bindings:(opts.native as any)?.bindings||[]}));}
+      if(model&&opts.wardrobe)await writeNativePack(finalDir,await inspectNative(model),(opts.native as any)?.bindings||[],false,opts.wardrobe);
       const bytes = await dirSize(finalDir);
       const manifest = JSON.parse(await readFile(join(finalDir, 'figure.json'), 'utf8'));
       const words = Array.isArray(manifest.vocab) ? manifest.vocab.length : 0;
@@ -678,7 +680,7 @@ export class Live2dWorld implements World {
       const rec=this.state.builds?.find(b=>b.id===String(args[0]));
       if(!rec?.manualAvailable)throw Error('请重新导入模型以编辑原生动作');
       const library=JSON.parse(await readFile(join(rec.packDir,LIBRARY),'utf8'));
-      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id,requestedToken);
+      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id,requestedToken,library.wardrobe||[]);
     }
     const token=String(args[0]),dir=String(args[1]);
     const paths=await this.importer.preserveForAutomation(token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
@@ -697,23 +699,25 @@ export class Live2dWorld implements World {
     }catch(e){await rm(scratch,{recursive:true,force:true});throw e;}
   }
 
-  private async saveManual(token:string,values:any[]) {
+  private async saveManual(token:string,values:any[],groups?:any[]) {
     const receipt=this.manual.saved(token);if(receipt)return receipt;
     this.requireNotice();const {session,bindings}=await this.manual.validate(token,values);
+    const previous=await readFile(join(session.pack,LIBRARY),'utf8').then(s=>JSON.parse(s).wardrobe||[]).catch(()=>[]);
+    const wardrobe=wardrobeConfig(session.catalog,groups??previous,bindings).groups;
     session.saving=true;
     try{
     if(session.source){
       const current=await inspectNative(session.source);
       if(current.fingerprint!==session.catalog.fingerprint)throw Error('模型素材已变化，请重新打开编辑');
-      const result=await this.doBuild(session.source.dir,{remember:false,modelFile:session.source.file,native:nativeConfig(current,bindings),fingerprint:current.fingerprint});
+      const result=await this.doBuild(session.source.dir,{remember:false,modelFile:session.source.file,native:nativeConfig(current,bindings),wardrobe,fingerprint:current.fingerprint});
       this.manual.complete(token,result);return result;
     }
     const parent=join(this.workRoot(),'builds','manual-'+randomUUID()),target=join(parent,'pack');
     let committed=false;
     try{
       await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
-      for(const file of ['live2d.js','native-actions.js','render-config.js','render-quality.js','role-values.js','soullink.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
-      await writeNativePack(target,session.catalog,bindings);
+      for(const file of ['live2d.js','native-actions.js','wardrobe.js','render-config.js','render-quality.js','role-values.js','soullink.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
+      await writeNativePack(target,session.catalog,bindings,false,wardrobe);
       if(await packFingerprint(session.pack)!==session.hash)throw Error('形象包已变化，请重新打开编辑');
       const old=this.state.builds?.find(b=>b.id===session.buildId);if(!old)throw Error('原打包产物已移除');
       const rec={...old,packDir:target,bytes:await dirSize(target),words:JSON.parse(await readFile(join(target,'figure.json'),'utf8')).vocab.length,at:Date.now()};

@@ -97,3 +97,10 @@ test('expired leases are removed, saving leases defer close, and cancelled open 
  const id='12345678-1234-1234-1234-123456789abc';await sessions.close(id);await assert.rejects(sessions.open(pack,catalog,[],undefined,undefined,id),/取消/);assert.equal(sessions.sessions.size,0);
  const next='23456789-1234-1234-1234-123456789abc';const opening=sessions.open(pack,catalog,[],undefined,undefined,next);await sessions.close(next);await assert.rejects(opening,/取消/);assert.equal(sessions.sessions.size,0);
 });
+
+test('wardrobe saves into host axes and runtime data; clearing axes keeps the resource library and the same card',async t=>{
+ const {world,token}=await editableWorld(t),groups=[{id:'lookarms',name:'手部',options:[{id:'raised',name:'抬起',resource:'wave'}]}];
+ await world.saveManual(token,binding,groups);let pack=world.state.builds[0].packDir,m=JSON.parse(await readFile(join(pack,'figure.json')));assert.equal(m.axes[0].id,'lookarms');assert.deepEqual(m.axes[0].options.map(o=>o.id),['default','raised']);
+ assert.match(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/wardrobe:.*"axisOffset":0/);const library=JSON.parse(await readFile(join(pack,LIBRARY)));assert.equal(library.wardrobe[0].options[0].resource,'wave');
+ const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'手部');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes,[]);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
+});

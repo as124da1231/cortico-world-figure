@@ -30,6 +30,7 @@ import { roleValue } from './role-values.js';
 import { createAdaptiveRenderer, resizeMaskBuffers } from './render-config.js';
 import { graphicsLimits, displayPixels, resolutionPlan, texturePlan } from './render-quality.js';
 import { createNativeActions, applyNativeValues } from './native-actions.js';
+import {createWardrobe,wardrobeConfig} from './wardrobe.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
@@ -419,6 +420,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
     partIndex.set(model._model.getPartId(i).getString(), i);
   }
   let native = profile.native?.version === 1 ? createNativeActions(profile.native) : null;
+  const wardrobe=createWardrobe(model._model,paramIndex,partIndex,{parts:{...profile.parts?.base,...profile.clean?.parts},params:profile.clean?.params});
+  wardrobe.configure(profile.wardrobe);wardrobe.scheme(opts.scheme);
   let previewState = null;
   const nativeParams = new Set(), nativeParts = new Map();
   for (const resource of profile.native?.resources ?? []) {
@@ -994,11 +997,13 @@ export async function createLive2DBody(base, opts, entry, kit) {
         try { nativeValues = native.update(frame, dt); applyNativeValues(nativeValues.filter(v => !nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex); }
         catch (error) { console.warn('[l2d] Native update failed; generic behavior retained', error); }
       }
+      wardrobe.apply();
       model._model.saveParameters();            // ← 必须在 physics 之前
       try { model._physics?.evaluate(model._model, dt); } catch { /* 物理失败不致命 */ }
       if (nativeValues.length) applyNativeValues(nativeValues.filter(v => nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex);
       try { model._pose?.updateParameters(model._model, dt); } catch { /* 姿势失败不致命 */ }
       applyCleanParams();
+      wardrobe.apply();
       model._model.update();
       render();
 
@@ -1063,6 +1068,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
   globalThis.__l2dExpr = figure.__expr;
 
   const body = kit.createBody(host, { figure, words, css: 'foreignObject{pointer-events:none}' });
+  body.setScheme=async id=>{wardrobe.scheme(id);};
+  globalThis.__l2dWardrobe=()=>wardrobe.state();
+  if(opts.preview)globalThis.__l2dWardrobeValues=()=>wardrobe.inspect();
   if (native) {
     const doBase = body.do.bind(body);
     body.do = (word) => { const accepted = doBase(word); if (accepted !== false) native.trigger(word); return accepted; };
@@ -1090,6 +1098,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
     };
   }
   if (opts.preview) globalThis.__l2dPreview = {
+    wardrobe(groups,picks){
+      wardrobe.configure(wardrobeConfig({resources:(profile.native?.resources||[]).map(r=>({...r,raw:r.data}))},groups||[]));wardrobe.select(picks||{});
+    },
     play(resource,word,bindings=[],raw=false) {
       performance?.dispose(); performance=performanceFactory?.(profile,console.warn) || null;
       previewState={word:word || 'neutral',raw};

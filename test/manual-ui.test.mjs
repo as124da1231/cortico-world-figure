@@ -10,6 +10,7 @@ async function editor(t,fail=false,opts={}){
  const ac=new w.AbortController(),calls=[],notifications=[],toasts=[];let hostConfirms=0;
  const data={token:'test',title:'Example',preview:{url:'about:blank',entry:'http://localhost/pack.js',base:'http://localhost/'},words:{expressions:['happy'],motions:[]},bindings:[],resources:[{id:'smile',kind:'expression',classification:'expression',title:'Smile'}]};
  if(opts.existing)data.buildId='pack';
+ if(opts.resources)data.resources=opts.resources;if(opts.wardrobe)data.wardrobe=opts.wardrobe;
  const ctx={root:doc.querySelector('main'),language:'zh',signal:ac.signal,notifyOnUnmount:(...args)=>notifications.push(args),guardLeave:()=>({dispose(){}}),frame:()=>({dispose(){}}),ui:{toast:(...args)=>toasts.push(args),confirm:async()=>{hostConfirms++;throw Error('Host confirmation must not be used');}},invoke:async(method,args)=>{calls.push({method,args:structuredClone(args)});if(method==='manualSave'&&opts.save)return opts.save(args);if(method==='manualOpenBuild'){if(fail)throw Error('编辑已过期，请重新打开');return data;}return {};}};
  const handle=await w.openEditor(ctx,'manualOpenBuild',['pack'],opts.onSaved||(async()=>{}));t.after(()=>handle.dispose());
  const modal=doc.querySelector('.l2d-bind-modal'),frame=doc.querySelector('iframe');
@@ -43,9 +44,21 @@ test('preview errors disable edits and save, preserve the error and can retry wi
 test('unmount registers independent close notifications and does not invoke with an aborted signal',async t=>{
  const e=await editor(t);assert(e.notifications.some(([method,args])=>method==='manualClose'&&args[0]==='test'));e.ac.abort();await Promise.resolve();assert(!e.doc.querySelector('dialog'));assert(!e.calls.some(c=>c.method==='manualClose'));
 });
+test('actions and wardrobe share one preview and save together; group defaults keep option mappings',async t=>{
+ const e=await editor(t,false,{existing:true,resources:[{id:'smile',kind:'expression',classification:'expression',title:'Smile',channels:['Parameter:Smile']},{id:'coat',kind:'expression',classification:'appearance',title:'冬装',channels:['Parameter:Coat']}]});e.dirty();const src=e.frame.src;
+ e.doc.querySelector('[role=tab]:last-child').click();const input=e.doc.querySelector('[aria-label="新装扮组名称"]');input.value='服装';input.dispatchEvent(new e.w.Event('input'));e.button('添加分组').click();
+ [...e.doc.querySelectorAll('.l2d-bind-resource')].find(b=>b.textContent.includes('冬装')).click();e.button('添加选项').click();assert.equal(e.frame.src,src);assert.match(e.doc.querySelector('.l2d-bind-summary').textContent,/1 个装扮组/);
+ e.button('恢复默认外观').click();assert.equal(e.doc.querySelectorAll('.l2d-bind-group').length,1);assert.equal(e.doc.querySelectorAll('[aria-label="服装：冬装"]').length,1);
+ e.doc.querySelector('[role=tab]').click();assert(e.button('开心已绑定'));e.button('保存绑定').click();await new Promise(r=>setTimeout(r,5));const save=e.calls.find(c=>c.method==='manualSave');assert.equal(save.args[1][0].resource,'smile');assert.equal(save.args[2][0].options[0].resource,'coat');assert.equal(e.calls.filter(c=>c.method==='manualOpenBuild').length,1);
+});
 test('confirmation Escape preserves edits; panel disposal removes a pending confirmation',async t=>{
  const e=await editor(t);e.dirty();e.button('取消').click();const event=new e.w.Event('cancel',{bubbles:true,cancelable:true});e.doc.querySelector('.l2d-bind-discard').dispatchEvent(event);await Promise.resolve();assert(e.modal.open);assert(!e.doc.querySelector('.l2d-bind-discard'));
  e.button('×').click();e.ac.abort();await Promise.resolve();assert(!e.doc.querySelector('dialog'));assert.equal(e.hostConfirms(),0);
+});
+test('previewing a candidate in a full wardrobe group stays within runtime limits and does not change its draft',async t=>{
+ const e=await editor(t,false,{resources:[{id:'coat',kind:'expression',classification:'appearance',title:'冬装',channels:['Parameter:Coat']}],wardrobe:[{id:'lookcoat',name:'服装',options:Array.from({length:16},(_,i)=>({id:'v'+i,name:'衣服'+i,resource:'coat'}))}]});
+ const sent=[];e.frame.contentWindow.postMessage=m=>sent.push(m);e.doc.querySelector('[role=tab]:last-child').click();e.doc.querySelector('.l2d-bind-resource').click();
+ const preview=sent.findLast(m=>m.t==='preview-wardrobe');assert.equal(preview.groups[0].options.length,16);assert.equal(preview.picks.lookcoat,'preview');assert.equal(e.doc.querySelectorAll('.l2d-bind-target').length,17);
 });
 test('clean and expired editors can close without a discard prompt',async t=>{
  for(const fail of [false,true]){const e=await editor(t,fail);e.button('取消').click();await Promise.resolve();assert(!e.doc.querySelector('dialog'));assert.equal(e.hostConfirms(),0);}

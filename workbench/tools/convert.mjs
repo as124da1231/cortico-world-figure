@@ -721,7 +721,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js']) {
+for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/wardrobe.js']) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);

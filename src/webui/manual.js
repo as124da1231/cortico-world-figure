@@ -18,6 +18,7 @@ async function mountBindingPreview(ctx,frame,data,alive,onStatus) {
     if(m.t==='loaded')send({t:'init',entry:data.preview.entry,base:data.preview.base,export:'createFigureBody',scheme:'',start:{x:bounds().W/2,facing:1},bounds:bounds(),language:ctx.language||'zh',theme:'light'});
     else if(m.t==='ready'&&!ready){ready=true;clearTimeout(timer);send({t:'set',state:{roam:'off'}});clock=ctx.frame(tick);onStatus('ready','');}
     else if(m.t==='error')fail(m.message||'模型预览失败');
+    else if(m.t==='preview-info')frame.dataset.previewInfo=JSON.stringify(m);
   };
   win.addEventListener('message',listener);
   frame.setAttribute('sandbox','allow-scripts');frame.src=data.preview.url;
@@ -53,25 +54,29 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   const previous=doc.activeElement;
   const requestedToken=win.crypto?.randomUUID?.();
   if(requestedToken)ctx.notifyOnUnmount?.('manualClose',[requestedToken]);
-  const modal=el('dialog','l2d-modal l2d-bind-modal');modal.setAttribute('aria-label',t('动作绑定','Action bindings'));
+  const modal=el('dialog','l2d-modal l2d-bind-modal');modal.setAttribute('aria-label',t('动作与装扮','Actions and wardrobe'));
   const card=el('div','l2d-bind-card'),head=el('div','l2d-modal-head'),heading=el('div','l2d-modal-heading');
-  heading.append(el('div','l2d-modal-title',t('动作绑定','Action bindings')),el('div','l2d-modal-sub',t('选择表情或动作，预览后绑定','Choose a target, preview a resource, then bind')));
-  const close=el('button','l2d-btn quiet l2d-modal-close','×');close.setAttribute('aria-label',t('关闭动作绑定','Close bindings'));head.append(heading,close);
+  heading.append(el('div','l2d-modal-title',t('动作与装扮','Actions and wardrobe')),el('div','l2d-modal-sub',t('选择表情或动作，预览后绑定','Choose a target, preview a resource, then bind')));
+  const close=el('button','l2d-btn quiet l2d-modal-close','×');close.setAttribute('aria-label',t('关闭动作与装扮','Close editor'));head.append(heading,close);
   const layout=el('div','l2d-bind-layout'),left=el('nav','l2d-bind-targets'),stage=el('section','l2d-bind-stage'),right=el('section','l2d-bind-resources');
   left.setAttribute('aria-label',t('绑定目标','Binding targets'));right.setAttribute('aria-label',t('原生资源','Native resources'));
   const frame=el('iframe','l2d-bind-frame');frame.title=t('模型实时预览','Live model preview');frame.setAttribute('sandbox','allow-scripts');
   const hint=el('p','l2d-bind-status',t('准备模型…','Preparing model…'));hint.setAttribute('role','status');
   const toolbar=el('div','l2d-bind-toolbar'),raw=el('button','l2d-btn sm',t('组合效果','Combined')),replay=el('button','l2d-btn sm',t('重播','Replay')),reset=el('button','l2d-btn sm',t('复位','Reset'));
   const retry=el('button','l2d-btn sm',t('重试预览','Retry preview'));retry.hidden=true;
-  toolbar.append(raw,replay,reset,retry);stage.append(frame,hint,toolbar);layout.append(left,stage,right);
+  const leftShell=el('div','l2d-bind-left'),pages=el('div','l2d-bind-pages');pages.setAttribute('role','tablist');pages.setAttribute('aria-label',t('编辑页面','Editor pages'));
+  leftShell.append(pages,left);
+  toolbar.append(raw,replay,reset,retry);stage.append(frame,hint,toolbar);layout.append(leftShell,stage,right);
   const footer=el('div','l2d-bind-footer'),summary=el('span','l2d-bind-summary',t('未绑定的项目使用通用配方','Unbound targets use generic recipes'));
   const cancel=el('button','l2d-btn',t('取消','Cancel')),save=el('button','l2d-btn primary',t('保存绑定','Save bindings'));save.disabled=true;
   const restoreAll=el('button','l2d-btn quiet sm',t('全部恢复通用','Reset all to generic'));restoreAll.disabled=true;
   footer.append(summary,restoreAll,cancel,save);card.append(head,layout,footer);modal.append(card);ctx.root.append(modal);modal.showModal();
   let closed=false,saving=false,dirty=false,data,bindings=[],word='happy',resource=null,rawMode=false,ready=false,cleanup=()=>{},serial=0,discardPrompt=null,leaseTimer,sessionValid=true,previewError='';
+  let page='actions',groups=[],picks={},groupId=null,optionId='default';const pageState={actions:{resource:null,filter:'all',search:''},wardrobe:{resource:null,filter:'all',search:''}};
+  const uid=prefix=>prefix+(win.crypto?.randomUUID?.().replaceAll('-','')||Math.random().toString(16).slice(2)).slice(0,12);
   const signature=items=>JSON.stringify(items.map(({word,resource,release})=>({word,resource,...(release?{release}:{})})).sort((a,b)=>a.word.localeCompare(b.word)));
-  const syncControls=()=>{layout.inert=saving;save.disabled=saving||!ready||!sessionValid||!!data?.buildId&&!dirty;close.disabled=cancel.disabled=saving;restoreAll.disabled=saving||!ready||!bindings.length;raw.disabled=replay.disabled=reset.disabled=!ready||saving;retry.disabled=saving||!sessionValid;};
-  const changed=()=>{dirty=signature(bindings)!==signature(data.bindings||[]);syncControls();};
+  const syncControls=()=>{layout.inert=saving;pages.inert=saving;save.disabled=saving||!ready||!sessionValid||!!data?.buildId&&!dirty;close.disabled=cancel.disabled=saving;restoreAll.disabled=saving||!ready||(page==='actions'?!bindings.length:!groups.length);restoreAll.textContent=page==='actions'?t('全部恢复通用','Reset all to generic'):t('恢复默认外观','Default appearance');raw.hidden=page==='wardrobe';raw.disabled=replay.disabled=reset.disabled=!ready||saving;retry.disabled=saving||!sessionValid;};
+  const changed=()=>{dirty=signature(bindings)!==signature(data.bindings||[])||JSON.stringify(groups)!==JSON.stringify(data.wardrobe||[]);syncControls();};
   const alive=()=>!closed&&!ctx.signal?.aborted;
   const release=()=>{if(closed)return;closed=true;win.clearInterval(leaseTimer);discardPrompt?.dispose();leave?.dispose?.();ctx.signal?.removeEventListener('abort',release);cleanup();modal.close();modal.remove();onClosed?.();const token=data?.token||requestedToken;if(token&&!ctx.signal?.aborted)ctx.invoke('manualClose',[token]).catch(()=>{});previous?.focus?.();};
   const requestClose=async()=>{
@@ -83,12 +88,17 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   const leave=ctx.guardLeave?.(()=>alive()&&(dirty||saving)?t('动作绑定尚未保存，确定离开？','Bindings are not saved. Leave?'):null);
   ctx.signal?.addEventListener('abort',release,{once:true});
   const send=type=>{if(ready)frame.contentWindow.postMessage({t:type==='play'?'preview-play':'preview-stop',resource:resource?.id,word,bindings,raw:rawMode},'*');};
-  const play=()=>{if(!ready||saving)return;send('play');if(!previewError)hint.textContent=resource?`${label(word)} · ${resource.title}`:t('通用表现','Generic behavior');};
-  raw.onclick=()=>{rawMode=!rawMode;raw.textContent=rawMode?t('原生效果','Native only'):t('组合效果','Combined');raw.setAttribute('aria-pressed',String(rawMode));play();};replay.onclick=play;reset.onclick=()=>{send('stop');hint.textContent=t('已复位','Reset');};
+  const sendWardrobe=(candidate=false)=>{
+    if(!ready)return;const preview=structuredClone(groups),selected={...picks},g=preview.find(g=>g.id===groupId);
+    if(candidate&&page==='wardrobe'&&resource&&!resource.wardrobeError&&g&&!wardrobeConflict(resource,g.id)){g.options=g.options.slice(0,15);g.options.push({id:'preview',name:resource.title,resource:resource.id});selected[g.id]='preview';}
+    frame.contentWindow.postMessage({t:'preview-wardrobe',groups:preview,picks:selected},'*');
+  };
+  const play=()=>{if(!ready||saving)return;sendWardrobe(true);if(page==='actions')send('play');else frame.contentWindow.postMessage({t:'preview-play',word:'neutral',bindings:[],raw:false},'*');if(!previewError)hint.textContent=page==='actions'?(resource?`${label(word)} · ${resource.title}`:t('通用表现','Generic behavior')):(resource?`${resource.title}${resource.kind==='motion'?t(' · 动作末帧',' · final frame'):''}`:t('当前装扮','Current appearance'));};
+  raw.onclick=()=>{rawMode=!rawMode;raw.textContent=rawMode?t('原生效果','Native only'):t('组合效果','Combined');raw.setAttribute('aria-pressed',String(rawMode));play();};replay.onclick=play;reset.onclick=()=>{if(page==='wardrobe'){picks={};resource=null;optionId='default';paintTargets();paintResources();sendWardrobe();}send('stop');hint.textContent=t('已复位','Reset');};
   let filter='all';const search=el('input','l2d-input');search.placeholder=t('搜索原生资源','Search native resources');search.setAttribute('aria-label',search.placeholder);
   const tabs=el('div','l2d-bind-tabs'),list=el('div','l2d-bind-list'),binding=el('div','l2d-bind-selection');
   right.append(search,tabs,list,binding);
-  const paintTargets=()=>{left.replaceChildren();for(const [key,title]of [['expressions',t('表情','Expressions')],['motions',t('动作','Motions')]]){
+  const paintTargets=()=>{left.replaceChildren();if(page==='wardrobe'){paintWardrobeTargets();return;}for(const [key,title]of [['expressions',t('表情','Expressions')],['motions',t('动作','Motions')]]){
     left.append(el('h3',null,title));for(const w of data.words[key]){
       const b=el('button','l2d-bind-target'+(w===word?' selected':''));b.type='button';b.setAttribute('aria-pressed',String(w===word));
       b.append(el('span',null,label(w)),el('small',null,bindings.some(b=>b.word===w)?t('已绑定','Bound'):t('通用','Generic')));
@@ -96,6 +106,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     }
   }};
   const paintSelection=()=>{
+    if(page==='wardrobe'){paintWardrobeSelection();return;}
     binding.replaceChildren();const current=bindings.find(b=>b.word===word);
     const caption=el('p',null,`${label(word)} ← ${current?data.resources.find(r=>r.id===current.resource)?.title:t('通用配方','Generic recipe')}`);binding.append(caption);
     const bind=el('button','l2d-btn primary',t(`绑定到「${label(word)}」`,`Bind to ${label(word)}`));
@@ -109,19 +120,60 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
       releaseSelect.value=current?.resource===resource.id?current.release||resource.release||'':resource.release||'';
       binding.append(releaseSelect);bind.disabled=bind.disabled||!releaseSelect.value;releaseSelect.onchange=()=>{bind.disabled=saving||!ready||!releaseSelect.value;};
     }
-    bind.onclick=()=>{if(saving||!ready||discardPrompt)return;bindings=bindings.filter(b=>b.word!==word);bindings.push({word,resource:resource.id,...(releaseSelect?.value?{release:releaseSelect.value}:{}),confidence:1,reason:'用户在动作编辑器中选择'});changed();paintTargets();paintSelection();play();};
+    bind.onclick=()=>{if(saving||!ready||discardPrompt)return;const channels=new Set(groups.flatMap(g=>g.options.flatMap(o=>data.resources.find(r=>r.id===o.resource)?.channels||[])));const used=[resource,...data.resources.filter(r=>r.id===releaseSelect?.value)].flatMap(r=>r.channels||[]);if(used.some(c=>channels.has(c))){ctx.ui.toast(t('该资源与装扮共用参数，请调整绑定','This resource overlaps wardrobe controls'),'bad');return;}bindings=bindings.filter(b=>b.word!==word);bindings.push({word,resource:resource.id,...(releaseSelect?.value?{release:releaseSelect.value}:{}),confidence:1,reason:'用户在动作编辑器中选择'});changed();paintTargets();paintSelection();play();};
     restore.onclick=()=>{if(saving||!ready||discardPrompt)return;bindings=bindings.filter(b=>b.word!==word);resource=null;changed();paintTargets();paintResources();play();};binding.append(bind,restore);
-    summary.textContent=t(`${bindings.length} 项绑定 · 保存后从卡片安装`,`${bindings.length} bindings · install from the pack card after saving`);
+    paintSummary();
   };
   const paintResources=()=>{list.replaceChildren();const q=search.value.trim().toLocaleLowerCase();
-    const resources=data.resources.filter(r=>(filter==='all'||filter==='other'?filter!=='other'||r.classification==='appearance':r.kind===filter)&&(!q||r.title.toLocaleLowerCase().includes(q)));
-    for(const r of resources){const b=el('button','l2d-bind-resource'+(r.id===resource?.id?' selected':''));b.append(el('span',null,r.title),el('small',null,r.classification==='appearance'?t('其他 · 仅预览','Other · preview only'):r.kind==='expression'?t('表情','Expression'):t(`动作 · ${r.seconds.toFixed(1)} 秒`,`Motion · ${r.seconds.toFixed(1)} s`)));b.onclick=()=>{resource=r;paintResources();play();};list.append(b);}
+    const resources=data.resources.filter(r=>(page!=='wardrobe'||!r.wardrobeError)&&(filter==='all'||filter==='other'?filter!=='other'||r.classification==='appearance':r.kind===filter)&&(!q||r.title.toLocaleLowerCase().includes(q)));
+    for(const r of resources){const b=el('button','l2d-bind-resource'+(r.id===resource?.id?' selected':''));b.append(el('span',null,r.title),el('small',null,page==='wardrobe'?(r.kind==='expression'?t('外观状态','Appearance state'):t('动作末帧 · 持久','Final frame · held')):r.classification==='appearance'?t('其他 · 仅预览','Other · preview only'):r.kind==='expression'?t('表情','Expression'):t(`动作 · ${r.seconds.toFixed(1)} 秒`,`Motion · ${r.seconds.toFixed(1)} s`)));b.onclick=()=>{resource=r;paintResources();play();};list.append(b);}
     if(!resources.length)list.append(el('p','l2d-bind-empty',t('没有匹配的资源','No matching resources')));paintSelection();
   };
+  function paintSummary(){summary.textContent=t(`${bindings.length} 项绑定${groups.length?' · '+groups.length+' 个装扮组':''} · 保存后从卡片安装`,`${bindings.length} bindings · ${groups.length} wardrobe groups · save then install`);}
+  function wardrobeConflict(r,id){
+    const ids=[...bindings.flatMap(b=>[b.resource,b.release].filter(Boolean)),...groups.filter(g=>g.id!==id).flatMap(g=>g.options.map(o=>o.resource))];
+    const used=new Set(ids.flatMap(id=>data.resources.find(r=>r.id===id)?.channels||[]));return (r?.channels||[]).some(c=>used.has(c));
+  }
+  function paintWardrobeTargets(){
+    if(!groups.length)left.append(el('p','l2d-bind-empty',t('添加服装、配色或配饰分组，再选择原生资源。','Add an outfit, colour or accessory group, then choose a native resource.')));
+    for(const g of groups){
+      const header=el('button','l2d-bind-group'+(g.id===groupId?' selected':''),g.name);header.onclick=()=>{groupId=g.id;optionId='default';resource=null;paintTargets();paintResources();play();};left.append(header);
+      for(const o of [{id:'default',name:t('默认','Default')},...g.options]){
+        const b=el('button','l2d-bind-target'+(g.id===groupId&&o.id===optionId?' selected':''),o.name);b.setAttribute('aria-label',g.name+'：'+o.name);
+        b.onclick=()=>{groupId=g.id;optionId=o.id;picks[g.id]=o.id;resource=data.resources.find(r=>r.id===o.resource)||null;paintTargets();paintResources();sendWardrobe();if(!previewError)hint.textContent=g.name+' · '+o.name;};left.append(b);
+      }
+      const add=el('button','l2d-btn quiet sm',t('＋ 新选项','＋ New option'));add.onclick=()=>{groupId=g.id;optionId=null;resource=null;paintTargets();paintResources();};left.append(add);
+    }
+    const form=el('div','l2d-bind-group-form'),input=el('input','l2d-input');input.placeholder=t('新分组，例如眼镜','New group, e.g. glasses');input.setAttribute('aria-label',t('新装扮组名称','New wardrobe group'));input.maxLength=40;
+    const add=el('button','l2d-btn sm',t('添加分组','Add group'));add.disabled=true;input.oninput=()=>{add.disabled=saving||!ready||!input.value.trim()||groups.length>=8;};
+    add.onclick=()=>{if(saving||!ready||groups.length>=8||!input.value.trim())return;const g={id:uid('look'),name:input.value.trim(),options:[]};groups.push(g);groupId=g.id;optionId='default';resource=null;changed();paintTargets();paintResources();};form.append(input,add);left.append(form);
+  }
+  function paintWardrobeSelection(){
+    binding.replaceChildren();const g=groups.find(g=>g.id===groupId);paintSummary();
+    if(!g){binding.append(el('p',null,t('先在左侧添加或选择装扮组','Add or select a wardrobe group on the left')));return;}
+    const groupName=el('input','l2d-input');groupName.value=g.name;groupName.maxLength=40;groupName.setAttribute('aria-label',t('装扮组名称','Wardrobe group name'));groupName.onchange=()=>{if(saving)return;const name=groupName.value.trim();if(!name){groupName.value=g.name;return;}g.name=name;changed();paintTargets();};binding.append(groupName);
+    const current=g.options.find(o=>o.id===optionId),name=el('input','l2d-input');name.value=current?.name||resource?.title||'';name.maxLength=60;name.placeholder=t('选项名称，例如戴上','Option name, e.g. wear');name.setAttribute('aria-label',t('装扮选项名称','Wardrobe option name'));binding.append(name);
+    const conflict=resource&&wardrobeConflict(resource,g.id);if(conflict)binding.append(el('p','l2d-bind-warning',t('与动作或其他装扮组共用参数，请调整绑定。','Shares controls with actions or another wardrobe group.')));
+    const add=el('button','l2d-btn primary',current?t('保存选项','Update option'):t('添加选项','Add option'));
+    const canAdd=()=>!saving&&ready&&resource&&!resource.wardrobeError&&!conflict&&!!name.value.trim()&&(!!current||g.options.length<16);add.disabled=!canAdd();name.oninput=()=>{add.disabled=!canAdd();};
+    add.onclick=()=>{if(!canAdd()||discardPrompt)return;const o={id:current?.id||uid('v'),name:name.value.trim(),resource:resource.id};if(current)g.options=g.options.map(p=>p.id===o.id?o:p);else g.options.push(o);optionId=o.id;picks[g.id]=o.id;changed();paintTargets();paintResources();sendWardrobe();};binding.append(add);
+    if(current){const remove=el('button','l2d-btn quiet',t('移除选项','Remove option'));remove.disabled=saving||!ready;remove.onclick=()=>{if(saving||!ready)return;g.options=g.options.filter(o=>o.id!==current.id);picks[g.id]='default';optionId='default';resource=null;changed();paintTargets();paintResources();sendWardrobe();};binding.append(remove);}
+    const removeGroup=el('button','l2d-btn quiet sm',t('删除分组','Delete group'));removeGroup.disabled=saving||!ready;removeGroup.onclick=async()=>{
+      if(saving||!ready||discardPrompt)return;discardPrompt=bindingDiscardPrompt(modal,zh,{title:t('删除这个装扮组？','Delete this wardrobe group?'),body:t('只移除分组映射，原生资源会保留。保存后生效。','Remove mappings and keep native resources. Save to apply.'),cancel:t('保留分组','Keep group'),accept:t('删除分组','Delete group')});const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive())return;
+      groups=groups.filter(p=>p.id!==g.id);delete picks[g.id];groupId=groups[0]?.id||null;optionId='default';resource=null;changed();paintTargets();paintResources();sendWardrobe();
+    };binding.append(removeGroup,el('p','l2d-bind-note',t('保存并安装后显示在 Coo 装扮页；当前选择仅用于预览。','Save and install to show these options in Coo. Current picks are preview only.')));
+  }
+  for(const [id,title]of [['actions',t('动作','Actions')],['wardrobe',t('装扮','Wardrobe')]]){
+    const b=el('button','l2d-btn quiet sm',title);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(page===id));b.onclick=()=>{
+      if(!data||saving||discardPrompt||page===id)return;pageState[page]={resource,filter,search:search.value};page=id;({resource,filter}=pageState[id]);search.value=pageState[id].search;for(const n of pages.children)n.setAttribute('aria-selected',String(n===b));
+      if(page==='wardrobe'&&!groupId)groupId=groups[0]?.id||null;for(const n of tabs.children)n.classList.toggle('selected',n.dataset.filter===filter);syncControls();paintTargets();paintResources();play();
+    };pages.append(b);
+  }
   for(const [value,title]of [['all',t('全部','All')],['expression',t('表情','Faces')],['motion',t('动作','Motions')],['other',t('其他','Other')]]){
-    const b=el('button','l2d-btn quiet sm',title);b.onclick=()=>{filter=value;for(const n of tabs.children)n.classList.toggle('selected',n===b);paintResources();};tabs.append(b);
+    const b=el('button','l2d-btn quiet sm',title);b.dataset.filter=value;b.onclick=()=>{filter=value;for(const n of tabs.children)n.classList.toggle('selected',n===b);paintResources();};tabs.append(b);
   }tabs.firstChild.classList.add('selected');search.oninput=()=>{if(data)paintResources();};
   restoreAll.onclick=async()=>{
+    if(page==='wardrobe'){if(!ready||saving)return;picks={};resource=null;optionId='default';paintTargets();paintResources();sendWardrobe();if(!previewError)hint.textContent=t('已恢复默认外观，装扮选项保留','Default appearance restored; options kept');return;}
     if(saving||!ready||discardPrompt||!bindings.length)return;
     discardPrompt=bindingDiscardPrompt(modal,zh,{title:t('全部恢复通用？','Reset all bindings?'),body:t('清空当前绑定，保留原生资源。点击保存后生效。','Clear all bindings and keep native resources. Save to apply.'),cancel:t('保留绑定','Keep bindings'),accept:t('全部恢复','Reset all')});
     const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive())return;
@@ -129,7 +181,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   };
   save.onclick=async()=>{if(saving||!ready||!sessionValid||discardPrompt||data.buildId&&!dirty)return;saving=true;syncControls();paintSelection();hint.textContent=t('保存并打包…','Saving & packing…');
     try{
-      const result=await ctx.invoke('manualSave',[data.token,structuredClone(bindings)]);dirty=false;release();ctx.ui.toast(t('绑定已保存，可从卡片安装','Bindings saved; install from the pack card'),'ok');
+      const result=await ctx.invoke('manualSave',[data.token,structuredClone(bindings),structuredClone(groups)]);dirty=false;release();ctx.ui.toast(t('绑定已保存，可从卡片安装','Bindings saved; install from the pack card'),'ok');
       try{await onSaved?.(result);}catch{ctx.ui.toast(t('绑定已保存，模型包列表刷新失败，请稍后重新打开页面','Bindings saved; the pack list could not refresh. Reopen the page later.'),'bad');}
     }
     catch(error){hint.textContent=String(error.message||error);if(/编辑已过期|形象包已变化|原打包产物已移除/.test(hint.textContent)){sessionValid=false;previewError=hint.textContent;}ctx.ui.toast(hint.textContent,'bad');}
@@ -137,7 +189,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   };
   const mountPreview=async()=>{
     cleanup();ready=false;previewError='';retry.hidden=true;hint.textContent=t('准备模型…','Preparing model…');syncControls();paintSelection();const generation=++serial;
-    cleanup=await mountBindingPreview(ctx,frame,data,alive,(type,message)=>{if(!alive()||generation!==serial)return;if(type==='ready'){ready=true;syncControls();paintSelection();play();}else if(type==='error'){ready=false;previewError=t('预览失败：','Preview failed: ')+message;hint.textContent=previewError;retry.hidden=false;syncControls();paintSelection();}});
+    cleanup=await mountBindingPreview(ctx,frame,data,alive,(type,message)=>{if(!alive()||generation!==serial)return;if(type==='ready'){ready=true;syncControls();paintTargets();paintSelection();play();}else if(type==='error'){ready=false;previewError=t('预览失败：','Preview failed: ')+message;hint.textContent=previewError;retry.hidden=false;syncControls();paintSelection();}});
     if(!alive())cleanup();
   };
   retry.onclick=()=>{if(!saving&&sessionValid)void mountPreview();};
@@ -146,7 +198,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     data=await ctx.invoke(method,requestedToken?[...args,requestedToken]:args);
     if(data.token!==requestedToken)ctx.notifyOnUnmount?.('manualClose',[data.token]);
     if(!alive()){if(!ctx.signal?.aborted)ctx.invoke('manualClose',[data.token]).catch(()=>{});return {get closed(){return closed;},dispose:release};}
-    bindings=structuredClone(data.bindings||[]);heading.querySelector('.l2d-modal-sub').textContent=data.title;paintTargets();paintResources();
+    bindings=structuredClone(data.bindings||[]);groups=structuredClone(data.wardrobe||[]);heading.querySelector('.l2d-modal-sub').textContent=data.title;paintTargets();paintResources();
     if(data.truncated||data.warnings?.length)right.prepend(el('p','l2d-bind-empty',t('部分资源未能读取，列表可能不完整','Some resources could not be read; the list may be incomplete')));
     if(data.truncated)hint.textContent=t('资源扫描不完整，请核对模型内容','Resource scan is incomplete; check the model');
     leaseTimer=win.setInterval(()=>{if(alive())ctx.invoke('manualKeepAlive',[data.token]).catch(error=>{if(alive()&&/编辑已过期|编辑已取消/.test(String(error.message||error))){sessionValid=false;previewError=String(error.message||error);hint.textContent=previewError;syncControls();}});},60000);
