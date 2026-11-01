@@ -62,3 +62,21 @@
 31 项界面测试、项目检查和官方 check:extension 通过。隔离浏览器确认 1536/720/540 三种宽度下两个滑杆等长（分别 300/292.125/476.39px），无控件溢出；Home/End/方向键选档、普通档位填充与无粒子、最高档粒子动态以及减少动态效果模式均通过，已查看截图 sliders-max.png。证据位于 E:/Coopanion-dev/_tmp/figure-gear-sliders/。
 
 本轮真实 Coo 主进程 12748 可经临时 inspector 读取，实际窗口停留在宿主 world:figure/~config 页；没有切换用户页面。按工作台结构检查该配置页时未找到对应控件，因此未将其作为工作台验收。用户随后明确确认无未保存编辑、允许重载，已通过本机接口重载 Core 并就绪。后台加载 2.0.0-dev.0，本机资源摘要 4a76c6baa030/2696cf026b48 与构建一致，Figure 配置、14 个模型和须知确认保持不变。AstrBot 仍按用户要求关闭。临时 inspector 均已关闭；未上传。
+
+## 2026-11-01：自动化链路实机核查（检查，未修改实现）
+
+按用户要求核对 Coo skill、官方 Cortico World 契约与工程哲学、Coopanion 开发文档，并以当前 Coo 0.2.17 的实际源码和接口为运行依据。官方主线文档与本机接口差异分别看待，不为核查升级宿主。官方 check:extension 通过，自描述与四个工具一致。
+
+本轮从 Coo 自带 console WebSocket 提交真实请求，使用用户已配置的 deepseek-v4.1-flash，未另接模型 API。实际调用 figure_models 和 figure_actions，识别 DeepSeek 的 8 个 motion、23 个 exp3，返回 6 帧，Core session 的工具回执 context.blobs 也有 6 个附件；实际 system 前缀含本扩展 ENV_PROMPT.md。正常请求后 AI 调用 figure_prepare，生成脸红资源到 shy 的待确认方案（632c5366-3c87-4dfe-85cf-2bd558fe784c），wear=false；审查后经 assistReject 撤销，没有安装或换装。此次入口为控制台，不把它写成重新实测了面板导入事件的自动唤醒。
+
+确认闸门测试边界：临时切换手动确认模式时 Coo 在 15:39:57 正常退出，已恢复开关；用户明确允许重开后继续。AI 拒绝人为传入无效 answer_cursor 的负向测试，因此真实 figure_install handler 未被这一请求调用，不能宣称安装闸门已实机通过。气泡提问/回答的 askId、question、options、index 等与宿主实现核对匹配，但本轮没有真实用户点击气泡同意，没有进行安装和换装端到端验收。
+
+发现问题：
+- 外观分类只靠文件名/参数标签正则，实际“单片眼镜、黑框眼镜、脱鞋、体型1/2、默认体型、尾巴开关”均被列作 expression。隔离实例用这些真实资源映射 happy 并填 confidence=.99，全部保留；其中一项走到模拟 execute，说明全自动外观过滤存在漏口。隔离实例只写本轮临时目录，没有真实安装。
+- AI 无法指定想看的资源或采样时刻；auto 按“没有名字建议”选择前三个 motion，固定 25%/75% 截帧。本轮六帧都分配给三个姿态片段，23 个 exp3 没有视觉对照图；名字建议不等于已验证的语义。
+- AI 获得曲线起终点而非动态范围/峰值/往返特征；每资源参数列表截到 40 项，资源扫描截断标志未透传至 actions 的返回对象。
+- figure_actions 正文 18133 字符，宿主给出超过 8000 字符提醒线的警告；Core 只告警、不截断，加附件行后 session 回执为 18904 字符。现有分页主要按资源数量，缺少总字符预算。
+
+配置字节摘要与首次检查前一致，全自动已恢复原 true，AstrBot 仍 disabled；14 个模型、安装记录未变化，Coo 最终 ready 且 idle，无待确认测试方案。用户允许重开 Coo，未操作鼠标键盘或切换窗口。证据为 E:/Coopanion-dev/_tmp/figure-chain-audit/audit-result.json 与 appearance-result.json；不保存或回显凭据。未上传、未发布，未修改功能源码。
+
+补充验证：针对同意记录、拒绝/无关回答、来源变更、幂等安装、失败重试和全自动过滤的 6 项独立回归通过；这些是隔离测试，不替代上述未完成的实机确认、安装和换装环节。
