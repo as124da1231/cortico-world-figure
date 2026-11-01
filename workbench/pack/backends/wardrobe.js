@@ -1,4 +1,5 @@
 import {compileCurve} from './native-actions.js';
+import {fixedWardrobeGroups} from './wardrobe-slots.js';
 const channel=t=>(t.target||'Parameter')+':'+t.id;
 export function wardrobeChannels(resource){
   const raw=resource?.raw||resource?.data;
@@ -10,12 +11,12 @@ export function wardrobeTracks(resource){
   return tracks;
 }
 export function wardrobeConfig(catalog,groups=[],bindings=[],axisOffset=1){
-  if(!Array.isArray(groups)||groups.length>8)throw Error('最多支持 8 个装扮组');
+  groups=fixedWardrobeGroups(groups);
   const resources=new Map(catalog.resources.map(r=>[r.id,r])),used=new Set(),owners=new Map(),ids=new Set();
   for(const binding of bindings)for(const id of [binding.resource,binding.release].filter(Boolean))for(const key of wardrobeChannels(resources.get(id)))owners.set(key,'动作');
   const clean=groups.map(g=>{
     if(!/^look[a-z0-9]{1,24}$/.test(g.id)||ids.has(g.id)||typeof g.name!=='string'||!g.name.trim()||g.name.length>40||!Array.isArray(g.options)||g.options.length>16)throw Error('装扮分组无效');ids.add(g.id);
-    const options=new Set(['default']);return {id:g.id,name:g.name.trim(),options:g.options.map(o=>{
+    const options=new Set(['default']);return {id:g.id,slot:g.slot,name:g.name,options:g.options.map(o=>{
       if(!/^[a-z0-9]{1,24}$/.test(o.id)||options.has(o.id)||typeof o.name!=='string'||!o.name.trim()||o.name.length>60||!resources.has(o.resource))throw Error('装扮选项无效');options.add(o.id);
       for(const t of wardrobeTracks(resources.get(o.resource))){const key=channel(t),owner=owners.get(key);if(owner&&owner!==g.id)throw Error('装扮与动作或其他分组共用参数，请调整绑定');owners.set(key,g.id);}used.add(o.resource);
       return {id:o.id,name:o.name.trim(),resource:o.resource};

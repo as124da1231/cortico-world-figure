@@ -6,6 +6,7 @@ import {assertRegularTree} from './pipeline.ts';
 import {packFingerprint} from './pack-fingerprint.ts';
 import {nativeConfig,validateBindings,FACE_WORDS,MOTION_WORDS} from '../workbench/tools/native-catalog.mjs';
 import {wardrobeConfig,wardrobeTracks,wardrobeChannels} from '../workbench/pack/backends/wardrobe.js';
+import {fixedWardrobeGroups} from '../workbench/pack/backends/wardrobe-slots.js';
 
 export const LIBRARY = 'native-library.json';
 export async function writeNativePack(root:string,catalog:any,bindings:any[],preview=false,groups:any[]=[]) {
@@ -14,8 +15,10 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
   const previousLibrary=await readFile(join(root,LIBRARY),'utf8').then(s=>JSON.parse(s)).catch(()=>({}));
   const previousAxes=new Set((previousLibrary.wardrobe||[]).map((g:any)=>g.id));
   const axes=(manifest.axes||[]).filter((a:any)=>!previousAxes.has(a.id));
-  if(groups.some(g=>axes.some((a:any)=>a.id===g.id)))throw Error('装扮分组标识与模型选项重复');
   const wardrobe=wardrobeConfig(catalog,groups,bindings,axes.length);
+  if(wardrobe.groups.some(g=>g.options.length&&axes.some((a:any)=>a.id===g.id)))throw Error('装扮分组标识与模型选项重复');
+  const oldOrder=new Map((manifest.axes||[]).map((a:any,i:number)=>[a.id,i]));
+  const runtimeGroups=wardrobe.groups.filter(g=>g.options.length).sort((a,b)=>Number(oldOrder.get(a.id)??Infinity)-Number(oldOrder.get(b.id)??Infinity));
   const dirs=await readdir(join(root,'models'),{withFileTypes:true});let count=0;
   for(const dir of dirs.filter(d=>d.isDirectory())) {
     const file=join(root,'models',dir.name,'profile.js');
@@ -25,7 +28,7 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
     text=text.replace(/^  native: .*\r?\n/gm,'');
     text=text.replace(/^  wardrobe: .*\r?\n/gm,'');
     text=text.replace(/\r?\n};\s*$/,`\n  native: ${JSON.stringify(native)},\n};\n`);
-    text=text.replace(/\r?\n};\s*$/,`\n  wardrobe: ${JSON.stringify({...wardrobe,groups:wardrobe.groups.filter(g=>g.options.length)})},\n};\n`);
+    text=text.replace(/\r?\n};\s*$/,`\n  wardrobe: ${JSON.stringify({...wardrobe,groups:runtimeGroups})},\n};\n`);
     await writeFile(file,text);count++;
   }
   if(count!==1)throw Error('请为单个 Live2D 模型编辑动作');
@@ -37,7 +40,7 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
       const resource=catalog.resources.find((r:any)=>r.id===b.resource);
       manifest.vocab.push({id:b.word,kind:resource.kind==='expression'?'expression':'motion',names:{zh:[b.word],en:[b.word]},seconds:resource.seconds});
     }
-    manifest.axes=[...axes,...wardrobe.groups.filter(g=>g.options.length).map(g=>({id:g.id,name:{zh:g.name,en:g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]}))];
+    manifest.axes=[...axes,...runtimeGroups.map(g=>({id:g.id,name:{zh:g.name,en:g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]}))];
     manifest.presets=(manifest.presets||[]).map((p:any)=>({...p,pick:Object.fromEntries(manifest.axes.map((a:any)=>[a.id,a.options.some((o:any)=>o.id===p.pick?.[a.id])?p.pick[a.id]:a.options[0].id]))}));
     // Empty groups are editor drafts only; runtime offsets follow the actual emitted axes.
     await writeFile(manifestFile,JSON.stringify(manifest,null,2)+'\n');
@@ -56,6 +59,7 @@ export class ManualSessions {
   private cancelled=new Set<string>();
   constructor(root:string,workbench:string){this.root=root;this.workbench=workbench;}
   async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string,requestedToken?:string,groups:any[]=[]){
+    const fixed=fixedWardrobeGroups(groups),wardrobeNeedsSave=groups.some(g=>g.options.length)&&JSON.stringify(fixed)!==JSON.stringify(groups);groups=fixed;
     await this.prune();
     if(this.sessions.size>=3)throw Error('请先关闭已有动作编辑窗口');
     const token=requestedToken||randomUUID();
@@ -67,7 +71,7 @@ export class ManualSessions {
       await assertRegularTree(pack);
       await mkdir(dir,{recursive:true});await cp(pack,copy,{recursive:true});
       // The preview always uses this version's trusted renderer, including old generated packs.
-      for(const file of ['live2d.js','native-actions.js','wardrobe.js','render-config.js','render-quality.js','role-values.js','soullink.js'])
+      for(const file of ['live2d.js','native-actions.js','wardrobe.js','wardrobe-slots.js','render-config.js','render-quality.js','role-values.js','soullink.js'])
         await cp(join(this.workbench,'pack','backends',file),join(copy,'backends',file));
       await writeNativePack(copy,catalog,bindings,true,groups);
       await cp(join(this.workbench,'vendor','coo-kit','kit'),join(dir,'web','kit'),{recursive:true});
@@ -89,7 +93,7 @@ export class ManualSessions {
       if(!this.reaper){this.reaper=setInterval(()=>void this.prune().catch(()=>{}),60000);this.reaper.unref();}
       const origin=await this.preview.start();const base=`${origin}/figure-preview/${token}/`;
       if(pending.cancelled||!this.sessions.has(token))throw Error('这次编辑已取消');
-      return {token,buildId,wardrobe:groups,preview:{url:base+'frame.html',base:base+'pack/',entry:base+'pack/figure.js'},title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,files,
+      return {token,buildId,wardrobe:groups,wardrobeNeedsSave,preview:{url:base+'frame.html',base:base+'pack/',entry:base+'pack/figure.js'},title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,files,
         words:{expressions:FACE_WORDS,motions:MOTION_WORDS},
         resources:catalog.resources.map((r:any)=>{const channels=wardrobeChannels(r);let wardrobeError='';try{wardrobeTracks(r);}catch(e){wardrobeError=String((e as Error).message);}const {id,title,kind,classification,seconds,release}=r;return {id,title,kind,classification,seconds,release,channels,wardrobeError};}),warnings:catalog.warnings||[],truncated:catalog.truncated};
     }catch(e){this.sessions.delete(token);if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;await this.preview.stop();}await rm(dir,{recursive:true,force:true});throw e;}

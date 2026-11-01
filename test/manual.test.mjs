@@ -103,11 +103,17 @@ test('wardrobe saves into host axes and runtime data; clearing axes keeps the re
  const {world,token}=await editableWorld(t),groups=[{id:'lookarms',name:'手部',options:[{id:'raised',name:'抬起',resource:'wave'}]}];
  await world.saveManual(token,binding,groups);let pack=world.state.builds[0].packDir,m=JSON.parse(await readFile(join(pack,'figure.json')));assert.equal(m.axes[0].id,'lookarms');assert.deepEqual(m.axes[0].options.map(o=>o.id),['default','raised']);
  assert.match(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/wardrobe:.*"axisOffset":0/);const library=JSON.parse(await readFile(join(pack,LIBRARY)));assert.equal(library.wardrobe[0].options[0].resource,'wave');
- const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'手部');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes,[]);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
+ const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'装扮');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes,[]);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
 });
 test('failed wardrobe thumbnail rendering keeps the original card and draft for retry',async t=>{
  const {world,token,pack,root}=await editableWorld(t);world.captureWardrobe=async()=>{throw Error('thumbnail renderer unavailable');};
  await assert.rejects(world.saveManual(token,binding,[{id:'lookarm',name:'装扮',options:[{id:'up',name:'抬手',resource:'wave'}]}]),/renderer unavailable/);
  assert.equal(world.state.builds[0].packDir,pack);assert.equal(world.state.builds.length,1);assert.equal(world.manual.get(token).saving,false);assert.deepEqual(await readdir(join(root,'work','builds')),[]);
  world.captureWardrobe=async()=>{};await world.saveManual(token,binding,[]);assert.equal(world.state.builds[0].id,'existing');
+});
+test('legacy axis order and IDs survive fixed-slot normalization',async t=>{
+ const {pack}=await fixture(t),legacy=[{id:'lookhat',name:'配饰',options:[{id:'on',name:'帽子',resource:'smile'}]},{id:'lookcoat',name:'装扮',options:[{id:'on',name:'衣服',resource:'wave'}]}];
+ await writeFile(join(pack,'figure.json'),JSON.stringify({axes:[{id:'model',options:[{id:'sample'}]},...legacy.map(g=>({id:g.id,name:{zh:g.name},options:[{id:'default'},{id:'on'}]}))],vocab:[]}));await writeFile(join(pack,LIBRARY),JSON.stringify({catalog,bindings:[],wardrobe:legacy}));
+ await writeNativePack(pack,catalog,[],false,legacy);const manifest=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(manifest.axes.map(a=>a.id),['model','lookhat','lookcoat']);assert.deepEqual(JSON.parse(await readFile(join(pack,LIBRARY))).wardrobe.map(g=>g.name),['装扮','部件','配饰']);
+ const profile=await readFile(join(pack,'models/sample/profile.js'),'utf8'),runtime=JSON.parse(profile.match(/  wardrobe: (.*),\n/)[1]);assert.deepEqual(runtime.groups.map(g=>g.id),['lookhat','lookcoat']);assert.equal(runtime.axisOffset,1);
 });

@@ -722,7 +722,7 @@ export class Live2dWorld implements World {
     let committed=false;
     try{
       await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
-      for(const file of ['live2d.js','native-actions.js','wardrobe.js','render-config.js','render-quality.js','role-values.js','soullink.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
+      for(const file of ['live2d.js','native-actions.js','wardrobe.js','wardrobe-slots.js','render-config.js','render-quality.js','role-values.js','soullink.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
       await writeNativePack(target,session.catalog,bindings,false,wardrobe);
       await this.captureWardrobe(target);
       if(await packFingerprint(session.pack)!==session.hash)throw Error('形象包已变化，请重新打开编辑');

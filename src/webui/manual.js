@@ -75,7 +75,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   let page='actions',groups=[],picks={},groupId=null,optionId='default';const pageState={actions:{resource:null,filter:'all',search:''},wardrobe:{resource:null,filter:'all',search:''}};
   const uid=prefix=>prefix+(win.crypto?.randomUUID?.().replaceAll('-','')||Math.random().toString(16).slice(2)).slice(0,12);
   const signature=items=>JSON.stringify(items.map(({word,resource,release})=>({word,resource,...(release?{release}:{})})).sort((a,b)=>a.word.localeCompare(b.word)));
-  const syncControls=()=>{layout.inert=saving;pages.inert=saving;save.disabled=saving||!ready||!sessionValid||!!data?.buildId&&!dirty;close.disabled=cancel.disabled=saving;restoreAll.disabled=saving||!ready||(page==='actions'?!bindings.length:!groups.length);restoreAll.textContent=page==='actions'?t('全部恢复通用','Reset all to generic'):t('恢复默认外观','Default appearance');raw.hidden=page==='wardrobe';raw.disabled=replay.disabled=reset.disabled=!ready||saving;retry.disabled=saving||!sessionValid;};
+  const syncControls=()=>{layout.inert=saving;pages.inert=saving;save.disabled=saving||!ready||!sessionValid||!!data?.buildId&&!dirty&&!data.wardrobeNeedsSave;close.disabled=cancel.disabled=saving;restoreAll.disabled=saving||!ready||(page==='actions'?!bindings.length:!groups.length);restoreAll.textContent=page==='actions'?t('全部恢复通用','Reset all to generic'):t('恢复默认外观','Default appearance');raw.hidden=page==='wardrobe';raw.disabled=replay.disabled=reset.disabled=!ready||saving;retry.disabled=saving||!sessionValid;};
   const changed=()=>{dirty=signature(bindings)!==signature(data.bindings||[])||JSON.stringify(groups)!==JSON.stringify(data.wardrobe||[]);syncControls();};
   const alive=()=>!closed&&!ctx.signal?.aborted;
   const release=()=>{if(closed)return;closed=true;win.clearInterval(leaseTimer);discardPrompt?.dispose();leave?.dispose?.();ctx.signal?.removeEventListener('abort',release);cleanup();modal.close();modal.remove();onClosed?.();const token=data?.token||requestedToken;if(token&&!ctx.signal?.aborted)ctx.invoke('manualClose',[token]).catch(()=>{});previous?.focus?.();};
@@ -129,39 +129,34 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     for(const r of resources){const b=el('button','l2d-bind-resource'+(r.id===resource?.id?' selected':''));b.append(el('span',null,r.title),el('small',null,page==='wardrobe'?(r.kind==='expression'?t('外观状态','Appearance state'):t('动作末帧 · 持久','Final frame · held')):r.classification==='appearance'?t('其他 · 仅预览','Other · preview only'):r.kind==='expression'?t('表情','Expression'):t(`动作 · ${r.seconds.toFixed(1)} 秒`,`Motion · ${r.seconds.toFixed(1)} s`)));b.onclick=()=>{resource=r;paintResources();play();};list.append(b);}
     if(!resources.length)list.append(el('p','l2d-bind-empty',t('没有匹配的资源','No matching resources')));paintSelection();
   };
-  function paintSummary(){summary.textContent=t(`${bindings.length} 项绑定${groups.length?' · '+groups.length+' 个装扮组':''} · 保存后从卡片安装`,`${bindings.length} bindings · ${groups.length} wardrobe groups · save then install`);}
+  function paintSummary(){const used=groups.filter(g=>g.options.length).length;summary.textContent=t(`${bindings.length} 项绑定 · 外观 ${used}/3 栏 · 保存后从卡片安装`,`${bindings.length} bindings · ${used}/3 appearance slots · save then install`);}
   function wardrobeConflict(r,id){
     const ids=[...bindings.flatMap(b=>[b.resource,b.release].filter(Boolean)),...groups.filter(g=>g.id!==id).flatMap(g=>g.options.map(o=>o.resource))];
     const used=new Set(ids.flatMap(id=>data.resources.find(r=>r.id===id)?.channels||[]));return (r?.channels||[]).some(c=>used.has(c));
   }
   function paintWardrobeTargets(){
-    if(!groups.length)left.append(el('p','l2d-bind-empty',t('添加服装、配色或配饰分组，再选择原生资源。','Add an outfit, colour or accessory group, then choose a native resource.')));
     for(const g of groups){
-      const header=el('button','l2d-bind-group'+(g.id===groupId?' selected':''),g.name);header.onclick=()=>{groupId=g.id;optionId='default';resource=null;paintTargets();paintResources();play();};left.append(header);
+      const title=zh?g.name:WARDROBE_SLOTS.find(s=>s.slot===g.slot).en;
+      const header=el('button','l2d-bind-group'+(g.id===groupId?' selected':''),title);header.onclick=()=>{groupId=g.id;optionId=picks[g.id]||'default';resource=data.resources.find(r=>r.id===g.options.find(o=>o.id===optionId)?.resource)||null;paintTargets();paintResources();sendWardrobe();};left.append(header);
       for(const o of [{id:'default',name:t('默认','Default')},...g.options]){
-        const b=el('button','l2d-bind-target'+(g.id===groupId&&o.id===optionId?' selected':''),o.name);b.setAttribute('aria-label',g.name+'：'+o.name);
+        const chosen=(picks[g.id]||'default')===o.id;
+        const b=el('button','l2d-bind-target'+(chosen?' selected':''),o.name);b.setAttribute('aria-label',title+'：'+o.name);b.setAttribute('aria-pressed',String(chosen));
         b.onclick=()=>{groupId=g.id;optionId=o.id;picks[g.id]=o.id;resource=data.resources.find(r=>r.id===o.resource)||null;paintTargets();paintResources();sendWardrobe();if(!previewError)hint.textContent=g.name+' · '+o.name;};left.append(b);
       }
       const add=el('button','l2d-btn quiet sm',t('＋ 新选项','＋ New option'));add.onclick=()=>{groupId=g.id;optionId=null;resource=null;paintTargets();paintResources();};left.append(add);
     }
-    const form=el('div','l2d-bind-group-form'),input=el('input','l2d-input');input.placeholder=t('新分组，例如眼镜','New group, e.g. glasses');input.setAttribute('aria-label',t('新装扮组名称','New wardrobe group'));input.maxLength=40;
-    const add=el('button','l2d-btn sm',t('添加分组','Add group'));add.disabled=true;input.oninput=()=>{add.disabled=saving||!ready||!input.value.trim()||groups.length>=8;};
-    add.onclick=()=>{if(saving||!ready||groups.length>=8||!input.value.trim())return;const g={id:uid('look'),name:input.value.trim(),options:[]};groups.push(g);groupId=g.id;optionId='default';resource=null;changed();paintTargets();paintResources();};form.append(input,add);left.append(form);
   }
   function paintWardrobeSelection(){
     binding.replaceChildren();const g=groups.find(g=>g.id===groupId);paintSummary();
-    if(!g){binding.append(el('p',null,t('先在左侧添加或选择装扮组','Add or select a wardrobe group on the left')));return;}
-    const groupName=el('input','l2d-input');groupName.value=g.name;groupName.maxLength=40;groupName.setAttribute('aria-label',t('装扮组名称','Wardrobe group name'));groupName.onchange=()=>{if(saving)return;const name=groupName.value.trim();if(!name){groupName.value=g.name;return;}g.name=name;changed();paintTargets();};binding.append(groupName);
+    if(!g){binding.append(el('p',null,t('在左侧选择装扮、部件或配饰','Choose Outfit, Parts or Accessories on the left')));return;}
+    binding.append(el('p',null,t(g.name+' · 每次选一个原生按钮',(WARDROBE_SLOTS.find(s=>s.slot===g.slot)?.en||'')+' · one native resource at a time')));
     const current=g.options.find(o=>o.id===optionId),name=el('input','l2d-input');name.value=current?.name||resource?.title||'';name.maxLength=60;name.placeholder=t('选项名称，例如戴上','Option name, e.g. wear');name.setAttribute('aria-label',t('装扮选项名称','Wardrobe option name'));binding.append(name);
     const conflict=resource&&wardrobeConflict(resource,g.id);if(conflict)binding.append(el('p','l2d-bind-warning',t('与动作或其他装扮组共用参数，请调整绑定。','Shares controls with actions or another wardrobe group.')));
     const add=el('button','l2d-btn primary',current?t('保存选项','Update option'):t('添加选项','Add option'));
     const canAdd=()=>!saving&&ready&&resource&&!resource.wardrobeError&&!conflict&&!!name.value.trim()&&(!!current||g.options.length<16);add.disabled=!canAdd();name.oninput=()=>{add.disabled=!canAdd();};
     add.onclick=()=>{if(!canAdd()||discardPrompt)return;const o={id:current?.id||uid('v'),name:name.value.trim(),resource:resource.id};if(current)g.options=g.options.map(p=>p.id===o.id?o:p);else g.options.push(o);optionId=o.id;picks[g.id]=o.id;changed();paintTargets();paintResources();sendWardrobe();};binding.append(add);
     if(current){const remove=el('button','l2d-btn quiet',t('移除选项','Remove option'));remove.disabled=saving||!ready;remove.onclick=()=>{if(saving||!ready)return;g.options=g.options.filter(o=>o.id!==current.id);picks[g.id]='default';optionId='default';resource=null;changed();paintTargets();paintResources();sendWardrobe();};binding.append(remove);}
-    const removeGroup=el('button','l2d-btn quiet sm',t('删除分组','Delete group'));removeGroup.disabled=saving||!ready;removeGroup.onclick=async()=>{
-      if(saving||!ready||discardPrompt)return;discardPrompt=bindingDiscardPrompt(modal,zh,{title:t('删除这个装扮组？','Delete this wardrobe group?'),body:t('只移除分组映射，原生资源会保留。保存后生效。','Remove mappings and keep native resources. Save to apply.'),cancel:t('保留分组','Keep group'),accept:t('删除分组','Delete group')});const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive())return;
-      groups=groups.filter(p=>p.id!==g.id);delete picks[g.id];groupId=groups[0]?.id||null;optionId='default';resource=null;changed();paintTargets();paintResources();sendWardrobe();
-    };binding.append(removeGroup,el('p','l2d-bind-note',t('保存并安装后显示在 Coo 装扮页；当前选择仅用于预览。','Save and install to show these options in Coo. Current picks are preview only.')));
+    binding.append(el('p','l2d-bind-note',t('三栏各选一个，最多同时生效三个按钮。保存并安装后可在 Coo 装扮页切换。','Pick one per slot, up to three together. Save and install to switch them in Coo.')));
   }
   for(const [id,title]of [['actions',t('动作','Actions')],['wardrobe',t('装扮','Wardrobe')]]){
     const b=el('button','l2d-btn quiet sm',title);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(page===id));b.onclick=()=>{
@@ -179,7 +174,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive())return;
     bindings=[];resource=null;rawMode=false;raw.textContent=t('组合效果','Combined');raw.setAttribute('aria-pressed','false');send('stop');changed();paintTargets();paintResources();play();
   };
-  save.onclick=async()=>{if(saving||!ready||!sessionValid||discardPrompt||data.buildId&&!dirty)return;saving=true;syncControls();paintSelection();hint.textContent=t('保存并打包…','Saving & packing…');
+  save.onclick=async()=>{if(saving||!ready||!sessionValid||discardPrompt||data.buildId&&!dirty&&!data.wardrobeNeedsSave)return;saving=true;syncControls();paintSelection();hint.textContent=t('保存并打包…','Saving & packing…');
     try{
       const result=await ctx.invoke('manualSave',[data.token,structuredClone(bindings),structuredClone(groups)]);dirty=false;release();ctx.ui.toast(t('绑定已保存，可从卡片安装','Bindings saved; install from the pack card'),'ok');
       try{await onSaved?.(result);}catch{ctx.ui.toast(t('绑定已保存，模型包列表刷新失败，请稍后重新打开页面','Bindings saved; the pack list could not refresh. Reopen the page later.'),'bad');}
@@ -198,7 +193,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     data=await ctx.invoke(method,requestedToken?[...args,requestedToken]:args);
     if(data.token!==requestedToken)ctx.notifyOnUnmount?.('manualClose',[data.token]);
     if(!alive()){if(!ctx.signal?.aborted)ctx.invoke('manualClose',[data.token]).catch(()=>{});return {get closed(){return closed;},dispose:release};}
-    bindings=structuredClone(data.bindings||[]);groups=structuredClone(data.wardrobe||[]);heading.querySelector('.l2d-modal-sub').textContent=data.title;paintTargets();paintResources();
+    bindings=structuredClone(data.bindings||[]);groups=fixedWardrobeGroups(data.wardrobe||[]);data.wardrobe=structuredClone(groups);changed();heading.querySelector('.l2d-modal-sub').textContent=data.title;paintTargets();paintResources();
     if(data.truncated||data.warnings?.length)right.prepend(el('p','l2d-bind-empty',t('部分资源未能读取，列表可能不完整','Some resources could not be read; the list may be incomplete')));
     if(data.truncated)hint.textContent=t('资源扫描不完整，请核对模型内容','Resource scan is incomplete; check the model');
     leaseTimer=win.setInterval(()=>{if(alive())ctx.invoke('manualKeepAlive',[data.token]).catch(error=>{if(alive()&&/编辑已过期|编辑已取消/.test(String(error.message||error))){sessionValid=false;previewError=String(error.message||error);hint.textContent=previewError;syncControls();}});},60000);

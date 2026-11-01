@@ -1,17 +1,28 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
 import {wardrobeConfig,wardrobeTracks,createWardrobe} from '../workbench/pack/backends/wardrobe.js';
+import {fixedWardrobeGroups} from '../workbench/pack/backends/wardrobe-slots.js';
 const expression=(id,param,value,blend='Overwrite')=>({id,kind:'expression',raw:{Parameters:[{Id:param,Value:value,Blend:blend}]}});
 const catalog={resources:[expression('on','Glasses',1),expression('off','Glasses',0),expression('hat','Hat',1),expression('emotion','Mouth',.5)]};
 const groups=[{id:'lookglasses',name:'眼镜',options:[{id:'on',name:'戴上',resource:'on'},{id:'off',name:'摘下',resource:'off'}]},{id:'lookhat',name:'帽子',options:[{id:'on',name:'戴帽子',resource:'hat'}]}];
 test('wardrobe validates independent axes and rejects conflicting groups, action channels and unsafe IDs',()=>{
- assert.equal(wardrobeConfig(catalog,groups).groups.length,2);
+ assert.equal(wardrobeConfig(catalog,groups).groups.length,3);
  assert.throws(()=>wardrobeConfig(catalog,[...groups,{id:'lookother',name:'冲突',options:[{id:'on',name:'同参数',resource:'on'}]}]),/共用参数/);
  assert.throws(()=>wardrobeConfig(catalog,groups,[{word:'happy',resource:'on'}]),/共用参数/);
  assert.throws(()=>wardrobeConfig(catalog,[{...groups[0],options:[{id:'bad-id',name:'错误',resource:'on'}]}]),/选项无效/);
  assert.throws(()=>wardrobeConfig(catalog,[{...groups[0],id:'model'}]),/分组无效/);
  const modelOnly={id:'model-only',kind:'motion',raw:{Curves:[{Id:'Opacity',Target:'Model',Segments:[0,1]}]}};
- assert.equal(wardrobeConfig({resources:[...catalog.resources,modelOnly]},groups,[{word:'wave',resource:'model-only'}]).groups.length,2);
+ assert.equal(wardrobeConfig({resources:[...catalog.resources,modelOnly]},groups,[{word:'wave',resource:'model-only'}]).groups.length,3);
  assert.throws(()=>wardrobeConfig(catalog,groups,[{word:'wave',resource:'emotion',release:'hat'}]),/共用参数/);
+});
+test('three fixed slots preserve legacy IDs and options; a fourth slot is rejected without dropping it',()=>{
+ const old=[{...groups[0],name:'装扮'},groups[1]],fixed=fixedWardrobeGroups(old);assert.deepEqual(fixed.map(g=>g.name),['装扮','部件','配饰']);assert.equal(fixed[0].id,'lookglasses');assert.deepEqual(fixed[1].options,old[1].options);assert.deepEqual(fixedWardrobeGroups(fixed),fixed);
+ assert.throws(()=>fixedWardrobeGroups([...old,{id:'looka',name:'第三',options:[]},{id:'lookb',name:'第四',options:[]}]),/三个栏位/);assert.equal(old[1].name,'帽子');
+ assert.throws(()=>wardrobeConfig(catalog,[{...old[0],options:[{id:'bad',name:'多个',resource:['on','hat']}]}]),/选项无效/);
+});
+test('one native resource in each fixed slot produces three simultaneous held states',()=>{
+ const resources=[expression('coat','Coat',1),expression('parts','Parts',.8),expression('glasses','Glasses',.5)],slots=fixedWardrobeGroups();slots.forEach((g,i)=>g.options=[{id:'on',name:'开',resource:resources[i].id}]);
+ const values=[0,0,0],model={getParameterDefaultValue:()=>0,getParameterMinimumValue:()=>0,getParameterMaximumValue:()=>1,setParameterValueByIndex:(i,v)=>values[i]=v};
+ const wardrobe=createWardrobe(model,new Map([['Coat',0],['Parts',1],['Glasses',2]]),new Map());wardrobe.configure(wardrobeConfig({resources},slots));wardrobe.scheme('model-on-on-on');wardrobe.apply();assert.deepEqual(values,[1,.8,.5]);wardrobe.scheme('model-on-default-on');wardrobe.apply();assert.deepEqual(values,[1,0,.5]);wardrobe.select({});wardrobe.apply();assert.deepEqual(values,[0,0,0]);
 });
 test('outfits persist across expression writes, same-axis picks exclude each other, defaults restore the original appearance',()=>{
  const values=[.2,0,.7],parts=[1],model={getParameterDefaultValue:i=>[.2,0,.7][i],getParameterMinimumValue:()=>0,getParameterMaximumValue:()=>1,getPartOpacityByIndex:i=>parts[i],setPartOpacityByIndex:(i,v)=>parts[i]=v,setParameterValueByIndex:(i,v)=>values[i]=v};
