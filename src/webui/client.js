@@ -781,7 +781,7 @@ export default {
               } finally { setBusy(false); }
             });
             del.classList.add('quiet');
-            if(b.manualAvailable){const bind=el('button','l2d-btn sm',t('动作','Actions'));bind.addEventListener('click',()=>openBindings('manualOpenBuild',[b.id]));row.append(bind);}
+            if(b.manualAvailable){const bind=el('button','l2d-btn sm l2d-card-binding',t('动作','Actions'));bind.addEventListener('click',()=>openBindings('manualOpenBuild',[b.id]));card.appendChild(bind);}
             row.append(edit, del);
             cardActions.appendChild(row);
             card.appendChild(cardActions);

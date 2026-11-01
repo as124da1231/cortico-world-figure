@@ -688,7 +688,7 @@ export class Live2dWorld implements World {
     if(!core.ok)throw Error('请先获取 Live2D 核心组件');
     const scratch=join(this.workRoot(),'manual-input-'+randomUUID());
     try{
-      const render=qualityPolicy(this.opts.getConfig());
+      const render={mode:'economy',textureLimit:512,canvasLimit:512,strict:false};
       const pack=await buildPack(WORKBENCH_DIR,source,scratch,{corePath:core.file,modelFile:file,render,maxTexture:render.textureLimit,native:nativeConfig(catalog,[],{includeAll:true})});
       const result=await this.manual.open(pack,catalog,[],model);
       this.manual.get(result.token).ownedRoot=scratch;return result;

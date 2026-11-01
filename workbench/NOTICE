@@ -20,6 +20,10 @@ or (at your option) any later version. See LICENSE for the full text.
    说明：本工作台的预览和构建都依赖这套 kit；因此本发布包整体采用 AGPL。
    如果去掉这套 kit，预览将无法在“没装 Coo”的机器上运行。
 
+   临时预览 frame：vendor/coo-preview/figure-frame.js
+   来源为本机 Coopanion 0.2.17 的 desktop-pet 预览入口，沿用同一 AGPL-3.0-or-later 许可。
+   副本、来源摘要、修改说明及许可证见 vendor/coo-preview/。
+
 2. SoulLink Emotion Engine
    文件：pack/vendor/soullink/
    上游：https://github.com/nanlingyin/soullink-emotion-sdk

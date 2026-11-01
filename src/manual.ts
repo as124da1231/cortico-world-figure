@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {cp,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
 import {join,relative,resolve,sep} from 'node:path';
+import {PreviewServer} from './preview.ts';
 import {assertRegularTree} from './pipeline.ts';
 import {packFingerprint} from './pack-fingerprint.ts';
 import {nativeConfig,validateBindings,FACE_WORDS,MOTION_WORDS} from '../workbench/tools/native-catalog.mjs';
@@ -35,6 +36,7 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
 
 export class ManualSessions {
   sessions=new Map<string,any>();
+  private preview=new PreviewServer(token=>{try{return this.get(token);}catch{return null;}});
   private root:string;
   private workbench:string;
   constructor(root:string,workbench:string){this.root=root;this.workbench=workbench;}
@@ -48,7 +50,13 @@ export class ManualSessions {
       for(const file of ['live2d.js','native-actions.js','render-config.js','render-quality.js','role-values.js','soullink.js'])
         await cp(join(this.workbench,'pack','backends',file),join(copy,'backends',file));
       await writeNativePack(copy,catalog,bindings,true);
-      await cp(join(this.workbench,'vendor','coo-kit','kit'),join(dir,'kit'),{recursive:true});
+      await cp(join(this.workbench,'vendor','coo-kit','kit'),join(dir,'web','kit'),{recursive:true});
+      for(const name of ['figure-frame.js','i18n.js'])await cp(join(this.workbench,'vendor','coo-preview',name),join(dir,'web',name));
+      // Preview settings are isolated from the source pack and final installation.
+      for(const model of await readdir(join(copy,'models'),{withFileTypes:true}))if(model.isDirectory()){
+        const file=join(copy,'models',model.name,'profile.js');let text=await readFile(file,'utf8');
+        text=text.replace(/^  render: .*\r?\n/gm,'').replace(/\r?\n};\s*$/, '\n  render: {mode:"economy",textureLimit:512,canvasLimit:512,strict:false},\n};\n');await writeFile(file,text);
+      }
       const files:Array<{path:string;size:number}>=[];let bytes=0;
       const walk=async(base:string)=>{for(const e of await readdir(base,{withFileTypes:true})){
         const path=join(base,e.name);if(e.isDirectory())await walk(path);
@@ -57,10 +65,11 @@ export class ManualSessions {
       if(bytes>512*1048576||files.length>1000)throw Error('预览资源过大');
       const value={token,dir,pack,catalog,bindings,source,buildId,hash:await packFingerprint(pack),at:Date.now(),files};
       this.sessions.set(token,value);
-      return {token,title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,files,
+      const origin=await this.preview.start();const base=`${origin}/figure-preview/${token}/`;
+      return {token,preview:{url:base+'frame.html',base:base+'pack/',entry:base+'pack/figure.js'},title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,files,
         words:{expressions:FACE_WORDS,motions:MOTION_WORDS},
         resources:catalog.resources.map(({id,title,kind,classification,seconds,release}:any)=>({id,title,kind,classification,seconds,release})),warnings:catalog.warnings||[],truncated:catalog.truncated};
-    }catch(e){await rm(dir,{recursive:true,force:true});throw e;}
+    }catch(e){this.sessions.delete(token);if(!this.sessions.size)await this.preview.stop();await rm(dir,{recursive:true,force:true});throw e;}
   }
   get(token:string){const s=this.sessions.get(token);if(!s||Date.now()-s.at>2*3600000)throw Error('编辑已过期，请重新打开');s.at=Date.now();return s;}
   async asset(token:string,path:string,offset:number){
@@ -74,6 +83,6 @@ export class ManualSessions {
     if(await packFingerprint(s.pack)!==s.hash)throw Error('形象包已变化，请重新打开编辑');
     return {session:s,bindings:validateBindings(s.catalog,bindings)};
   }
-  async close(token:string){const s=this.sessions.get(token);if(s){this.sessions.delete(token);await rm(s.dir,{recursive:true,force:true});if(s.ownedRoot)await rm(s.ownedRoot,{recursive:true,force:true});}}
+  async close(token:string){const s=this.sessions.get(token);if(s){this.sessions.delete(token);await rm(s.dir,{recursive:true,force:true});if(s.ownedRoot)await rm(s.ownedRoot,{recursive:true,force:true});if(!this.sessions.size)await this.preview.stop();}}
   async stop(){for(const key of this.sessions.keys())await this.close(key);}
 }

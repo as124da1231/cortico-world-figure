@@ -1,5 +1,17 @@
 # 本机开发记录
 
+## 2026-11-01：临时预览入口与 Node 24 兼容
+
+用户要求“动作”放在安装上方、增加临时预览资源入口，并确认没有未保存编辑，允许重启 Coo 和恢复当前页面。按 Coo skill／Cortina World 流程沿用 2.0.0-dev.0；卡片底部恢复安装、编辑、删除，动作单独置于其上方。
+
+复用实际 Coo 0.2.17 的 figure-frame 协议和 kit，保留第三方许可；改为带随机会话 token 的只读回环资源入口，保留 iframe sandbox 与 CSP，关闭后释放监听。人工预览固定 512 的贴图、画布与遮罩上限，不改变正式画质。修复 Node 24 下提前 mkdir 再 cp(errorOnExist) 导致的 ERR_FS_CP_EEXIST。详细边界与原因见 design/manual-bindings.md。
+
+本机 main.cjs 增加限路径、限回环、限 GET/HEAD 的临时转发规则，脚本不进入安装包，未知构建拒绝应用。原文件备份 E:/Coopanion-dev/_tmp/figure-preview-entry/host-backup/main.cjs.before-preview。完整重启后恢复原 workbench 路由，随后更新后台与刷新现有页面，实际 JS/CSS 为 564dd09fdcd7/696907b7244c。真实 renderer 中的临时 frame 成功渲染 DeepSeek，读回 512×512、maskSize=512，贴图最长边均不超过 512，已查看截图；关闭后入口失效。未修改真实绑定或安装形象。
+
+122 项测试通过、3 个其他素材测试跳过，Coo 自带 Node 24 另跑相关 78 项全通过；构建、项目检查、官方 describe/check 通过。隔离真实奶蛙验证组合／原生、复位、资源保护、保存重开与恢复通用，1536/900/540 无溢出并查看截图。安装预检 67 个文件，不含模型、Core、本机数据及宿主适配脚本。
+
+配置字节摘要、14 个旧卡片与须知确认记录均一致；AstrBot 按用户要求保持开启。证据 E:/Coopanion-dev/_tmp/figure-preview-entry/。未上传、未发布，不触碰用户 .codex/config.toml。
+
 ## 2026-11-01：人工预览与动作绑定
 
 用户授权升级无／人工／AI 适配方式，按现有圆角、蓝色、等长滑杆设计三栏模态弹窗。实际模型组合／原生预览、复位、搜索、手动绑定和恢复通用已经实现；人工模式不调用 AI。模式切换保留分析设置，兼容旧 AI 开关；全自动执行明确为自动安装。

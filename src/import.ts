@@ -183,7 +183,6 @@ export class PackImporter {
       if (!existsSync(join(destination,'.figure-import-cache'))) {
         if(existsSync(destination))throw new Error('自动化缓存路径已占用');
         await mkdir(base,{recursive:true});
-        await mkdir(destination);
         try { await cp(staged.root,destination,{recursive:true,force:false,errorOnExist:true});await writeFile(join(destination,'.figure-import-cache'),'1'); }
         catch(error){const rel=relative(base,resolve(destination));if(rel&&rel!== '..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel))await rm(destination,{recursive:true,force:true}).catch(()=>{});throw error;}
       }

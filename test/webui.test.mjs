@@ -533,3 +533,10 @@ test('manual mode disables AI options while retaining depth and analysis selecti
  change(mode,'0');change(mode,'2');assert.equal(gear.value,'2');assert.equal(depth.value,'2');assert.equal(depth.disabled,false);
  change(mode,'1');button('保存设置').click();await tick();assert.equal(configCalls[0].values['worlds.figure.adaptationMode'],'manual');assert(!('worlds.figure.assistMotions' in configCalls[0].values));
 });
+
+test('manual actions sit above the unchanged install/edit/delete row',async t=>{
+ const {root}=await mount(t,{ack:true,builds:[{id:'editable',at:1,bytes:1024,manualAvailable:true}]});
+ const card=root.querySelector('.l2d-card');assert.equal(card.querySelector(':scope > .l2d-card-binding').textContent,'动作');
+ assert.deepEqual([...card.querySelectorAll('.l2d-card-actions button')].map(b=>b.textContent),['安装','编辑','删除']);
+ assert.equal(card.querySelector('.l2d-card-binding').nextElementSibling.className,'l2d-card-actions');
+});

@@ -1,53 +1,27 @@
-// Included in the panel bundle. A preview owns its modules, images and animation loop.
+// The official figure-frame protocol, with a scoped temporary resource URL.
 async function mountBindingPreview(ctx,frame,data,alive,onStatus) {
-  const urls=[],files=new Map(),base='https://figure-preview.invalid/';
-  const object=(bytes,type)=>{const url=URL.createObjectURL(new Blob([bytes],{type}));urls.push(url);return url;};
-  const dispose=()=>{frame.src='about:blank';for(const url of urls)URL.revokeObjectURL(url);urls.length=0;};
-  try{
-    let cursor=0;
-    await Promise.all(Array.from({length:4},async()=>{while(cursor<data.files.length){
-      const file=data.files[cursor++],parts=[];
-      for(let at=0;at<file.size;at+=1048576){
-        if(!alive())throw Error('Preview closed');
-        const {b64}=await ctx.invoke('manualAsset',[data.token,file.path,at]);
-        const bytes=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));parts.push(bytes);
-      }
-      const blob=new Blob(parts);files.set(file.path,blob);
-    }}));
-    if(!alive())throw Error('Preview closed');
-    const assets={},imports={};
-    for(const [path,blob]of files){
-      if(path.endsWith('.js')&&!path.endsWith('live2dcubismcore.min.js')){
-        let code=await blob.text();
-        code=code.replace(/(\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(['"])(\.{1,2}\/[^'"]+)\2/g,(_,prefix,q,rel)=>prefix+q+new URL(rel,base+path).href+q);
-        imports[new URL(path,base).href]=object(code,'text/javascript');
-      } else assets[new URL(path,base).href]=object(blob,path.endsWith('.js')?'text/javascript':path.endsWith('.png')?'image/png':path.endsWith('.webp')?'image/webp':'application/octet-stream');
-    }
-    const escape=value=>JSON.stringify(value).replaceAll('<','\\u003c');
-    const html=`<!doctype html><html><head><meta charset="utf-8"><style>html,body,#root{width:100%;height:100%;margin:0;overflow:hidden}svg{width:100%;height:100%}</style>
-      <script src="${assets[base+'pack/sdk/live2dcubismcore.min.js']}"></script>
-      <script type="importmap">${escape({imports})}</script></head><body><div id="root"></div><script type="module">
-      const assets=${escape(assets)},channel=${escape(data.token)};
-      const report=(type,text)=>parent.postMessage({channel,type,text},'*');
-      let body,raf,last=performance.now();
-      try{
-        const kit=await import('${base}kit/body.js'),mod=await import('${base}pack/figure.js');
-        const host={root:document.querySelector('#root'),bounds:()=>({W:512,H:512,floorY:490,S:1.65}),emit(){},sound(){},start:{x:256,facing:1}};
-        const asset=p=>assets[new URL(p,'${base}pack/').href] || new URL(p,'${base}pack/').href;
-        const loadImage=u=>new Promise((ok,bad)=>{const img=new Image();img.onload=()=>ok(img);img.onerror=()=>bad(Error('Image failed'));img.src=assets[String(u)] || String(u);});
-        body=await mod.createFigureBody(new URL('${base}pack/'),{kit,host,loadImage,asset,preview:true,scheme:''});
-        host.root.querySelector('svg')?.setAttribute('viewBox','0 0 512 512');body.set?.({roam:'off'});body.do?.('neutral');
-        function tick(now){body.step(Math.min(.05,(now-last)/1000));last=now;raf=requestAnimationFrame(tick);}raf=requestAnimationFrame(tick);
-        addEventListener('message',e=>{if(e.source!==parent || e.data?.channel!==channel)return;const m=e.data;if(m.type==='play')globalThis.__l2dPreview?.play(m.resource,m.word,m.bindings,m.raw);if(m.type==='stop')globalThis.__l2dPreview?.stop();});
-        addEventListener('pagehide',()=>{cancelAnimationFrame(raf);body?.dispose();},{once:true});
-        report('ready','');
-      }catch(error){report('error',String(error.message||error));}
-      </script></body></html>`;
-    const listener=event=>{if(event.source!==frame.contentWindow||event.data?.channel!==data.token)return;onStatus(event.data.type,event.data.text);};
-    frame.ownerDocument.defaultView.addEventListener('message',listener);
-    frame.src=object(html,'text/html');
-    return ()=>{frame.ownerDocument.defaultView.removeEventListener('message',listener);dispose();};
-  }catch(error){dispose();throw error;}
+  const win=frame.ownerDocument.defaultView;
+  let ready=false,closed=false,clock,previousSize='';
+  const send=message=>{if(!closed)frame.contentWindow?.postMessage(message,'*');};
+  const bounds=()=>{const W=Math.max(100,frame.clientWidth),H=Math.max(100,frame.clientHeight);return {W,H,floorY:H-12,S:Math.min(W/300,(H-32)/256)};};
+  const tick=dtMs=>{
+    if(closed||!alive()||!ready)return;
+    const size=bounds(),key=JSON.stringify(size);if(key!==previousSize){previousSize=key;send({t:'set',state:{bounds:size}});}
+    send({t:'tick',dt:Math.min(.05,Math.max(0,dtMs)/1000)||.016});
+  };
+  const dispose=()=>{if(closed)return;closed=true;clock?.dispose?.();clearTimeout(timer);win.removeEventListener('message',listener);frame.src='about:blank';};
+  const fail=message=>{dispose();if(alive())onStatus('error',message);};
+  const timer=setTimeout(()=>fail('模型预览加载超时，请重试'),20000);
+  const listener=event=>{
+    if(event.source!==frame.contentWindow||closed)return;
+    const m=event.data||{};
+    if(m.t==='loaded')send({t:'init',entry:data.preview.entry,base:data.preview.base,export:'createFigureBody',scheme:'',start:{x:bounds().W/2,facing:1},bounds:bounds(),language:ctx.language||'zh',theme:'light'});
+    else if(m.t==='ready'&&!ready){ready=true;clearTimeout(timer);send({t:'set',state:{roam:'off'}});clock=ctx.frame(tick);onStatus('ready','');}
+    else if(m.t==='error')fail(m.message||'模型预览失败');
+  };
+  win.addEventListener('message',listener);
+  frame.setAttribute('sandbox','allow-scripts');frame.src=data.preview.url;
+  return dispose;
 }
 
 async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
@@ -62,7 +36,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   const close=el('button','l2d-btn quiet l2d-modal-close','×');close.setAttribute('aria-label',t('关闭动作绑定','Close bindings'));head.append(heading,close);
   const layout=el('div','l2d-bind-layout'),left=el('nav','l2d-bind-targets'),stage=el('section','l2d-bind-stage'),right=el('section','l2d-bind-resources');
   left.setAttribute('aria-label',t('绑定目标','Binding targets'));right.setAttribute('aria-label',t('原生资源','Native resources'));
-  const frame=el('iframe','l2d-bind-frame');frame.title=t('模型实时预览','Live model preview');frame.setAttribute('sandbox','allow-scripts allow-same-origin');
+  const frame=el('iframe','l2d-bind-frame');frame.title=t('模型实时预览','Live model preview');frame.setAttribute('sandbox','allow-scripts');
   const hint=el('p','l2d-bind-status',t('准备模型…','Preparing model…'));hint.setAttribute('role','status');
   const toolbar=el('div','l2d-bind-toolbar'),raw=el('button','l2d-btn sm',t('组合效果','Combined')),replay=el('button','l2d-btn sm',t('重播','Replay')),reset=el('button','l2d-btn sm',t('复位','Reset'));
   toolbar.append(raw,replay,reset);stage.append(frame,hint,toolbar);layout.append(left,stage,right);
@@ -76,7 +50,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   close.onclick=cancel.onclick=requestClose;modal.addEventListener('cancel',e=>{e.preventDefault();void requestClose();});modal.addEventListener('click',e=>{if(e.target===modal)void requestClose();});
   const leave=ctx.guardLeave?.(()=>alive()&&(dirty||saving)?t('动作绑定尚未保存，确定离开？','Bindings are not saved. Leave?'):null);
   ctx.signal?.addEventListener('abort',release,{once:true});
-  const send=type=>{if(ready)frame.contentWindow.postMessage({channel:data.token,type,resource:resource?.id,word,bindings,raw:rawMode},'*');};
+  const send=type=>{if(ready)frame.contentWindow.postMessage({t:type==='play'?'preview-play':'preview-stop',resource:resource?.id,word,bindings,raw:rawMode},'*');};
   const play=()=>{send('play');hint.textContent=resource?`${label(word)} · ${resource.title}`:t('通用表现','Generic behavior');};
   raw.onclick=()=>{rawMode=!rawMode;raw.textContent=rawMode?t('原生效果','Native only'):t('组合效果','Combined');raw.setAttribute('aria-pressed',String(rawMode));play();};replay.onclick=play;reset.onclick=()=>{send('stop');hint.textContent=t('已复位','Reset');};
   let filter='all';const search=el('input','l2d-input');search.placeholder=t('搜索原生资源','Search native resources');search.setAttribute('aria-label',search.placeholder);
@@ -915,7 +889,7 @@ export default {
               } finally { setBusy(false); }
             });
             del.classList.add('quiet');
-            if(b.manualAvailable){const bind=el('button','l2d-btn sm',t('动作','Actions'));bind.addEventListener('click',()=>openBindings('manualOpenBuild',[b.id]));row.append(bind);}
+            if(b.manualAvailable){const bind=el('button','l2d-btn sm l2d-card-binding',t('动作','Actions'));bind.addEventListener('click',()=>openBindings('manualOpenBuild',[b.id]));card.appendChild(bind);}
             row.append(edit, del);
             cardActions.appendChild(row);
             card.appendChild(cardActions);

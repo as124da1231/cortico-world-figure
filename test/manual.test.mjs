@@ -35,12 +35,18 @@ test('native edits preserve profile settings, validate targets, and remove clear
 test('preview sessions expose only allowlisted chunks, detect changed packs and clean their resources',async t=>{
  const {root,pack}=await fixture(t),sessions=new ManualSessions(root,new URL('../workbench',import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1'));
  t.after(()=>sessions.stop());const result=await sessions.open(pack,catalog,binding);
- assert.equal(result.resources.length,3);assert(!result.resources[0].raw);assert(result.files.some(f=>f.path==='kit/body.js'));
+ assert.equal(result.resources.length,3);assert(!result.resources[0].raw);assert(result.files.some(f=>f.path==='web/kit/body.js'));
  await assert.rejects(sessions.asset(result.token,'../secret',0),/无效/);
  await assert.rejects(sessions.asset(result.token,'pack/figure.json',-1),/无效/);
+ const loaded=await fetch(result.preview.url);assert.equal(loaded.status,200);assert.match(loaded.headers.get('content-security-policy'),/sandbox allow-scripts/);
+ assert.equal((await fetch(result.preview.url,{method:'HEAD'})).status,200);
+ assert.equal((await fetch(result.preview.url,{headers:{origin:'https://example.com'}})).status,403);
+ assert.equal((await fetch(result.preview.url.replace(result.token,'00000000-0000-0000-0000-000000000000'))).status,404);
+ const base=new URL('.',result.preview.url);assert.equal((await fetch(new URL('pack/native-library.json',base))).status,404);assert.equal((await fetch(result.preview.url,{method:'POST'})).status,405);
+ const profile=await(await fetch(new URL('pack/models/sample/profile.js',base))).text();assert.match(profile,/textureLimit:512,canvasLimit:512/);assert.doesNotMatch(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/textureLimit:512/);
  const bytes=await sessions.asset(result.token,'pack/figure.json',0);assert(Buffer.from(bytes.b64,'base64').length>0);
  await writeFile(join(pack,'changed.txt'),'changed');await assert.rejects(sessions.validate(result.token,binding),/变化/);
- await sessions.close(result.token);assert.equal(sessions.sessions.size,0);assert.equal((await readdir(join(root,'manual-preview'))).length,0);
+ await sessions.close(result.token);assert.equal(sessions.sessions.size,0);assert.equal((await readdir(join(root,'manual-preview'))).length,0);await assert.rejects(fetch(result.preview.url));
 });
 test('manual mode never submits imported model analysis to the AI',async t=>{
  const {root}=await fixture(t),model=join(root,'source');await mkdir(model);await writeFile(join(model,'a.model3.json'),JSON.stringify({FileReferences:{Moc:'a.moc3',Textures:[]}}));await writeFile(join(model,'a.moc3'),'fixture');
