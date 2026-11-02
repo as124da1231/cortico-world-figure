@@ -1,0 +1,28 @@
+{
+  "repository": "Undi95/Hanami",
+  "commit": "5cf4afaac1ad8499d0890101a7c93762bf1dc8b0",
+  "license": "Apache-2.0 (Overte-derived animations; see upstream notices)",
+  "sources": [
+    {
+      "file": "idle.vrma",
+      "url": "https://raw.githubusercontent.com/Undi95/Hanami/5cf4afaac1ad8499d0890101a7c93762bf1dc8b0/vrma/idle.vrma",
+      "bytes": 193244,
+      "gitBlob": "e0b565afd26bccec881665980afff39c45306322",
+      "sha256": "9563c582418bd5b51da473ea85b41722cb5304f84128935c3b570c72316c444a"
+    },
+    {
+      "file": "idle-2.vrma",
+      "url": "https://raw.githubusercontent.com/Undi95/Hanami/5cf4afaac1ad8499d0890101a7c93762bf1dc8b0/vrma/idle-2.vrma",
+      "bytes": 443552,
+      "gitBlob": "ca8c86c3bc56a8f537c4b90494a416140dd099b5",
+      "sha256": "7985c8621c2fb965b7d6f5236efa885cfa7fa92995d544f470dc0028864efa13"
+    },
+    {
+      "file": "idle-3.vrma",
+      "url": "https://raw.githubusercontent.com/Undi95/Hanami/5cf4afaac1ad8499d0890101a7c93762bf1dc8b0/vrma/idle-3.vrma",
+      "bytes": 449952,
+      "gitBlob": "60fb8ab27afef15f78dd2b5208c5e74650539503",
+      "sha256": "53fef1f07988adceb758ec2a9dc92ee29410698da8e1a0a49d156a662756800e"
+    }
+  ]
+}

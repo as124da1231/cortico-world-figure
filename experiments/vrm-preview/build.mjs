@@ -12,7 +12,7 @@ export async function buildApp() {
   for (const candidate of candidates) {
     try {
       const modules = join(resolve(candidate), 'node_modules');
-      for (const [name, version] of [['three', '0.180.0'], ['@pixiv/three-vrm', '3.4.2'], ['esbuild', '0.25.10']]) {
+      for (const [name, version] of [['three', '0.180.0'], ['@pixiv/three-vrm', '3.4.2'], ['@pixiv/three-vrm-animation', '3.4.2'], ['esbuild', '0.25.10']]) {
         const manifest = JSON.parse(await readFile(join(modules, name, 'package.json'), 'utf8'));
         if (manifest.version !== version) throw new Error(`${name} version mismatch`);
       }
@@ -30,8 +30,11 @@ export async function buildApp() {
     target: 'chrome120', minify: true, legalComments: 'eof', logLevel: 'warning',
   });
   const licenses = [];
-  for (const name of ['three', '@pixiv/three-vrm']) {
+  for (const name of ['three', '@pixiv/three-vrm', '@pixiv/three-vrm-animation']) {
     licenses.push(`${name}\n${await readFile(join(dependencies, name, 'LICENSE'), 'utf8')}`);
+  }
+  for (const file of ['UPSTREAM-NOTICE.md', 'Apache-2.0.txt']) {
+    licenses.push(`Overte / Hanami animation assets — ${file}\n${await readFile(join(root, 'assets/animations/overte', file), 'utf8')}`);
   }
   await writeFile(join(root, '.local/THIRD_PARTY_LICENSES.txt'), licenses.join('\n\n'), 'utf8');
 }

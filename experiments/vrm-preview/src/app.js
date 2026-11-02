@@ -2,21 +2,25 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMAnimationLoaderPlugin } from '@pixiv/three-vrm-animation';
 import { inspectVrm, MAX_MODEL_BYTES } from './model-file.mjs';
-import { motions, envelope, smoothstep } from './motion.mjs';
+import { motions } from './motion.mjs';
+import { AvatarPerformance } from './performance.js';
 
 const $ = id => document.getElementById(id);
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const state = {
   vrm: null, name: '', file: '', bytes: 0, height: 1.6, loadedMs: 0,
   time: 0, action: 'idle', actionStart: 0, amplitude: .8, expression: '', weight: 1,
-  paused: false, blink: true, gaze: true, talk: false, loop: false,
+  paused: reducedMotion, blink: true, gaze: true, talk: false, loop: false, life: !reducedMotion, performance: null,
   view: 'full', background: 'light', generation: 0, loading: false, ready: false,
-  frames: 0, renderMs: 0, stats: {}, expressions: [], bones: new Map(),
+  frames: 0, renderMs: 0, stats: {}, expressions: [], bones: new Map(), animations: new Map(), assetWarning: '',
 };
 let renderer, scene, camera, controls, floor, grid, gazeTarget, resizeObserver;
 let lastFrame = performance.now(), metricStart = lastFrame, metricFrames = 0, pointer = new THREE.Vector2();
 let frameId = 0, pendingFetch;
-const rotation = new THREE.Quaternion(), euler = new THREE.Euler();
+let pointerDown = null;
+const hitRay = new THREE.Raycaster();
 const expressionNames = {
   happy: '开心', joy: '开心', angry: '生气', sad: '难过', sorrow: '难过', relaxed: '放松', fun: '放松',
   surprised: '惊讶', neutral: '中性', blink: '眨眼', blinkLeft: '左眼眨眼', blinkRight: '右眼眨眼',
@@ -41,12 +45,12 @@ function setLoading(value, label = '正在载入模型…') {
 
 function syncControls() {
   const unavailable = !state.ready || state.loading;
-  for (const el of document.querySelectorAll('.motion-button,.expression-button,#pause,#reset,#capture,#neutral,#amplitude,#weight,#full,#face,#home,#blink,#gaze,#talk,#loop')) {
+  for (const el of document.querySelectorAll('.motion-button,.expression-button,#pause,#reset,#capture,#neutral,#amplitude,#weight,#full,#face,#home,#blink,#gaze,#talk,#loop,#life')) {
     el.disabled = unavailable || (el.dataset.unsupported === 'true');
   }
   $('pause').textContent = state.paused ? '▶' : 'Ⅱ';
   $('pause').ariaLabel = state.paused ? '继续播放' : '暂停播放';
-  $('current-action').textContent = motions.find(m => m.id === state.action)?.name || '自然待机';
+  $('current-action').textContent = state.performance?.snapshot().gesture?.name || '自然待机';
   $('current-expression').textContent = state.expression ? (expressionNames[state.expression] || state.expression) : '未选表情';
   for (const el of document.querySelectorAll('.motion-button')) {
     const active = el.dataset.motion === state.action;
@@ -89,8 +93,24 @@ function initScene() {
   renderer.domElement.addEventListener('pointermove', event => {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -((event.clientY - rect.top) / rect.height * 2 - 1));
+    if (pointerDown && Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 6) pointerDown.moved = true;
+    const dragging = pointerDown?.moved;
+    state.performance?.setPointer(pointer.x, pointer.y, !dragging);
   });
-  renderer.domElement.addEventListener('pointerleave', () => pointer.set(0, 0));
+  renderer.domElement.addEventListener('pointerleave', () => { state.performance?.setPointer(pointer.x, pointer.y, false); pointerDown = null; });
+  renderer.domElement.addEventListener('pointerdown', event => {
+    if (event.button === 0) pointerDown = { x: event.clientX, y: event.clientY, moved: false };
+  });
+  renderer.domElement.addEventListener('pointerup', event => {
+    if (pointerDown && !pointerDown.moved && event.button === 0 && Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) < 6 && state.ready && !state.paused) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -((event.clientY - rect.top) / rect.height * 2 - 1));
+      hitRay.setFromCamera(pointer, camera);
+      if (hitRay.intersectObject(state.vrm.scene, true).length) state.performance.react(state.life);
+    }
+    pointerDown = null;
+  });
+  renderer.domElement.addEventListener('pointercancel', () => { pointerDown = null; });
   renderer.domElement.addEventListener('webglcontextlost', event => {
     event.preventDefault(); state.ready = false; syncControls();
     $('status').textContent = '渲染已中断'; error('显卡渲染上下文丢失。请刷新这个独立预览页面后重新打开模型。');
@@ -161,8 +181,9 @@ async function loadBuffer(buffer, fileName, generation) {
     vrm.scene.traverse(obj => { if (obj.isMesh) obj.frustumCulled = false; });
     vrm.humanoid.resetNormalizedPose();
     const left = vrm.humanoid.getNormalizedBoneNode('leftUpperArm'), right = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
-    if (left) left.rotation.z = 1.05;
-    if (right) right.rotation.z = -1.05;
+    const armFrame = vrm.meta?.metaVersion === '0' ? 1 : -1;
+    if (left) left.rotation.z = 1.05 * armFrame;
+    if (right) right.rotation.z = -1.05 * armFrame;
     vrm.update(0); vrm.scene.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(vrm.scene, true);
     const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
@@ -183,20 +204,22 @@ async function loadBuffer(buffer, fileName, generation) {
       }
     });
     const maxTexture = Math.max(0, ...[...textures].map(t => Math.max(t.image?.width || 0, t.image?.height || 0)));
-    const old = state.vrm;
+    const nextPerformance = new AvatarPerformance(vrm, size.y, { animations: state.animations });
+    const old = state.vrm, oldPerformance = state.performance;
     Object.assign(state, { vrm, bones, height: size.y, bytes: buffer.byteLength, loadedMs: Math.round(performance.now() - started),
-      name: vrm.meta?.name || vrm.meta?.title || fileName, file: fileName, ready: true, paused: false, time: 0, action: 'idle', actionStart: 0, expression: '',
+      name: vrm.meta?.name || vrm.meta?.title || fileName, file: fileName, ready: true, paused: reducedMotion, time: 0, action: 'idle', actionStart: 0, expression: '',
       expressions: Object.keys(vrm.expressionManager?.expressionMap || {}),
       stats: { triangles: Math.round(triangles), meshes, textures: textures.size, maxTexture, width: size.x, boneCount: Object.keys(vrm.humanoid.normalizedHumanBones || {}).length },
     });
-    scene.add(vrm.scene); release(old);
+    state.performance = nextPerformance;
+    scene.add(vrm.scene); oldPerformance?.dispose(); release(old);
     floor.scale.setScalar(size.y * 1.1); floor.visible = true;
     if (vrm.lookAt) vrm.lookAt.target = gazeTarget;
     gazeTarget.position.set(0, size.y * .9, size.y * 2);
     $('empty').hidden = true; $('status').textContent = '正在预览'; $('status').classList.add('ready');
     $('format').hidden = false; $('format').textContent = `VRM ${vrm.meta?.metaVersion === '0' ? '0.x' : '1.0'}`;
     renderExpressions(); renderInfo(); updateCapabilities(); frameModel('full'); syncControls();
-    error('');
+    error(state.assetWarning);
   } catch (err) { if (state.vrm !== vrm) release(vrm); throw err; }
 }
 
@@ -249,6 +272,7 @@ function renderInfo() {
     ['名称', state.name], ['文件', state.file], ['文件体积', `${(state.bytes / 1024 / 1024).toFixed(2)} MiB`],
     ['三角面', state.stats.triangles.toLocaleString()], ['骨骼', state.stats.boneCount], ['表情', state.expressions.length],
     ['最大贴图边', `${state.stats.maxTexture} px`], ['解析就绪', `${state.loadedMs} ms`],
+    ['待机来源', state.performance.snapshot().idleSource],
   ];
   $('model-info').replaceChildren();
   for (const [key, value] of values) {
@@ -268,72 +292,19 @@ function updateCapabilities() {
   const manager = state.vrm.expressionManager;
   $('blink').dataset.unsupported = String(!manager?.getExpression('blink'));
   $('talk').dataset.unsupported = String(!manager?.getExpression('aa'));
-  $('gaze').dataset.unsupported = String(!state.vrm.lookAt);
+  $('gaze').dataset.unsupported = String(!state.bones.has('head'));
 }
 
-function turn(name, x = 0, y = 0, z = 0, blend = 1) {
-  const node = state.bones.get(name); if (!node) return;
-  rotation.setFromEuler(euler.set(x, y, z));
-  node.quaternion.slerp(rotation, blend);
-}
-
-function applyPose() {
-  const vrm = state.vrm, t = state.time, amp = state.amplitude;
-  vrm.humanoid.resetNormalizedPose();
-  turn('leftUpperArm', 0, 0, 1.05); turn('rightUpperArm', 0, 0, -1.05);
-  turn('leftLowerArm', -.09, 0, .04); turn('rightLowerArm', -.09, 0, -.04);
-  turn('spine', Math.sin(t * 1.5) * .012 * amp, 0, Math.sin(t * .65) * .012 * amp);
-  turn('neck', Math.sin(t * .8) * .014 * amp, Math.sin(t * .5) * .02 * amp);
-  const motion = motions.find(m => m.id === state.action);
-  let phase = t - state.actionStart;
-  if (state.action !== 'idle' && phase >= motion.duration) {
-    if (state.loop) { phase %= motion.duration; state.actionStart = t - phase; }
-    else { state.action = 'idle'; state.actionStart = t; syncControls(); }
-  }
-  const weight = state.action === 'idle' ? 0 : envelope(phase, motion.duration);
-  if (state.action === 'wave') {
-    turn('rightUpperArm', -.15, 0, .35, weight);
-    turn('rightLowerArm', 0, 0, 1.62, weight);
-    turn('rightHand', 0, Math.sin(phase * 9) * .32 * amp, Math.sin(phase * 9) * .18 * amp, weight);
-    turn('head', 0, -.06 * amp, -.06 * amp, weight);
-  } else if (state.action === 'nod') {
-    turn('head', Math.sin(phase * 5.4) * .23 * amp, 0, 0, weight);
-  } else if (state.action === 'shake') {
-    turn('head', 0, Math.sin(phase * 5.1) * .32 * amp, 0, weight);
-  } else if (state.action === 'bow') {
-    const bend = Math.pow(Math.sin(Math.PI * Math.max(0, Math.min(1, phase / motion.duration))), 1.5) * amp;
-    turn('hips', .1 * bend, 0, 0); turn('spine', .45 * bend, 0, 0); turn('head', .12 * bend, 0, 0);
-  } else if (state.action === 'walk') {
-    const stride = Math.sin(phase * 6.5) * .38 * amp;
-    turn('leftUpperLeg', stride, 0, 0, weight); turn('rightUpperLeg', -stride, 0, 0, weight);
-    turn('leftLowerLeg', Math.max(0, -Math.sin(phase * 6.5)) * .6 * amp, 0, 0, weight);
-    turn('rightLowerLeg', Math.max(0, Math.sin(phase * 6.5)) * .6 * amp, 0, 0, weight);
-    turn('leftUpperArm', -stride * .65, 0, 1.05, weight); turn('rightUpperArm', stride * .65, 0, -1.05, weight);
-  }
-  const progress = state.action === 'idle' ? 0 : Math.min(1, phase / motion.duration);
-  $('progress').style.width = `${progress * 100}%`;
-  $('time').textContent = state.action === 'idle' ? (state.paused ? '已暂停' : '自由预览') : `${Math.min(phase, motion.duration).toFixed(1)} / ${motion.duration.toFixed(1)}s`;
-  const manager = vrm.expressionManager;
-  if (manager) {
-    manager.resetValues();
-    if (state.expression) manager.setValue(state.expression, state.weight);
-    if (state.blink && manager.getExpression('blink') && !manager.blinkExpressionNames.includes(state.expression)) {
-      const blinkPhase = t % 4.4;
-      if (blinkPhase > 4.1) manager.setValue('blink', Math.max(0, Math.sin((blinkPhase - 4.1) / .3 * Math.PI)));
-    }
-    if (state.talk && !manager.mouthExpressionNames.includes(state.expression)) manager.setValue('aa', (.18 + Math.pow(Math.sin(t * 9), 2) * .55) * amp);
-  }
-  if (vrm.lookAt) {
-    const autoGaze = state.gaze && !manager?.lookAtExpressionNames.includes(state.expression);
-    vrm.lookAt.autoUpdate = autoGaze;
-    if (!autoGaze) {
-      vrm.lookAt.reset(); vrm.lookAt.update(0);
-      // A reset through an expression-based lookAt applier also clears gaze weights.
-      // Let an explicitly selected native gaze expression own that channel afterward.
-      if (manager?.lookAtExpressionNames.includes(state.expression)) manager.setValue(state.expression, state.weight);
-    }
-    gazeTarget.position.set(pointer.x * state.height * .7, state.height * (.88 + pointer.y * .28), state.height * 2);
-  }
+function updatePerformance(dt) {
+  state.performance.update(dt, state, camera, gazeTarget);
+  state.time = state.performance.time;
+  const current = state.performance.snapshot();
+  const action = current.gesture?.id || 'idle';
+  if (state.action !== action) { state.action = action; syncControls(); }
+  $('progress').style.width = `${current.gesture ? current.gesture.time / current.gesture.duration * 100 : 0}%`;
+  const labels = { attend: '在留意你', linger: '目送片刻', glance: '稍稍看看周围', rest: '自在待机' };
+  $('status').textContent = state.paused ? '已暂停' : state.life ? (current.gesture?.source === 'automatic' ? '回应你的轻触' : labels[current.behavior.mode]) : '手动试播';
+  $('time').textContent = current.gesture ? `${current.gesture.time.toFixed(1)} / ${current.gesture.duration.toFixed(1)}s` : state.paused ? '已暂停' : state.life ? current.idleName : '自由预览';
 }
 
 function tick(now) {
@@ -342,7 +313,7 @@ function tick(now) {
   if (document.hidden || !renderer) return;
   const start = performance.now();
   controls.update();
-  if (state.ready) { if (!state.paused) state.time += dt; applyPose(); state.vrm.update(state.paused ? 0 : dt); }
+  if (state.ready) updatePerformance(state.paused ? 0 : dt);
   renderer.render(scene, camera);
   state.frames++; metricFrames++; state.renderMs = performance.now() - start;
   if (now - metricStart >= 1000) {
@@ -354,20 +325,20 @@ function tick(now) {
 
 function resetAll() {
   if (!state.ready) return;
-  Object.assign(state, { expression: '', action: 'idle', actionStart: state.time, paused: false, talk: false });
+  Object.assign(state, { expression: '', action: 'idle', actionStart: 0, time: 0, paused: false, talk: false });
   $('talk').checked = false;
-  state.vrm.expressionManager?.resetValues(); state.vrm.lookAt?.reset();
-  applyPose(); state.vrm.update(0); state.vrm.scene.updateMatrixWorld(true); state.vrm.springBoneManager?.reset();
+  state.performance.reset(); updatePerformance(0); state.vrm.springBoneManager?.reset();
   syncControls();
 }
 
 function bindUI() {
+  $('life').checked = state.life;
   for (const motion of motions) {
     const button = document.createElement('button'); button.className = 'motion-button'; button.dataset.motion = motion.id;
     const icon = document.createElement('span'); icon.className = 'motion-icon'; icon.textContent = motion.icon; icon.ariaHidden = 'true';
     const copy = document.createElement('span'), name = document.createElement('strong'), note = document.createElement('small');
     name.textContent = motion.name; note.textContent = motion.note; copy.append(name, note); button.append(icon, copy);
-    button.onclick = () => { state.action = motion.id; state.actionStart = state.time; state.paused = false; syncControls(); };
+    button.onclick = () => { state.performance.playGesture(motion.id, { loop: state.loop }); state.action = motion.id; state.paused = false; syncControls(); };
     $('motions').append(button);
   }
   $('open').onclick = () => $('file').click();
@@ -381,7 +352,7 @@ function bindUI() {
     $('amplitude-value').textContent = `${Math.round(state.amplitude * 100)}%`;
   };
   $('weight').oninput = () => { state.weight = Number($('weight').value) / 100; $('weight-value').textContent = `${Math.round(state.weight * 100)}%`; };
-  for (const id of ['blink', 'gaze', 'talk', 'loop']) $(id).onchange = () => { state[id] = $(id).checked; };
+  for (const id of ['blink', 'gaze', 'talk', 'loop', 'life']) $(id).onchange = () => { state[id] = $(id).checked; };
   $('full').onclick = () => frameModel('full'); $('face').onclick = () => frameModel('face'); $('home').onclick = () => frameModel();
   for (const button of document.querySelectorAll('[data-bg]')) button.onclick = () => {
     state.background = button.dataset.bg; $('stage').dataset.background = state.background;
@@ -420,16 +391,30 @@ Object.defineProperty(window, '__vrmPreview', { value: Object.freeze({ inspect: 
   expressions: [...state.expressions], weights: Object.fromEntries(state.expressions.map(n => [n, state.vrm?.expressionManager?.getValue(n)])),
   bones: Object.fromEntries([...state.bones].map(([name, b]) => [name, b.quaternion.toArray()])),
   camera: camera?.position.toArray(), height: state.height,
+  performance: state.performance?.snapshot(),
 }) }) });
+
+async function loadMotionAssets() {
+  const assets = [['balanced', 'idle.vrma'], ['rest-left', 'idle-2.vrma'], ['rest-right', 'idle-3.vrma']];
+  const loader = new GLTFLoader(); loader.register(parser => new VRMAnimationLoaderPlugin(parser));
+  const results = await Promise.allSettled(assets.map(async ([id, file]) => {
+    const gltf = await loader.loadAsync(`/animations/${file}`);
+    const animation = gltf.userData.vrmAnimations?.[0];
+    if (!animation || !Number.isFinite(animation.duration) || animation.duration <= 0 || animation.restHipsPosition.y <= 0) throw new Error('无有效 VRM 动画');
+    return [id, animation];
+  }));
+  for (const result of results) if (result.status === 'fulfilled') state.animations.set(...result.value);
+  if (state.animations.size !== assets.length) state.assetWarning = '部分待机素材未能读取，暂用内置关键帧。重新启动本地服务后再刷新可重试。';
+}
 
 try {
   bindUI(); initScene(); frameId = requestAnimationFrame(tick);
-  const info = await fetch('/api/info').then(r => r.json());
+  const [info] = await Promise.all([fetch('/api/info').then(r => r.json()), loadMotionAssets()]);
   if (info.sample) { $('sample').onclick = () => openSource(info.sample); await openSource(info.sample); }
   else { $('status').textContent = '等待打开模型'; $('sample').hidden = true; }
 } catch (err) { error(`预览初始化失败：${err.message}`); }
 
 window.addEventListener('pagehide', () => {
   state.generation++; pendingFetch?.abort(); cancelAnimationFrame(frameId); resizeObserver?.disconnect(); controls?.dispose();
-  release(state.vrm); floor?.geometry.dispose(); floor?.material.map.dispose(); floor?.material.dispose(); grid?.geometry.dispose(); grid?.material.dispose(); renderer?.dispose();
+  state.performance?.dispose(); release(state.vrm); floor?.geometry.dispose(); floor?.material.map.dispose(); floor?.material.dispose(); grid?.geometry.dispose(); grid?.material.dispose(); renderer?.dispose();
 }, { once: true });

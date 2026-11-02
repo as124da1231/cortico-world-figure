@@ -17,6 +17,7 @@ const files = new Map([
   ['/app.js', [join(root, '.local/app.js'), 'text/javascript; charset=utf-8']],
   ['/licenses', [join(root, '.local/THIRD_PARTY_LICENSES.txt'), 'text/plain; charset=utf-8']],
   ['/sample.vrm', [sample, 'model/gltf-binary']],
+  ...['idle.vrma', 'idle-2.vrma', 'idle-3.vrma'].map(name => [`/animations/${name}`, [join(root, 'assets/animations/overte', name), 'model/gltf-binary']]),
 ]);
 const server = createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
