@@ -11,6 +11,8 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('无
 const address = `http://127.0.0.1:${port}`;
 const files = new Map([
   ['/', [join(root, 'index.html'), 'text/html; charset=utf-8']],
+  ['/index.html', [join(root, 'index.html'), 'text/html; charset=utf-8']],
+  ['/file-entry.js', [join(root, 'file-entry.js'), 'text/javascript; charset=utf-8']],
   ['/style.css', [join(root, 'style.css'), 'text/css; charset=utf-8']],
   ['/app.js', [join(root, '.local/app.js'), 'text/javascript; charset=utf-8']],
   ['/licenses', [join(root, '.local/THIRD_PARTY_LICENSES.txt'), 'text/plain; charset=utf-8']],
@@ -31,7 +33,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/api/info') {
     let sampleInfo = null;
     try { const s = await stat(sample); if (s.isFile()) sampleInfo = { name: basename(sample), bytes: s.size }; } catch { /* Optional sample. */ }
-    const body = JSON.stringify({ sample: sampleInfo });
+    const body = JSON.stringify({ app: 'coo-vrm-preview', sample: sampleInfo });
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(req.method === 'HEAD' ? undefined : body); return;
   }
   const resource = files.get(url.pathname);
