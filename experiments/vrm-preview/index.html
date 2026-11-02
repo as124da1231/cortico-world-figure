@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Coo · 3D 预览试验台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">c<span>oo</span></span><span class="brand-divider"></span><span>3D 试验台</span><span class="pill">本地预览</span></div>
+      <div class="top-right"><button id="help" class="text-button">关于预览</button><span class="version">v0.1.0</span></div>
+    </header>
+    <section class="intro">
+      <div><div class="eyebrow">A LITTLE MORE ALIVE</div><h1>让它，动起来。</h1><p>转个身，试个表情，看看 3D 形象的第一步。</p></div>
+      <div class="import-actions"><button id="sample" class="button secondary">载入本地样本</button><button id="open" class="button primary"><span aria-hidden="true">＋</span> 打开 VRM</button><input id="file" type="file" accept=".vrm" hidden></div>
+    </section>
+    <div id="error" class="error" role="alert" hidden></div>
+    <main class="workspace">
+      <aside class="panel motion-panel">
+        <div class="section-heading"><h2>试试动作</h2><span class="subtle">通用配方</span></div>
+        <p class="section-description">同一套动作，交给人形骨骼。</p>
+        <div id="motions" class="motion-list"></div>
+        <div class="divider"></div>
+        <label class="slider-label" for="amplitude"><span>动作幅度</span><output id="amplitude-value">自然</output></label>
+        <input id="amplitude" class="range" aria-label="动作幅度" type="range" min="30" max="130" value="80">
+        <div class="slider-ends"><span>轻一些</span><span>明显一些</span></div>
+        <div class="divider"></div>
+        <label class="toggle-row"><span>自然眨眼</span><input id="blink" type="checkbox" role="switch" checked><span class="switch" aria-hidden="true"></span></label>
+        <label class="toggle-row"><span>视线跟随</span><input id="gaze" type="checkbox" role="switch" checked><span class="switch" aria-hidden="true"></span></label>
+        <label class="toggle-row"><span>说话口型<span class="micro-note">试播</span></span><input id="talk" type="checkbox" role="switch"><span class="switch" aria-hidden="true"></span></label>
+        <label class="toggle-row"><span>循环动作</span><input id="loop" type="checkbox" role="switch"><span class="switch" aria-hidden="true"></span></label>
+        <p class="panel-footnote">头发与衣摆沿用模型原有物理。</p>
+      </aside>
+      <section id="stage" class="stage" data-background="light" aria-label="3D 模型预览，拖动旋转，滚轮缩放">
+        <div id="viewport" class="viewport"></div>
+        <div class="stage-top"><span id="status" class="status" role="status">准备载入</span><div class="stage-top-right"><span id="format" class="format" hidden></span><button id="capture" class="icon-button" title="保存透明截图" aria-label="保存透明截图" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h4l1.5-2h5L16 7h4a1 1 0 0 1 1 1v11H3V8a1 1 0 0 1 1-1Z"/><circle cx="12" cy="12.5" r="3.5"/></svg></button></div></div>
+        <div id="empty" class="empty"><div class="empty-orbit">◇</div><strong>给一个形象留的位置</strong><span>打开或拖入 .vrm 文件</span></div>
+        <div id="loading" class="loading" hidden><span class="spinner"></span><span id="loading-label">正在载入模型…</span></div>
+        <div class="stage-bottom"><div class="view-controls" aria-label="取景"><button id="full" class="view-button active">全身</button><button id="face" class="view-button">面部</button><button id="home" class="view-button" title="恢复正面视角">复位视角</button></div><div class="backgrounds" aria-label="背景"><button data-bg="light" class="swatch light active" aria-label="浅色背景" title="浅色背景"></button><button data-bg="dark" class="swatch dark" aria-label="深色背景" title="深色背景"></button><button data-bg="grid" class="swatch grid" aria-label="网格背景" title="网格背景"></button></div></div>
+        <div class="drop-hint">松开，看看这个新形象</div>
+      </section>
+      <aside class="panel expression-panel">
+        <div class="section-heading"><h2>模型的表情</h2><span id="expression-count" class="count">0</span></div>
+        <p class="section-description">来自模型本身，可以叠加试动作。</p>
+        <div id="expressions" class="expression-list"><p class="no-content">载入后显示实际可用表情</p></div>
+        <div class="expression-weight"><label class="slider-label" for="weight"><span>表情强度</span><output id="weight-value">100%</output></label><input id="weight" class="range" aria-label="表情强度" type="range" min="0" max="100" value="100"><div class="slider-ends"><span>微微流露</span><span>完整呈现</span></div></div>
+        <button id="neutral" class="button secondary full-width" disabled>恢复中性表情</button>
+        <details class="model-details"><summary>模型信息 <span aria-hidden="true">↗</span></summary><dl id="model-info"><dt>状态</dt><dd>等待载入</dd></dl><p id="texture-note" class="detail-note">保留原始贴图与全部表情。</p></details>
+      </aside>
+    </main>
+    <section class="transport" aria-label="播放控制"><div class="transport-left"><button id="pause" class="play-button" aria-label="暂停播放" disabled>Ⅱ</button><div><strong id="current-action">自然待机</strong><span id="current-expression">未选表情</span></div></div><div class="timeline"><div class="timeline-track"><span id="progress"></span></div><span id="time">自由预览</span></div><button id="reset" class="button secondary reset-button" disabled><span aria-hidden="true">↺</span> 全部复位</button></section>
+    <footer class="footer"><span><i class="local-dot"></i>文件留在本机 · 独立运行</span><span class="interaction-tip">拖动旋转 · 滚轮缩放 · 右键平移</span><span id="metrics">等待渲染</span></footer>
+  </div>
+  <dialog id="about"><div class="dialog-heading"><h2>先看真实效果</h2><button id="close-help" class="icon-button" aria-label="关闭说明">×</button></div><p>这是独立的 VRM 试验台，使用 Three.js 与 three-vrm。当前没有接入 Coo 或 AI。</p><p>左侧是程序化人形骨骼动作，右侧是模型实际声明的表情。动作与表情可叠加，停止后回到基础姿态。原地走路暂未加入足底 IK。</p><p>此轮不含 VRMA／VMD 舞蹈导入。默认样本仅用于本机练习，不随代码分发。</p><a href="/licenses" target="_blank" rel="noopener">第三方组件许可 ↗</a></dialog>
+</body>
+</html>

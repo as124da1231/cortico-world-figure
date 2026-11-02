@@ -1,0 +1,19 @@
+{
+  "name": "coo-vrm-preview-experiment",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "独立的本地 VRM 预览试验台，不连接 Coo 或 AI 服务。",
+  "scripts": {
+    "start": "node server.mjs",
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "3.4.2",
+    "three": "0.180.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}
