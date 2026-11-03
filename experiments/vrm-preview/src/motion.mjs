@@ -4,7 +4,7 @@ export const motions = [
   { id: 'nod', name: '点点头', note: '连续两次轻点头', icon: '↕', duration: 2.8, bones: ['head'] },
   { id: 'shake', name: '摇摇头', note: '平缓左右摇头', icon: '↔', duration: 2.8, bones: ['head'] },
   { id: 'bow', name: '鞠个躬', note: '躯干前倾后归位', icon: '⌁', duration: 3.8, bones: ['spine', 'hips'] },
-  { id: 'walk', name: '原地走走', note: '仅试步态，尚未锁脚', icon: '⇢', duration: 4.8, bones: ['leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg'] },
+  { id: 'walk', name: '走几步', note: '转身、起步、停稳', icon: '⇢', duration: 0, bones: ['hips', 'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg'] },
 ];
 export function smoothstep(value) { const t = Math.max(0, Math.min(1, value)); return t * t * (3 - 2 * t); }
 export function envelope(time, duration, fade = 0.45) {

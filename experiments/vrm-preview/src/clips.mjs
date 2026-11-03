@@ -38,6 +38,8 @@ export const idleClips = {
 };
 
 const zero = [0, 0, 0, 0], end = [1, 0, 0, 0];
+idleClips.talking = { ...idleClips.balanced, name: '轻声交谈' };
+idleClips.thinking = { ...idleClips.balanced, name: '想一想' };
 export const gestureClips = {
   acknowledge: { name: '轻轻回应', duration: 2.6, channels: {
     head: [zero, [.14, 3, 0, -2], [.36, -8, 0, -3], [.55, 2, 0, -2], [.72, -3, 0, -1], end],
@@ -71,7 +73,6 @@ export const gestureClips = {
     leftUpperArm: [zero, [.4, -4, 0, -2], [.6, -4, 0, -2], end],
     rightUpperArm: [zero, [.4, -4, 0, 2], [.6, -4, 0, 2], end],
   } },
-  walk: { name: '原地走走', duration: 4.8, channels: {} },
 };
 
 export function sampleKeys(keys, time) {

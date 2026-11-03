@@ -55,9 +55,21 @@
         <details class="model-details"><summary>模型信息 <span aria-hidden="true">↗</span></summary><dl id="model-info"><dt>状态</dt><dd>等待载入</dd></dl><p id="texture-note" class="detail-note">保留原始贴图与全部表情。</p></details>
       </aside>
     </main>
+    <section class="interaction-bar" aria-label="交流状态试验">
+      <div class="interaction-copy"><strong>陪你待一会儿</strong><span id="interaction-status" role="status">在这里，等你开口</span></div>
+      <div class="interaction-actions">
+        <button id="scenario" class="button primary" disabled>完整互动</button>
+        <button data-engagement="listen" class="button secondary" aria-pressed="false" disabled>在听</button>
+        <button data-engagement="think" class="button secondary" aria-pressed="false" disabled>想一想</button>
+        <button id="say" class="button secondary" disabled>说一句</button>
+        <button id="open-audio" class="text-button" disabled>打开音频</button>
+        <button id="interrupt" class="text-button" disabled>打断</button>
+        <input id="audio-file" type="file" accept="audio/*" hidden>
+      </div>
+    </section>
     <section class="transport" aria-label="播放控制"><div class="transport-left"><button id="pause" class="play-button" aria-label="暂停播放" disabled>Ⅱ</button><div><strong id="current-action">自然待机</strong><span id="current-expression">未选表情</span></div></div><div class="timeline"><div class="timeline-track"><span id="progress"></span></div><span id="time">自由预览</span></div><button id="reset" class="button secondary reset-button" disabled><span aria-hidden="true">↺</span> 全部复位</button></section>
     <footer class="footer"><span><i class="local-dot"></i>文件留在本机 · 独立运行</span><span class="interaction-tip">轻点互动 · 拖动旋转 · 滚轮缩放</span><span id="metrics">等待渲染</span></footer>
   </div>
-  <dialog id="about"><div class="dialog-heading"><h2>先看真实效果</h2><button id="close-help" class="icon-button" aria-label="关闭说明">×</button></div><p>这是独立的 VRM 试验台，使用 Three.js、three-vrm 及其官方动画库。当前没有接入 Coo 或 AI。</p><p>自主互动包含三段 Overte 待机、目光停留与转移、轻点回应和渐变表情。站立时双脚保持接地，拖动旋转不会触发回应。关闭自主互动后仍可手动试播。</p><p>右侧保留模型的全部原生表情。原地走路仍为步态试播，尚未锁脚；此轮未开放自选 VRMA／VMD 导入。默认模型仅供本机练习，不随代码分发。</p><p>待机动画源自 High Fidelity／Vircadia／Overte，经 Hanami 转为 VRMA；来源与许可随项目保留。</p><a href="/licenses" target="_blank" rel="noopener">第三方组件许可 ↗</a></dialog>
+  <dialog id="about"><div class="dialog-heading"><h2>先看真实效果</h2><button id="close-help" class="icon-button" aria-label="关闭说明">×</button></div><p>这是独立的 VRM 试验台，使用 Three.js、three-vrm 及其官方动画库。当前没有接入 Coo 或 AI。</p><p>自主互动包含三段 Overte 待机、目光停留与转移、轻点回应和渐变表情。站立时双脚保持接地，拖动旋转不会触发回应。关闭自主互动后仍可手动试播。</p><p>右侧保留模型的全部原生表情。走动采用现成步态、位移同步和支撑脚约束；此轮未开放自选 VRMA／VMD 导入。默认模型仅供本机练习，不随代码分发。</p><p>待机、步态与交谈动画源自 High Fidelity／Vircadia／Overte，经 Hanami 转为 VRMA；来源与许可随项目保留。交流入口演示倾听、思考、说话和打断，不调用 AI 或麦克风。说一句使用本机离线生成的试听语音，也可打开自己的音频。</p><a href="/licenses" target="_blank" rel="noopener">第三方组件许可 ↗</a></dialog>
 </body>
 </html>

@@ -2,7 +2,9 @@ import * as THREE from 'three';
 import { VRMAnimation, createVRMAnimationClip, VRMLookAtQuaternionProxy } from '@pixiv/three-vrm-animation';
 import { BehaviorDirector } from './behavior.mjs';
 import { gestureClips, idleClips, relaxedPose, sampleKeys } from './clips.mjs';
-import { envelope, smoothstep } from './motion.mjs';
+import { smoothstep } from './motion.mjs';
+import { Locomotion } from './locomotion.js';
+import { Engagement } from './engagement.mjs';
 
 const degrees = THREE.MathUtils.degToRad;
 const clamp = THREE.MathUtils.clamp;
@@ -16,6 +18,7 @@ export class AvatarPerformance {
     this.bones = new Map(); this.rest = new Map(); this.neutral = new Map();
     this.faces = new Map(); this.retiring = []; this.gesture = null; this.bridge = null;
     this.lastReaction = 0; this.contact = 1; this.footError = 0;
+    this.engagement = new Engagement(); this.wasMoving = false; this.mouth = 0;
     this.previousExpression = ''; this.previousWeight = 1;
     vrm.humanoid.resetNormalizedPose();
     for (const [name, humanBone] of Object.entries(vrm.humanoid.normalizedHumanBones)) {
@@ -37,7 +40,8 @@ export class AvatarPerformance {
       const a = root.getWorldPosition(new THREE.Vector3()), b = mid.getWorldPosition(new THREE.Vector3()), c = tip.getWorldPosition(new THREE.Vector3());
       const l1 = a.distanceTo(b), l2 = b.distanceTo(c);
       if (l1 < height * .02 || l2 < height * .02) continue;
-      this.legs.push({ side, root, mid, tip, rawTip: vrm.humanoid.getRawBoneNode(`${side}Foot`), target: c.clone(), rotation: tip.getWorldQuaternion(new THREE.Quaternion()), l1, l2 });
+      this.legs.push({ side, root, mid, tip, rawTip: vrm.humanoid.getRawBoneNode(`${side}Foot`), target: c.clone(), origin: c.clone(), floorY: c.y, rotation: tip.getWorldQuaternion(new THREE.Quaternion()), l1, l2, planted: false, plantWeight: 0 });
+      this.legs.at(-1).originalRotation = this.legs.at(-1).rotation.clone();
     }
     this.mixer = new THREE.AnimationMixer(vrm.scene);
     if (vrm.lookAt && !vrm.scene.children.some(obj => obj instanceof VRMLookAtQuaternionProxy)) {
@@ -56,6 +60,7 @@ export class AvatarPerformance {
       action.blendMode = THREE.AdditiveAnimationBlendMode;
       this.gestures.set(id, action);
     }
+    this.locomotion = new Locomotion(vrm, height, this.mixer, animations, this.forward);
     this.idleId = 'balanced'; this.idles.get(this.idleId).play();
     this.mixer.update(0);
     this.animationPose = new Map([...this.bones].map(([name, bone]) => [name, bone.quaternion.clone()]));
@@ -67,9 +72,6 @@ export class AvatarPerformance {
     animation.duration = definition.duration;
     animation.restHipsPosition.copy(this.rest.get('hips').position);
     if (this.vrm.meta.metaVersion === '0') { animation.restHipsPosition.x *= -1; animation.restHipsPosition.z *= -1; }
-    if (id === 'walk') {
-      for (const name of ['leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg', 'leftUpperArm', 'rightUpperArm']) channels[name] = [];
-    }
     const names = additive ? Object.keys(channels) : Object.keys(relaxedPose);
     for (const name of names) {
       const bone = this.bones.get(name); if (!bone) continue;
@@ -77,13 +79,6 @@ export class AvatarPerformance {
       for (let i = 0; i <= steps; i++) {
         const t = i / steps;
         let angles = channels[name]?.length ? sampleKeys(channels[name], t) : [0, 0, 0];
-        if (id === 'walk') {
-          const phase = t * definition.duration * 6.5, sign = name.startsWith('left') ? 1 : -1;
-          const blend = envelope(t * definition.duration, definition.duration);
-          const angle = name.includes('LowerLeg') ? -Math.max(0, -sign * Math.sin(phase)) * 31
-            : name.includes('UpperArm') ? -sign * Math.sin(phase) * 13 : sign * Math.sin(phase) * 21;
-          angles = [angle * blend, 0, 0];
-        }
         q.setFromEuler(euler.set(...angles.map(degrees)));
         if (!additive) q.premultiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(...(relaxedPose[name] || [0, 0, 0]).map(degrees))));
         // Original recipes use the historical VRM 0 frame. Convert to canonical
@@ -109,13 +104,21 @@ export class AvatarPerformance {
 
   setPointer(x, y, present) { this.director.setPointer(x, y, present); }
   react(enabled) {
-    if (!enabled || (this.gesture?.source === 'manual')) return false;
-    return this.director.react();
+    if (!enabled || this.locomotion.active || this.engagement.mode !== 'idle' || (this.gesture?.source === 'manual')) return false;
+    const accepted = this.director.react();
+    if (accepted) this.engagement.set('notice', { duration: 2.8 });
+    return accepted;
   }
   captureBridge() {
     this.bridge = { at: this.time, bones: new Map([...this.bones].map(([name, bone]) => [name, bone.quaternion.clone()])), hips: this.bones.get('hips')?.position.clone() };
   }
   playGesture(id, { loop = false, source = 'manual' } = {}) {
+    if (id === 'walk') return this.walk();
+    this.pendingGesture = null;
+    if (id === 'bow' && this.locomotion.active) {
+      this.pendingGesture = { id, loop, source }; this.locomotion.stop(); return;
+    }
+    if (id === 'idle' || id === 'bow') this.locomotion.stop();
     this.captureBridge();
     if (this.gesture) {
       this.gesture.action.fadeOut(.32);
@@ -129,6 +132,23 @@ export class AvatarPerformance {
     action.reset().setEffectiveWeight(1).setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
     action.clampWhenFinished = true; action.fadeIn(.28).play();
     this.gesture = { id, action, source, loop };
+  }
+  walk(target) {
+    if (!this.locomotion.available) return false;
+    this.pendingGesture = null;
+    this.captureBridge();
+    // Full-body gestures yield the lower body; upper-body waves can coexist.
+    if (this.gesture?.id === 'bow') this.playGesture('idle');
+    const base = this.locomotion.basePosition;
+    const destination = target || base.clone().add(new THREE.Vector3(this.vrm.scene.position.x - base.x > .05 ? -this.height * .65 : this.height * .65, 0, this.height * .12));
+    return this.locomotion.walkTo(destination);
+  }
+  engage(mode) {
+    if (mode === 'interrupt') {
+      this.engagement.interrupt(); this.mouth = 0; this.playGesture('idle');
+      return;
+    }
+    this.engagement.set(mode, { duration: mode === 'listen' ? 12 : mode === 'think' ? 8 : mode === 'notice' ? 2.8 : Infinity });
   }
   switchIdle(id) {
     if (id === this.idleId) return;
@@ -202,7 +222,7 @@ export class AvatarPerformance {
     const targets = new Map();
     if (expression) targets.set(expression, weight);
     else if (life) {
-      if (manager.getExpression('happy')) targets.set('happy', focus.smile);
+      if (manager.getExpression('happy')) targets.set('happy', Math.max(focus.smile, this.engagement.emotion.valence * .34));
       if (manager.getExpression('relaxed')) targets.set('relaxed', focus.smile > .05 ? 0 : .035);
     }
     manager.resetValues();
@@ -214,7 +234,12 @@ export class AvatarPerformance {
       this.faces.set(name, value); manager.setValue(name, value);
     }
     if (blink && !manager.blinkExpressionNames.includes(expression)) manager.setValue('blink', focus.blink);
-    if (talk && !manager.mouthExpressionNames.includes(expression)) manager.setValue('aa', .18 + Math.pow(Math.sin(this.time * 9), 2) * .5);
+    const audioMouth = this.engagement.energy;
+    const mouthTarget = audioMouth > 0 || this.engagement.mode === 'speak' ? audioMouth : talk ? .18 + Math.pow(Math.sin(this.time * 9), 2) * .5 : 0;
+    this.mouth = ease(this.mouth, mouthTarget, mouthTarget > this.mouth ? .035 : .08, dt);
+    if (!manager.mouthExpressionNames.includes(expression)) {
+      manager.setValue('aa', this.mouth); manager.setValue('oh', this.mouth * .12);
+    }
     this.previousExpression = expression; this.previousWeight = weight;
   }
 
@@ -225,9 +250,12 @@ export class AvatarPerformance {
       return;
     }
     const { life, gaze, expression, amplitude, loop } = options;
-    const focus = this.director.step(dt, { enabled: life, gaze });
+    this.engagement.step(dt);
+    const mode = this.engagement.mode;
+    const attention = mode === 'idle' ? null : { ...(mode === 'think' ? { x: -.2, y: .12 } : { x: 0, y: -.015 }), mode };
+    const focus = this.director.step(dt, { enabled: life, gaze, attention, arousal: this.engagement.emotion.arousal });
     this.time = this.director.time;
-    this.switchIdle(focus.idle);
+    this.switchIdle(mode === 'speak' ? 'talking' : mode === 'think' ? 'thinking' : focus.idle);
     if (this.director.reaction !== this.lastReaction) {
       this.lastReaction = this.director.reaction;
       this.playGesture(this.director.reactionKind, { source: 'automatic' });
@@ -243,6 +271,13 @@ export class AvatarPerformance {
     // Keep authored idle poses intact. The amplitude control weights hand gestures;
     // it must not scale a whole authored skeleton away from its reference pose.
     for (const action of this.gestures.values()) action.weight = clamp(amplitude, .3, 1);
+    this.locomotion.update(dt);
+    if (this.pendingGesture && !this.locomotion.active) {
+      const pending = this.pendingGesture; this.pendingGesture = null;
+      this.playGesture(pending.id, pending);
+    }
+    this.forward.copy(this.locomotion.forward); this.right.crossVectors(up, this.forward).normalize();
+    for (const action of this.idles.values()) action.weight = 1 - this.locomotion.weight;
     this.mixer.update(dt);
     for (const [name, q] of this.animationPose) q.copy(this.bones.get(name).quaternion);
     if (this.animationHips) this.animationHips.copy(this.bones.get('hips').position);
@@ -263,8 +298,33 @@ export class AvatarPerformance {
       if (blend >= 1) this.bridge = null;
     }
     this.vrm.scene.updateMatrixWorld(true);
-    this.contact = ease(this.contact, this.gesture?.id === 'walk' ? 0 : 1, .16, dt);
-    for (const leg of this.legs) this.solveLeg(leg, this.contact);
+    const moving = this.locomotion.active;
+    if (this.wasMoving && !moving) {
+      for (const leg of this.legs) { leg.target.copy(leg.tip.getWorldPosition(new THREE.Vector3())); leg.target.y = leg.floorY; leg.rotation.copy(leg.tip.getWorldQuaternion(new THREE.Quaternion())); leg.planted = false; }
+    }
+    this.contact = ease(this.contact, moving ? 0 : 1, .12, dt);
+    for (const leg of this.legs) {
+      const contact = this.locomotion.contact(leg.side);
+      if (moving && contact?.phase !== leg.phase) { leg.planted = false; leg.plantWeight = 0; leg.phase = contact?.phase; }
+      const planted = moving && !!contact?.planted;
+      if (planted && !leg.planted) {
+        leg.target.copy(leg.tip.getWorldPosition(new THREE.Vector3())); leg.target.y = leg.floorY;
+        leg.rotation.copy(leg.tip.getWorldQuaternion(new THREE.Quaternion()));
+      }
+      leg.planted = planted; leg.plantWeight = ease(leg.plantWeight, planted ? 1 : 0, .045, dt);
+    }
+    // Lower the pelvis just enough for a planted leg to remain reachable.
+    // The animation-only hips are restored next frame, so this cannot drift.
+    let lower = 0;
+    for (const leg of this.legs) if (Math.max(this.contact, leg.plantWeight) > .5) {
+      const a = leg.root.getWorldPosition(new THREE.Vector3());
+      const horizontal = Math.hypot(a.x - leg.target.x, a.z - leg.target.z), reach = (leg.l1 + leg.l2) * .998;
+      const vertical = Math.sqrt(Math.max(0, reach * reach - horizontal * horizontal));
+      lower = Math.max(lower, a.y - leg.target.y - vertical);
+    }
+    if (hips && lower > 0) { hips.position.y -= Math.min(lower, this.height * .12); this.vrm.scene.updateMatrixWorld(true); }
+    for (const leg of this.legs) this.solveLeg(leg, Math.max(this.contact, leg.plantWeight));
+    this.wasMoving = moving;
     if (this.vrm.lookAt) {
       this.vrm.lookAt.autoUpdate = gazeAllowed;
       if (!gazeAllowed) { this.vrm.lookAt.reset(); this.vrm.lookAt.update(0); }
@@ -272,13 +332,15 @@ export class AvatarPerformance {
     this.applyFaces(dt, options, focus);
     this.vrm.update(dt);
     this.vrm.scene.updateMatrixWorld(true);
-    this.footError = this.legs.length ? Math.max(...this.legs.map(leg => leg.tip.getWorldPosition(new THREE.Vector3()).distanceTo(leg.target))) : 0;
+    this.footError = this.legs.length ? Math.max(...this.legs.filter(leg => this.contact > .99 || leg.plantWeight > .99).map(leg => leg.tip.getWorldPosition(new THREE.Vector3()).distanceTo(leg.target)), 0) : 0;
     this.focus = focus;
   }
 
   reset() {
-    this.mixer.stopAllAction(); this.retiring = []; this.gesture = null; this.bridge = null;
+    this.mixer.stopAllAction(); this.retiring = []; this.gesture = null; this.pendingGesture = null; this.bridge = null;
     this.director = new BehaviorDirector(this.random); this.time = 0; this.lastReaction = 0;
+    this.locomotion.reset(); this.engagement = new Engagement(); this.wasMoving = false; this.mouth = 0;
+    for (const leg of this.legs) { leg.target.copy(leg.origin); leg.rotation.copy(leg.originalRotation); leg.planted = false; leg.plantWeight = 0; leg.phase = null; }
     this.faces.clear(); this.previousExpression = ''; this.previousWeight = 1; this.contact = 1;
     this.idleId = 'balanced'; this.idles.get('balanced').reset().setEffectiveWeight(1).play();
     this.vrm.expressionManager?.resetValues(); this.vrm.lookAt?.reset();
@@ -287,8 +349,9 @@ export class AvatarPerformance {
     const gesture = this.gesture;
     return { behavior: this.director.snapshot(), idle: this.idleId, idleName: idleClips[this.idleId].name, idleSource: this.idleSources.get(this.idleId),
       gesture: gesture ? { id: gesture.id, name: gestureClips[gesture.id].name, source: gesture.source, time: gesture.action.time, duration: gesture.action.getClip().duration } : null,
+      locomotion: this.locomotion.snapshot(), engagement: this.engagement.snapshot(), mouth: this.mouth,
       grounding: { legs: this.legs.length, blend: this.contact, maxError: this.footError,
-        feet: this.legs.map(leg => ({ side: leg.side, target: leg.target.toArray(), actual: leg.tip.getWorldPosition(new THREE.Vector3()).toArray(), raw: leg.rawTip?.getWorldPosition(new THREE.Vector3()).toArray() })) },
+        feet: this.legs.map(leg => ({ side: leg.side, planted: leg.planted, weight: leg.plantWeight, target: leg.target.toArray(), actual: leg.tip.getWorldPosition(new THREE.Vector3()).toArray(), raw: leg.rawTip?.getWorldPosition(new THREE.Vector3()).toArray() })) },
       transitioning: !!this.bridge, actions: this.mixer.stats.actions.inUse };
   }
   dispose() { this.mixer.stopAllAction(); this.mixer.uncacheRoot(this.vrm.scene); this.faces.clear(); this.retiring = []; }

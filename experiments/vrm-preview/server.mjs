@@ -3,8 +3,10 @@ import { createReadStream } from 'node:fs';
 import { stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { buildApp, previousWorkbench, root } from './build.mjs';
+import { prepareSampleSpeech } from './sample-speech.mjs';
 
 await buildApp();
+const demoSpeech = await prepareSampleSpeech(root);
 const sample = process.env.VRM_SAMPLE || join(previousWorkbench, '.workbench/src/aldina.vrm');
 const port = Number(process.env.VRM_PREVIEW_PORT || 4783);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('无效端口');
@@ -17,14 +19,16 @@ const files = new Map([
   ['/app.js', [join(root, '.local/app.js'), 'text/javascript; charset=utf-8']],
   ['/licenses', [join(root, '.local/THIRD_PARTY_LICENSES.txt'), 'text/plain; charset=utf-8']],
   ['/sample.vrm', [sample, 'model/gltf-binary']],
-  ...['idle.vrma', 'idle-2.vrma', 'idle-3.vrma'].map(name => [`/animations/${name}`, [join(root, 'assets/animations/overte', name), 'model/gltf-binary']]),
+  ['/demo-speech.wav', [join(root, '.local/demo-speech.wav'), 'audio/wav']],
+  ...['world-walk-slow.vrma', 'world-walk-stop-small.vrma'].map(name => [`/animations/${name}`, [join(root, 'assets/animations/overte', name), 'model/gltf-binary']]),
+  ...['idle.vrma', 'idle-2.vrma', 'idle-3.vrma', 'world-walk.vrma', 'world-walk-start.vrma', 'world-walk-stop.vrma', 'world-turn-left.vrma', 'world-turn-right.vrma', 'idle-talking.vrma', 'think.vrma'].map(name => [`/animations/${name}`, [join(root, 'assets/animations/overte', name), 'model/gltf-binary']]),
 ]);
 const server = createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self' blob: data:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self' blob: data:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'");
   if (req.headers.host !== `127.0.0.1:${port}` || (req.headers.origin && req.headers.origin !== address) || req.headers['sec-fetch-site'] === 'cross-site') {
     res.writeHead(403).end('Local preview only'); return;
   }
@@ -34,7 +38,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/api/info') {
     let sampleInfo = null;
     try { const s = await stat(sample); if (s.isFile()) sampleInfo = { name: basename(sample), bytes: s.size }; } catch { /* Optional sample. */ }
-    const body = JSON.stringify({ app: 'coo-vrm-preview', sample: sampleInfo });
+    const body = JSON.stringify({ app: 'coo-vrm-preview', sample: sampleInfo, demoSpeech });
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(req.method === 'HEAD' ? undefined : body); return;
   }
   const resource = files.get(url.pathname);

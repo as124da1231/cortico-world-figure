@@ -10,6 +10,15 @@
 | pixiv ChatVRM | MIT 的表情、自动眨眼、注视及早期 VRMA 示例 | 参考职责分离；仓库已归档，采用当前官方动画包替代其旧自带解析器 |
 | Amica | MIT 的角色动画、音频与交互示例；有 Mixamo 重定向 helper | 不接入整个应用。所查 helper 的 hipsPositionScale 为 0，不能原样作为通用位移适配 |
 | Fano VRM Controller 0.0.4 | 可独立使用的面部、Mixamo 与程序动画封装 | 留作候选；peer 依赖要求 three ^0.184.0、three-vrm ^3.5.4，与当前固定依赖不同；许可为 Apache 基础加署名条款，不能标成纯 Apache-2.0 |
+| my-neuro a72ef146（2026-11-03 核对） | 统一模型门面、语音时间轴、Live2D 情绪与待机调度，以及独立的 3D 身体动作服务插件 | 参考状态分工、实际姿态衔接、接管和取消；本轮没有复制其代码、接入动作生成服务或迁入整个桌面应用 |
+
+2026-11-03 行走选择：同一固定来源的普通行走实测步幅较大，长停步配固定减速产生明显支撑超伸。
+改用 `world-walk-slow` 与 `world-walk-stop-small`，按当前模型骨骼采样支撑时段及后移速度，
+由统一控制器推进世界位置；原来的临时摆腿曲线已删除。起步和转身仍复用现成素材，局部过渡与约束由试验台负责。
+另接 `idle-talking` 与 `think` 作为交谈和思考基础姿态，音频分析驱动原生嘴部表情。
+
+my-neuro 参考：[整体入口](https://github.com/morettt/my-neuro/blob/a72ef146e1839a0b4135bceb47b922a7caaebc02/live-2d/js/avatar/avatar-facade.js)、[参数调度](https://github.com/morettt/my-neuro/blob/a72ef146e1839a0b4135bceb47b922a7caaebc02/live-2d/js/avatar/live2d/param-director.js)、[动作衔接](https://github.com/morettt/my-neuro/blob/a72ef146e1839a0b4135bceb47b922a7caaebc02/live-2d/plugins/community/body-actions/retarget.js)。
+已核实 Live2D 参数导演与 VRM 身体播放的覆盖范围不同，不把前者直接宣称为 3D 已有能力。
 
 ## 具体卡点怎样处理
 

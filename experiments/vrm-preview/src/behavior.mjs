@@ -51,7 +51,7 @@ export class BehaviorDirector {
     this.focusUntil = this.time + 4; this.awayUntil = 0;
     return true;
   }
-  step(dt, { enabled = true, gaze = true } = {}) {
+  step(dt, { enabled = true, gaze = true, attention = null, arousal = 0 } = {}) {
     dt = clamp(dt, 0, .05); this.time += dt;
     const t = this.time;
     if (enabled && t >= this.nextIdle) {
@@ -75,14 +75,15 @@ export class BehaviorDirector {
       }
     } else if (enabled && t - this.pointer.leftAt < 1.2) { target = this.pointer; this.mode = 'linger'; }
     if (!enabled) target = this.pointer.present ? this.pointer : { x: 0, y: 0 };
+    if (attention) { target = attention; this.mode = attention.mode; }
     if (t >= this.nextMicro) {
       this.micro = { x: this.between(-.018, .018), y: this.between(-.012, .012) };
       this.nextMicro = t + this.between(.8, 1.8);
     }
     this.target = gaze ? { x: target.x + (enabled ? this.micro.x : 0), y: target.y + (enabled ? this.micro.y : 0) } : { x: 0, y: 0 };
     if (t >= this.eyeDelayUntil) this.eye.step(this.target, .09, dt);
-    if (t >= this.headDelayUntil) this.head.step(this.eye, .42, dt);
-    this.torso.step(this.head, 1.1, dt);
+    if (t >= this.headDelayUntil) this.head.step(this.eye, .42 * (1 - clamp(arousal, -1, 1) * .25), dt);
+    this.torso.step(this.head, 1.1 * (1 - clamp(arousal, -1, 1) * .2), dt);
     if (t >= this.nextBlink) {
       this.blinkAt = t; this.blinkCount++;
       this.nextBlink = t + (this.random() < .12 ? this.between(.32, .48) : this.between(2.7, 6.2));
