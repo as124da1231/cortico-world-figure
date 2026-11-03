@@ -14,7 +14,7 @@
   <div class="app">
     <header class="topbar">
       <div class="brand"><span class="brand-mark">c<span>oo</span></span><span class="brand-divider"></span><span>3D 试验台</span><span class="pill">本地预览</span></div>
-      <div class="top-right"><button id="help" class="text-button">关于预览</button><span class="version">v0.1.0</span></div>
+      <div class="top-right"><a href="http://127.0.0.1:4785/" target="_blank" rel="noopener" class="text-button">成品行走 ↗</a><button id="help" class="text-button">关于预览</button><span class="version">v0.1.0</span></div>
     </header>
     <section class="intro">
       <div><div class="eyebrow">A LITTLE MORE ALIVE</div><h1>让它，动起来。</h1><p>让它自在待着，靠近一点，再轻轻打个招呼。</p></div>
@@ -23,8 +23,9 @@
     <div id="error" class="error" role="alert" hidden></div>
     <main class="workspace">
       <aside class="panel motion-panel">
-        <div class="section-heading"><h2>试试动作</h2><span class="subtle">通用配方</span></div>
+        <div class="section-heading"><h2>试试动作</h2><span class="subtle">成品动作</span></div>
         <p class="section-description">自主待机，也可以随时试个动作。</p>
+        <div class="motion-library-controls"><label for="motion-library">动作风格</label><select id="motion-library" disabled></select><div class="library-links"><button id="library-open" class="text-button" disabled>查看动作</button><button id="compare-walk" class="text-button" disabled>对比走动</button></div><p id="library-note" class="detail-note"></p></div>
         <div id="motions" class="motion-list"></div>
         <div class="divider"></div>
         <label class="slider-label" for="amplitude"><span>动作幅度</span><output id="amplitude-value">自然</output></label>
@@ -70,6 +71,7 @@
     <section class="transport" aria-label="播放控制"><div class="transport-left"><button id="pause" class="play-button" aria-label="暂停播放" disabled>Ⅱ</button><div><strong id="current-action">自然待机</strong><span id="current-expression">未选表情</span></div></div><div class="timeline"><div class="timeline-track"><span id="progress"></span></div><span id="time">自由预览</span></div><button id="reset" class="button secondary reset-button" disabled><span aria-hidden="true">↺</span> 全部复位</button></section>
     <footer class="footer"><span><i class="local-dot"></i>文件留在本机 · 独立运行</span><span class="interaction-tip">轻点互动 · 拖动旋转 · 滚轮缩放</span><span id="metrics">等待渲染</span></footer>
   </div>
-  <dialog id="about"><div class="dialog-heading"><h2>先看真实效果</h2><button id="close-help" class="icon-button" aria-label="关闭说明">×</button></div><p>这是独立的 VRM 试验台，使用 Three.js、three-vrm 及其官方动画库。当前没有接入 Coo 或 AI。</p><p>自主互动包含三段 Overte 待机、目光停留与转移、轻点回应和渐变表情。站立时双脚保持接地，拖动旋转不会触发回应。关闭自主互动后仍可手动试播。</p><p>右侧保留模型的全部原生表情。走动采用现成步态、位移同步和支撑脚约束；此轮未开放自选 VRMA／VMD 导入。默认模型仅供本机练习，不随代码分发。</p><p>待机、步态与交谈动画源自 High Fidelity／Vircadia／Overte，经 Hanami 转为 VRMA；来源与许可随项目保留。交流入口演示倾听、思考、说话和打断，不调用 AI 或麦克风。说一句使用本机离线生成的试听语音，也可打开自己的音频。</p><a href="/licenses" target="_blank" rel="noopener">第三方组件许可 ↗</a></dialog>
+  <dialog id="library-dialog" aria-labelledby="library-title"><div class="dialog-heading"><div><h2 id="library-title">动作素材</h2><p>选择后回到舞台预览。循环开关可重复播放；走几步会实际移动。</p></div><button id="close-library" class="icon-button" aria-label="关闭动作素材">×</button></div><div id="library-clips" class="library-clips"></div><p class="library-disclaimer">坐姿仅查看动作，舞台没有座椅。模型的原生表情仍可叠加。</p></dialog>
+  <dialog id="about"><div class="dialog-heading"><h2>先看真实效果</h2><button id="close-help" class="icon-button" aria-label="关闭说明">×</button></div><p>这是独立的 VRM 试验台，使用 Three.js、three-vrm 及其官方动画库。当前没有接入 Coo 或 AI。</p><p>自主互动包含三段 Overte 待机、目光停留与转移、轻点回应和渐变表情。站立时双脚保持接地，拖动旋转不会触发回应。关闭自主互动后仍可手动试播。</p><p>右侧保留模型的全部原生表情。走动采用现成步态、位移同步和支撑脚约束；此轮未开放自选 VRMA／VMD 导入。默认模型仅供本机练习，不随代码分发。</p><p>可切换 Quaternius 通用动作与 Overte 柔和动作。前者保留作者步态及根位移曲线，起停、转身仍共用 Overte。走跑碰撞的完整参考工程从顶部「成品行走」进入。来源与许可随项目保留。交流入口演示倾听、思考、说话和打断，不调用 AI 或麦克风。说一句使用本机离线生成的试听语音，也可打开自己的音频。</p><a href="/licenses" target="_blank" rel="noopener">第三方组件许可 ↗</a></dialog>
 </body>
 </html>

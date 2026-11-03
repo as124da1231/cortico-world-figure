@@ -28,3 +28,18 @@ Apache-2.0 全文、Hanami 根许可证和逐文件摘要一并保留在同目�
 
 本项目原创的手势、备用待机曲线及互动规则位于 `src/clips.mjs`、`src/behavior.mjs`。
 用户 VRM 模型不随本试验台分发，仍受各自素材许可约束。
+
+## Quaternius Standard 动作
+
+`assets/animations/quaternius/` 来自作者官方免费 Standard v3.0，共 43 段源动画，本轮选取 12 段。完整版本宣传的 120 多段不属于免费包。
+官方入口：https://quaternius.itch.io/universal-animation-library 。按 CC0-1.0 使用，作者原始 License、README 与完整 CC0 文本随目录保存。
+`tools/convert-quaternius.mjs` 对固定摘要的 T-pose／原地／根位移版进行离线转换，保留原作者动画，去除网格和皮肤，生成 VRMA，另记录原始根位移距离曲线。
+逐文件摘要、源 GLB／压缩包摘要及修改范围见 `sources.json`。没有使用在线动作生成服务。
+
+## 独立成品控制器参考
+
+`controller-demo/` 为 norio/vrm-game-starter 固定提交的本机副本，代码 MIT，包含 BVHEcctrl（Erdong Chen）及其版权声明。
+保留原 LICENSE、README 与 UPSTREAM.json；未包含上游两个模型和截图。
+其 AnimationLibrary.glb 为上游由 Quaternius 动作制作的现成库，按 CC0；与上面的 12 段自行转换 VRMA 分开使用。
+控制器直接复用，不参与 Live2D 扩展构建，运行依赖与父试验台分开。公开运行许可文本保存在 `controller-demo/public/THIRD-PARTY-LICENSES.txt`。
+本机接入改动与验证边界见 `controller-demo/LOCAL.md`。

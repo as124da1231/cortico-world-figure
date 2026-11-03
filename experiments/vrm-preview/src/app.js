@@ -7,6 +7,7 @@ import { inspectVrm, MAX_MODEL_BYTES } from './model-file.mjs';
 import { motions } from './motion.mjs';
 import { AvatarPerformance } from './performance.js';
 import { LocalSpeech } from './speech.js';
+import { motionLibraries, previewsFor } from './motion-libraries.mjs';
 
 const $ = id => document.getElementById(id);
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -17,6 +18,7 @@ const state = {
   view: 'full', background: 'light', generation: 0, loading: false, ready: false,
   frames: 0, renderMs: 0, stats: {}, expressions: [], bones: new Map(), animations: new Map(), assetWarning: '',
   demoSpeech: null, wide: false, scenario: '',
+  library: 'quaternius', libraries: new Map(), modelOrigin: null, modelRotation: null,
 };
 let renderer, scene, camera, controls, floor, grid, gazeTarget, resizeObserver;
 let lastFrame = performance.now(), metricStart = lastFrame, metricFrames = 0, pointer = new THREE.Vector2();
@@ -32,8 +34,61 @@ const speech = new LocalSpeech(mode => {
 });
 function cancelSequence({ interrupt = false, stopMovement = true } = {}) {
   command++; state.scenario = ''; speech.stop();
+  state.performance?.stopPreview();
   if (stopMovement) state.performance?.locomotion.stop();
   if (interrupt) { state.talk = false; $('talk').checked = false; state.performance?.engage('interrupt'); }
+}
+function activateLibrary(id, { cancel = true } = {}) {
+  const animations = state.libraries.get(id);
+  if (!animations?.has('balanced')) return false;
+  if (cancel) cancelSequence();
+  state.library = id; state.animations = animations;
+  if (state.vrm) {
+    state.performance?.dispose();
+    state.vrm.scene.position.copy(state.modelOrigin); state.vrm.scene.quaternion.copy(state.modelRotation);
+    state.performance = new AvatarPerformance(state.vrm, state.height, { animations });
+    if (state.vrm.lookAt) state.vrm.lookAt.target = gazeTarget;
+    state.vrm.springBoneManager?.reset(); state.action = 'idle'; updatePerformance(0); updateCapabilities();
+  }
+  $('motion-library').value = id;
+  $('library-note').textContent = animations.library.note;
+  renderLibraryDialog(); syncControls(); return true;
+}
+function renderLibraryDialog() {
+  $('library-title').textContent = motionLibraries.find(library => library.id === state.library).name;
+  $('library-clips').replaceChildren();
+  for (const entry of previewsFor(state.library)) {
+    const button = document.createElement('button'); button.className = 'library-clip'; button.dataset.preview = entry.id;
+    const title = document.createElement('strong'), note = document.createElement('span');
+    title.textContent = entry.name; note.textContent = entry.note; button.append(title, note);
+    button.disabled = !state.animations.has(entry.id);
+    if (button.disabled) button.title = '这段素材未能加载，请重新启动后刷新。';
+    button.onclick = () => {
+      cancelSequence(); state.performance.engage('idle'); state.paused = false;
+      state.performance.playPreview(entry.id, { loop: state.loop && entry.loop });
+      $('library-dialog').close(); syncControls();
+    };
+    $('library-clips').append(button);
+  }
+}
+async function compareWalks() {
+  cancelSequence(); const token = command; state.paused = false; state.wide = true; frameModel('full');
+  try {
+    for (const id of ['overte', 'quaternius']) {
+      if (token !== command || !state.ready) return;
+      if (!activateLibrary(id, { cancel: false })) throw new Error('对比素材尚未就绪，请重新启动试验台后刷新。');
+      state.scenario = `${motionLibraries.find(library => library.id === id).name} · 同一路线`;
+      if (!state.performance.walk()) throw new Error('这一套的行走素材未能加载。');
+      const start = state.performance.time;
+      while (token === command && state.ready && state.performance.locomotion.active) {
+        if (state.performance.time - start > 20) throw new Error('对比行走未能结束，请复位后重试。');
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+      const settled = state.performance.time;
+      while (token === command && state.ready && state.performance.time - settled < 1) await new Promise(resolve => requestAnimationFrame(resolve));
+    }
+  } catch (err) { if (token === command) error(err.message); }
+  if (token === command) state.scenario = '';
 }
 async function saySample(token = command) {
   if (!state.demoSpeech) { error('本机没有可用的试听语音，可以打开一段本地音频。'); return false; }
@@ -97,7 +152,7 @@ function setLoading(value, label = '正在载入模型…') {
 
 function syncControls() {
   const unavailable = !state.ready || state.loading;
-  for (const el of document.querySelectorAll('.motion-button,.expression-button,[data-engagement],#scenario,#say,#open-audio,#interrupt,#pause,#reset,#capture,#neutral,#amplitude,#weight,#full,#face,#home,#blink,#gaze,#talk,#loop,#life')) {
+  for (const el of document.querySelectorAll('.motion-button,.expression-button,[data-engagement],#motion-library,#library-open,#compare-walk,#scenario,#say,#open-audio,#interrupt,#pause,#reset,#capture,#neutral,#amplitude,#weight,#full,#face,#home,#blink,#gaze,#talk,#loop,#life')) {
     el.disabled = unavailable || (el.dataset.unsupported === 'true');
   }
   $('pause').textContent = state.paused ? '▶' : 'Ⅱ';
@@ -258,6 +313,7 @@ async function loadBuffer(buffer, fileName, generation) {
       }
     });
     const maxTexture = Math.max(0, ...[...textures].map(t => Math.max(t.image?.width || 0, t.image?.height || 0)));
+    const origin = vrm.scene.position.clone(), rotation = vrm.scene.quaternion.clone();
     const nextPerformance = new AvatarPerformance(vrm, size.y, { animations: state.animations });
     const old = state.vrm, oldPerformance = state.performance;
     Object.assign(state, { vrm, bones, height: size.y, bytes: buffer.byteLength, loadedMs: Math.round(performance.now() - started),
@@ -265,7 +321,7 @@ async function loadBuffer(buffer, fileName, generation) {
       expressions: Object.keys(vrm.expressionManager?.expressionMap || {}),
       stats: { triangles: Math.round(triangles), meshes, textures: textures.size, maxTexture, width: size.x, boneCount: Object.keys(vrm.humanoid.normalizedHumanBones || {}).length },
     });
-    state.performance = nextPerformance;
+    state.performance = nextPerformance; state.modelOrigin = origin; state.modelRotation = rotation;
     scene.add(vrm.scene); oldPerformance?.dispose(); release(old);
     floor.scale.setScalar(size.y * 1.1); floor.visible = true;
     if (vrm.lookAt) vrm.lookAt.target = gazeTarget;
@@ -356,18 +412,19 @@ function updatePerformance(dt) {
   state.performance.update(dt, state, camera, gazeTarget);
   state.time = state.performance.time;
   const current = state.performance.snapshot();
-  const action = current.locomotion.active ? 'walk' : current.gesture?.id || 'idle';
+  const action = current.locomotion.active ? 'walk' : current.preview?.id || current.gesture?.id || 'idle';
   if (state.action !== action) { state.action = action; syncControls(); }
-  const actionName = current.locomotion.active ? '走几步' : current.gesture?.name || current.idleName;
+  const actionName = current.locomotion.active ? '走几步' : current.preview?.name || current.gesture?.name || current.idleName;
   if ($('current-action').textContent !== actionName) $('current-action').textContent = actionName;
-  $('progress').style.width = `${speech.playing ? speech.progress * 100 : current.gesture ? current.gesture.time / current.gesture.duration * 100 : 0}%`;
+  const clip = current.preview || current.gesture;
+  $('progress').style.width = `${speech.playing ? speech.progress * 100 : clip ? (clip.time % clip.duration) / clip.duration * 100 : 0}%`;
   const labels = { attend: '在留意你', linger: '目送片刻', glance: '稍稍看看周围', rest: '自在待机', notice: '注意到你', listen: '认真听着', think: '想一想', speak: '轻声回应' };
   const phases = { left: '转过身', right: '转过身', start: '迈出一步', walk: '走近一点', stop: '慢慢站稳', idle: '站稳了' };
-  $('status').textContent = state.paused ? '已暂停' : current.locomotion.active ? phases[current.locomotion.phase] : labels[current.engagement.mode === 'idle' ? current.behavior.mode : current.engagement.mode] || '自在待机';
+  $('status').textContent = state.paused ? '已暂停' : current.locomotion.active ? phases[current.locomotion.phase] : current.preview ? `${current.preview.name} · 动作预览` : labels[current.engagement.mode === 'idle' ? current.behavior.mode : current.engagement.mode] || '自在待机';
   $('interaction-status').textContent = state.scenario || (speech.playing ? speech.text || '正在播放本地音频' : labels[current.engagement.mode] || '在这里，等你开口');
   for (const button of document.querySelectorAll('[data-engagement]')) button.setAttribute('aria-pressed', String(button.dataset.engagement === current.engagement.mode));
   floor.position.x = state.vrm.scene.position.x; floor.position.z = state.vrm.scene.position.z;
-  $('time').textContent = current.gesture ? `${current.gesture.time.toFixed(1)} / ${current.gesture.duration.toFixed(1)}s` : state.paused ? '已暂停' : state.life ? current.idleName : '自由预览';
+  $('time').textContent = clip ? `${(clip.time % clip.duration).toFixed(1)} / ${clip.duration.toFixed(1)}s` : state.paused ? '已暂停' : state.life ? current.idleName : '自由预览';
 }
 
 function tick(now) {
@@ -396,6 +453,13 @@ function resetAll() {
 }
 
 function bindUI() {
+  for (const library of motionLibraries) {
+    const option = document.createElement('option'); option.value = library.id; option.textContent = library.name; $('motion-library').append(option);
+  }
+  $('motion-library').onchange = () => { activateLibrary($('motion-library').value); };
+  $('library-open').onclick = () => { renderLibraryDialog(); $('library-dialog').showModal(); };
+  $('close-library').onclick = () => $('library-dialog').close();
+  $('compare-walk').onclick = () => { void compareWalks(); };
   $('life').checked = state.life;
   for (const motion of motions) {
     const button = document.createElement('button'); button.className = 'motion-button'; button.dataset.motion = motion.id;
@@ -477,19 +541,31 @@ Object.defineProperty(window, '__vrmPreview', { value: Object.freeze({ inspect: 
   camera: camera?.position.toArray(), height: state.height,
   performance: state.performance?.snapshot(),
   speech: speech.snapshot(), scenario: state.scenario,
+  library: state.library, libraryAssets: Object.fromEntries([...state.libraries].map(([id, assets]) => [id, assets.size])),
 }) }) });
 
 async function loadMotionAssets() {
-  const assets = [['balanced', 'idle.vrma'], ['rest-left', 'idle-2.vrma'], ['rest-right', 'idle-3.vrma'], ['talking', 'idle-talking.vrma'], ['thinking', 'think.vrma'], ['walk-cycle', 'world-walk-slow.vrma'], ['walk-start', 'world-walk-start.vrma'], ['walk-stop', 'world-walk-stop-small.vrma'], ['turn-left', 'world-turn-left.vrma'], ['turn-right', 'world-turn-right.vrma']];
   const loader = new GLTFLoader(); loader.register(parser => new VRMAnimationLoaderPlugin(parser));
-  const results = await Promise.allSettled(assets.map(async ([id, file]) => {
-    const gltf = await loader.loadAsync(`/animations/${file}`);
-    const animation = gltf.userData.vrmAnimations?.[0];
-    if (!animation || !Number.isFinite(animation.duration) || animation.duration <= 0 || animation.restHipsPosition.y <= 0) throw new Error('无有效 VRM 动画');
-    return [id, animation];
-  }));
-  for (const result of results) if (result.status === 'fulfilled') state.animations.set(...result.value);
-  if (state.animations.size !== assets.length) state.assetWarning = '部分动作素材未能读取。待机使用内置关键帧，缺少步态时暂停行走；重新启动本地服务后再刷新可重试。';
+  const cache = new Map();
+  const load = url => {
+    if (!cache.has(url)) cache.set(url, loader.loadAsync(url).then(gltf => {
+      const animation = gltf.userData.vrmAnimations?.[0];
+      if (!animation || !Number.isFinite(animation.duration) || animation.duration <= 0 || animation.restHipsPosition.y <= 0) throw new Error('无有效 VRM 动画');
+      animation.rootMotion = gltf.parser.json.asset.extras?.rootMotion || null;
+      return animation;
+    }));
+    return cache.get(url);
+  };
+  for (const library of motionLibraries) {
+    const assets = new Map(); assets.library = library;
+    const results = await Promise.allSettled(Object.entries(library.assets).map(async ([id, url]) => [id, await load(url)]));
+    for (const result of results) if (result.status === 'fulfilled') assets.set(...result.value);
+    state.libraries.set(library.id, assets);
+    if (assets.size !== Object.keys(library.assets).length) state.assetWarning = '部分动作素材未能读取。可切换另一套动作；缺少的预览会置灰，重新启动后刷新可重试。';
+    $('motion-library').querySelector(`option[value="${library.id}"]`).disabled = !assets.has('balanced');
+  }
+  if (!state.libraries.get(state.library).has('balanced')) state.library = 'overte';
+  activateLibrary(state.library, { cancel: false });
 }
 
 try {

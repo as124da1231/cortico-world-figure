@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 export const root = dirname(fileURLToPath(import.meta.url));
 export const previousWorkbench = String.raw`G:\000000000AAII\0cortico 形象 插件\cortico工作台3d简易版本`;
@@ -36,7 +37,17 @@ export async function buildApp() {
   for (const file of ['UPSTREAM-NOTICE.md', 'Apache-2.0.txt']) {
     licenses.push(`Overte / Hanami animation assets — ${file}\n${await readFile(join(root, 'assets/animations/overte', file), 'utf8')}`);
   }
+  for (const file of ['UPSTREAM-LICENSE.txt', 'CC0-1.0.txt']) {
+    licenses.push(`Quaternius Universal Animation Library Standard — ${file}\n${await readFile(join(root, 'assets/animations/quaternius', file), 'utf8')}`);
+  }
   await writeFile(join(root, '.local/THIRD_PARTY_LICENSES.txt'), licenses.join('\n\n'), 'utf8');
+  let html = await readFile(join(root, 'index.html'), 'utf8');
+  for (const file of ['app.js', 'style.css', 'file-entry.js']) {
+    const bytes = await readFile(join(root, file === 'app.js' ? '.local/app.js' : file));
+    const digest = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+    html = html.replace(`"./${file}"`, `"./${file}?v=${digest}"`);
+  }
+  await writeFile(join(root, '.local/index.html'), html, 'utf8');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

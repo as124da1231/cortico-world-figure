@@ -1,0 +1,124 @@
+{
+  "author": "Quaternius",
+  "source": "https://quaternius.itch.io/universal-animation-library",
+  "edition": "Standard v3.0 (free)",
+  "license": "CC0-1.0",
+  "archiveSha256": "cc73fc4e495b82958207316596317a3f40b9fa38065bde1027937452da537724",
+  "inputFiles": {
+    "UAL1_Standard.glb": "69591853d817488edaa8fd9bf8fc1d821eaeaf789f8627b3cd23b41c4ed67997",
+    "UAL1_Standard_RM.glb": "be684571ed655a1b892c2c07e6e2aeca053b606c442d34004adaf1d944090d01"
+  },
+  "sourceClipCount": 43,
+  "fps": 30,
+  "modifications": "Retarget from the supplied T-pose to canonical VRMA humanoid rotations. Retain original in-place poses, extract root travel separately from the supplied RM variant. Remove source meshes, skins and unused clips. No generated motion.",
+  "clips": [
+    {
+      "id": "idle",
+      "file": "idle.vrma",
+      "sourceTake": "Idle_Loop",
+      "duration": 2.5,
+      "bytes": 84260,
+      "sha256": "1fdac683c285ef6b39f6196ebb60bad76c22323d750c84a7dfb427cce8b21ad6",
+      "rootMotionDistance": 0
+    },
+    {
+      "id": "talking",
+      "file": "talking.vrma",
+      "sourceTake": "Idle_Talking_Loop",
+      "duration": 2.933333396911621,
+      "bytes": 95316,
+      "sha256": "00531da4498f5a13eb45ec0c569391c19d423c91eda6b17013d360c66ea6ebbd",
+      "rootMotionDistance": 0
+    },
+    {
+      "id": "walk",
+      "file": "walk.vrma",
+      "sourceTake": "Walk_Loop",
+      "duration": 1.3333333730697632,
+      "bytes": 56176,
+      "sha256": "7575e14eb568c4deee1fae7b96dcccf68ff7c90396aad1b003577b3ec4ab62e9",
+      "rootMotionDistance": 1.2999999523162842
+    },
+    {
+      "id": "walk-formal",
+      "file": "walk-formal.vrma",
+      "sourceTake": "Walk_Formal_Loop",
+      "duration": 1.3333333730697632,
+      "bytes": 56192,
+      "sha256": "338bde14491ed8fdb81ff91e9389f7dbafad87a44f9baec9ef424adcb901d28e",
+      "rootMotionDistance": 1.2999999523162842
+    },
+    {
+      "id": "jog",
+      "file": "jog.vrma",
+      "sourceTake": "Jog_Fwd_Loop",
+      "duration": 0.9333333373069763,
+      "bytes": 45456,
+      "sha256": "4abdab4568dea58e2a89f5bb0acdca196bbb315f1ce84d01be10d9f655e4f612",
+      "rootMotionDistance": 5
+    },
+    {
+      "id": "sprint",
+      "file": "sprint.vrma",
+      "sourceTake": "Sprint_Loop",
+      "duration": 0.6666666865348816,
+      "bytes": 38400,
+      "sha256": "10daa939aa1c9705dec536ad149b132a841b240b88dc5c025692825ebf640448",
+      "rootMotionDistance": 5.5
+    },
+    {
+      "id": "dance",
+      "file": "dance.vrma",
+      "sourceTake": "Dance_Loop",
+      "duration": 1,
+      "bytes": 46032,
+      "sha256": "fe202de4a75ac08e752fc44bcaaa0f8219bb08975fae844bb144e93982cfb986",
+      "rootMotionDistance": 0
+    },
+    {
+      "id": "interact",
+      "file": "interact.vrma",
+      "sourceTake": "Interact",
+      "duration": 2,
+      "bytes": 71480,
+      "sha256": "28314bda164bd54c90536e8ce515e1b651047585a9db2bf1e5534573a7c4bc4c",
+      "rootMotionDistance": 0
+    },
+    {
+      "id": "sit-enter",
+      "file": "sit-enter.vrma",
+      "sourceTake": "Sitting_Enter",
+      "duration": 1.2999999523162842,
+      "bytes": 53692,
+      "sha256": "e1bfedbce7a96aeb91d0609a54499835dddef36e9d15868db16685dd313ca36c",
+      "rootMotionDistance": 0
+    },
+    {
+      "id": "sit-idle",
+      "file": "sit-idle.vrma",
+      "sourceTake": "Sitting_Idle_Loop",
+      "duration": 1.6666666269302368,
+      "bytes": 63032,
+      "sha256": "8a47309400bc559a2a824ca7c0d2fe0c6004163d3ca91d0810a3fc0fd664cf07",
+      "rootMotionDistance": 0
+    },
+    {
+      "id": "sit-talking",
+      "file": "sit-talking.vrma",
+      "sourceTake": "Sitting_Talking_Loop",
+      "duration": 2.933333396911621,
+      "bytes": 95320,
+      "sha256": "16b9d09ef0fc0581da62598986f48f39407a891ef48e9dd1628fb0e235775e05",
+      "rootMotionDistance": 0
+    },
+    {
+      "id": "sit-exit",
+      "file": "sit-exit.vrma",
+      "sourceTake": "Sitting_Exit",
+      "duration": 1.0333333015441895,
+      "bytes": 46904,
+      "sha256": "43b04d1586bf3193d27b9a46de67f78a42cd4103c60d0c147a287d97cf9edd90",
+      "rootMotionDistance": 0
+    }
+  ]
+}

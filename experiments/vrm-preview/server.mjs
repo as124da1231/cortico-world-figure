@@ -4,6 +4,7 @@ import { stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { buildApp, previousWorkbench, root } from './build.mjs';
 import { prepareSampleSpeech } from './sample-speech.mjs';
+import { animationRoutes } from './src/motion-libraries.mjs';
 
 await buildApp();
 const demoSpeech = await prepareSampleSpeech(root);
@@ -12,16 +13,15 @@ const port = Number(process.env.VRM_PREVIEW_PORT || 4783);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('无效端口');
 const address = `http://127.0.0.1:${port}`;
 const files = new Map([
-  ['/', [join(root, 'index.html'), 'text/html; charset=utf-8']],
-  ['/index.html', [join(root, 'index.html'), 'text/html; charset=utf-8']],
+  ['/', [join(root, '.local/index.html'), 'text/html; charset=utf-8']],
+  ['/index.html', [join(root, '.local/index.html'), 'text/html; charset=utf-8']],
   ['/file-entry.js', [join(root, 'file-entry.js'), 'text/javascript; charset=utf-8']],
   ['/style.css', [join(root, 'style.css'), 'text/css; charset=utf-8']],
   ['/app.js', [join(root, '.local/app.js'), 'text/javascript; charset=utf-8']],
   ['/licenses', [join(root, '.local/THIRD_PARTY_LICENSES.txt'), 'text/plain; charset=utf-8']],
   ['/sample.vrm', [sample, 'model/gltf-binary']],
   ['/demo-speech.wav', [join(root, '.local/demo-speech.wav'), 'audio/wav']],
-  ...['world-walk-slow.vrma', 'world-walk-stop-small.vrma'].map(name => [`/animations/${name}`, [join(root, 'assets/animations/overte', name), 'model/gltf-binary']]),
-  ...['idle.vrma', 'idle-2.vrma', 'idle-3.vrma', 'world-walk.vrma', 'world-walk-start.vrma', 'world-walk-stop.vrma', 'world-turn-left.vrma', 'world-turn-right.vrma', 'idle-talking.vrma', 'think.vrma'].map(name => [`/animations/${name}`, [join(root, 'assets/animations/overte', name), 'model/gltf-binary']]),
+  ...animationRoutes.map(url => [url, [url.startsWith('/animations/quaternius/') ? join(root, 'assets', url.slice(1)) : join(root, 'assets/animations/overte', url.slice('/animations/'.length)), 'model/gltf-binary']]),
 ]);
 const server = createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');

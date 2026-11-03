@@ -41,3 +41,15 @@ my-neuro 参考：[整体入口](https://github.com/morettt/my-neuro/blob/a72ef1
 
 该选择不意味“任意模型立即达到同样自然程度”。本轮最终结果以独立预览的录屏和验证记录为准；
 VRM 1.0 完整模型、复杂服装碰撞、长时间运行和 Coo 形象沙箱仍需要各自验证。
+
+## 2026-11-03：复用完整行走工程
+
+用户要求优先使用成套现成流程后，新增独立的 VRM Game Starter 本机试验，而非继续扩大自有行走算法。
+固定来源 https://github.com/norio/vrm-game-starter/tree/b14c236fd8150855348ad085b7820c298eac4b30 ，MIT。
+实际采用 BVHEcctrl 浮动胶囊移动／碰撞、Idle/Walk/Run/Jump 动画状态、相机及 Foot IK；无 React 或额外物理引擎。
+其 Three 0.184 / three-vrm 3.5.3 依赖隔离在 controller-demo，不强行升级旧舞台。
+
+同时核对 ecctrl：可提供成熟控制，但 React/Fiber/Rapier 接入面较大；Fano 自述不负责播放与交叉淡化，不能当作完整行走控制器。
+现成工程同样需要模型兼容核验：本机样本没有可选 upperChest，原工程会拒绝加载；本轮已在重定向边界修正并回归验证。
+Quaternius Standard 免费包引入旧舞台供素材风格比较，完整控制器另行直接使用上游自带动作库。
+两条试验路径的目的分别是看动作风格和看完整控制效果，不把素材库等同于完整控制系统。

@@ -5,6 +5,7 @@ import { gestureClips, idleClips, relaxedPose, sampleKeys } from './clips.mjs';
 import { smoothstep } from './motion.mjs';
 import { Locomotion } from './locomotion.js';
 import { Engagement } from './engagement.mjs';
+import { previewsFor } from './motion-libraries.mjs';
 
 const degrees = THREE.MathUtils.degToRad;
 const clamp = THREE.MathUtils.clamp;
@@ -13,7 +14,7 @@ const ease = (current, target, seconds, dt) => current + (target - current) * (1
 
 export class AvatarPerformance {
   constructor(vrm, height, { random = Math.random, animations = new Map() } = {}) {
-    this.vrm = vrm; this.height = height; this.random = random;
+    this.vrm = vrm; this.height = height; this.random = random; this.library = animations.library || { id: 'overte', source: 'Overte / Hanami VRMA' };
     this.director = new BehaviorDirector(random); this.time = 0;
     this.bones = new Map(); this.rest = new Map(); this.neutral = new Map();
     this.faces = new Map(); this.retiring = []; this.gesture = null; this.bridge = null;
@@ -53,7 +54,7 @@ export class AvatarPerformance {
       const animation = animations.get(id);
       const clip = animation ? createVRMAnimationClip(animation, vrm) : this.buildClip(id, definition, false);
       clip.name = id; this.idles.set(id, this.mixer.clipAction(clip));
-      this.idleSources.set(id, animation ? 'Overte / Hanami VRMA' : '原创关键帧');
+      this.idleSources.set(id, animation ? (id === 'thinking' ? 'Overte / Hanami VRMA' : this.library.source) : '原创关键帧');
     }
     for (const [id, definition] of Object.entries(gestureClips)) {
       const action = this.mixer.clipAction(this.buildClip(id, definition, true));
@@ -61,8 +62,19 @@ export class AvatarPerformance {
       this.gestures.set(id, action);
     }
     this.locomotion = new Locomotion(vrm, height, this.mixer, animations, this.forward);
+    this.previews = new Map(); this.preview = null; this.pendingPreview = null; this.previewReleaseUntil = 0;
+    for (const entry of previewsFor(this.library.id)) {
+      const animation = animations.get(entry.id); if (!animation) continue;
+      const clip = createVRMAnimationClip(animation, vrm); clip.name = `preview-${entry.id}`;
+      this.previews.set(entry.id, { ...entry, action: this.mixer.clipAction(clip) });
+    }
     this.idleId = 'balanced'; this.idles.get(this.idleId).play();
     this.mixer.update(0);
+    vrm.scene.updateMatrixWorld(true);
+    for (const leg of this.legs) {
+      leg.target.copy(leg.tip.getWorldPosition(new THREE.Vector3())); leg.target.y = leg.floorY;
+      leg.origin.copy(leg.target); leg.rotation.copy(leg.tip.getWorldQuaternion(new THREE.Quaternion())); leg.originalRotation.copy(leg.rotation);
+    }
     this.animationPose = new Map([...this.bones].map(([name, bone]) => [name, bone.quaternion.clone()]));
     this.animationHips = this.bones.get('hips')?.position.clone();
   }
@@ -104,7 +116,7 @@ export class AvatarPerformance {
 
   setPointer(x, y, present) { this.director.setPointer(x, y, present); }
   react(enabled) {
-    if (!enabled || this.locomotion.active || this.engagement.mode !== 'idle' || (this.gesture?.source === 'manual')) return false;
+    if (!enabled || this.preview || this.pendingPreview || this.locomotion.active || this.engagement.mode !== 'idle' || (this.gesture?.source === 'manual')) return false;
     const accepted = this.director.react();
     if (accepted) this.engagement.set('notice', { duration: 2.8 });
     return accepted;
@@ -113,6 +125,7 @@ export class AvatarPerformance {
     this.bridge = { at: this.time, bones: new Map([...this.bones].map(([name, bone]) => [name, bone.quaternion.clone()])), hips: this.bones.get('hips')?.position.clone() };
   }
   playGesture(id, { loop = false, source = 'manual' } = {}) {
+    this.stopPreview(); this.pendingPreview = null;
     if (id === 'walk') return this.walk();
     this.pendingGesture = null;
     if (id === 'bow' && this.locomotion.active) {
@@ -135,6 +148,7 @@ export class AvatarPerformance {
   }
   walk(target) {
     if (!this.locomotion.available) return false;
+    this.stopPreview(); this.pendingPreview = null;
     this.pendingGesture = null;
     this.captureBridge();
     // Full-body gestures yield the lower body; upper-body waves can coexist.
@@ -142,6 +156,24 @@ export class AvatarPerformance {
     const base = this.locomotion.basePosition;
     const destination = target || base.clone().add(new THREE.Vector3(this.vrm.scene.position.x - base.x > .05 ? -this.height * .65 : this.height * .65, 0, this.height * .12));
     return this.locomotion.walkTo(destination);
+  }
+  playPreview(id, { loop } = {}) {
+    const entry = this.previews.get(id); if (!entry) return false;
+    if (this.locomotion.active) { this.pendingPreview = { id, loop }; this.locomotion.stop(); return true; }
+    this.playGesture('idle'); this.stopPreview(); this.captureBridge();
+    const action = entry.action; this.retiring = this.retiring.filter(item => item.action !== action);
+    const repeat = loop ?? entry.loop;
+    action.stopFading().reset().setEffectiveWeight(0).setLoop(repeat ? THREE.LoopRepeat : THREE.LoopOnce, repeat ? Infinity : 1);
+    action.clampWhenFinished = true; action.play();
+    this.preview = { ...entry, at: this.time, loop: repeat, weight: 0 }; return true;
+  }
+  stopPreview() {
+    this.pendingPreview = null;
+    if (!this.preview) return;
+    this.captureBridge(); this.preview.action.fadeOut(.3);
+    this.retiring.push({ action: this.preview.action, until: this.time + .3 });
+    if (this.preview.feet) this.previewReleaseUntil = this.time + .35;
+    this.preview = null;
   }
   engage(mode) {
     if (mode === 'interrupt') {
@@ -272,12 +304,21 @@ export class AvatarPerformance {
     // it must not scale a whole authored skeleton away from its reference pose.
     for (const action of this.gestures.values()) action.weight = clamp(amplitude, .3, 1);
     this.locomotion.update(dt);
+    if (this.pendingPreview && !this.locomotion.active) {
+      const pending = this.pendingPreview; this.pendingPreview = null; this.playPreview(pending.id, pending);
+    }
     if (this.pendingGesture && !this.locomotion.active) {
       const pending = this.pendingGesture; this.pendingGesture = null;
       this.playGesture(pending.id, pending);
     }
     this.forward.copy(this.locomotion.forward); this.right.crossVectors(up, this.forward).normalize();
-    for (const action of this.idles.values()) action.weight = 1 - this.locomotion.weight;
+    if (this.preview) {
+      const age = this.time - this.preview.at, duration = this.preview.action.getClip().duration;
+      const release = this.preview.loop ? 1 : smoothstep((duration - age) / .35);
+      this.preview.weight = smoothstep(age / .35) * release;
+      this.preview.action.weight = this.preview.weight;
+    }
+    for (const action of this.idles.values()) action.weight = (1 - this.locomotion.weight) * (1 - (this.preview?.weight || 0));
     this.mixer.update(dt);
     for (const [name, q] of this.animationPose) q.copy(this.bones.get(name).quaternion);
     if (this.animationHips) this.animationHips.copy(this.bones.get('hips').position);
@@ -285,6 +326,9 @@ export class AvatarPerformance {
     this.retiring = this.retiring.filter(entry => this.time < entry.until);
     if (this.gesture && !this.gesture.loop && this.gesture.action.time >= this.gesture.action.getClip().duration - .001) {
       this.gesture.action.stop(); this.gesture = null;
+    }
+    if (this.preview && !this.preview.loop && this.time - this.preview.at >= this.preview.action.getClip().duration) {
+      this.preview.action.stop(); if (this.preview.feet) this.previewReleaseUntil = this.time + .15; this.preview = null;
     }
     const hips = this.bones.get('hips');
     this.vrm.scene.updateMatrixWorld(true);
@@ -298,7 +342,7 @@ export class AvatarPerformance {
       if (blend >= 1) this.bridge = null;
     }
     this.vrm.scene.updateMatrixWorld(true);
-    const moving = this.locomotion.active;
+    const moving = this.locomotion.active || !!this.preview?.feet || this.time < this.previewReleaseUntil;
     if (this.wasMoving && !moving) {
       for (const leg of this.legs) { leg.target.copy(leg.tip.getWorldPosition(new THREE.Vector3())); leg.target.y = leg.floorY; leg.rotation.copy(leg.tip.getWorldQuaternion(new THREE.Quaternion())); leg.planted = false; }
     }
@@ -337,7 +381,7 @@ export class AvatarPerformance {
   }
 
   reset() {
-    this.mixer.stopAllAction(); this.retiring = []; this.gesture = null; this.pendingGesture = null; this.bridge = null;
+    this.mixer.stopAllAction(); this.retiring = []; this.gesture = null; this.pendingGesture = null; this.preview = null; this.pendingPreview = null; this.previewReleaseUntil = 0; this.bridge = null;
     this.director = new BehaviorDirector(this.random); this.time = 0; this.lastReaction = 0;
     this.locomotion.reset(); this.engagement = new Engagement(); this.wasMoving = false; this.mouth = 0;
     for (const leg of this.legs) { leg.target.copy(leg.origin); leg.rotation.copy(leg.originalRotation); leg.planted = false; leg.plantWeight = 0; leg.phase = null; }
@@ -350,6 +394,7 @@ export class AvatarPerformance {
     return { behavior: this.director.snapshot(), idle: this.idleId, idleName: idleClips[this.idleId].name, idleSource: this.idleSources.get(this.idleId),
       gesture: gesture ? { id: gesture.id, name: gestureClips[gesture.id].name, source: gesture.source, time: gesture.action.time, duration: gesture.action.getClip().duration } : null,
       locomotion: this.locomotion.snapshot(), engagement: this.engagement.snapshot(), mouth: this.mouth,
+      library: this.library.id, preview: this.preview ? { id: this.preview.id, name: this.preview.name, time: this.time - this.preview.at, duration: this.preview.action.getClip().duration, loop: this.preview.loop, feet: this.preview.feet } : null,
       grounding: { legs: this.legs.length, blend: this.contact, maxError: this.footError,
         feet: this.legs.map(leg => ({ side: leg.side, planted: leg.planted, weight: leg.plantWeight, target: leg.target.toArray(), actual: leg.tip.getWorldPosition(new THREE.Vector3()).toArray(), raw: leg.rawTip?.getWorldPosition(new THREE.Vector3()).toArray() })) },
       transitioning: !!this.bridge, actions: this.mixer.stats.actions.inUse };

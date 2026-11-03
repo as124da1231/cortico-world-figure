@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 import { smoothstep } from './motion.mjs';
+import { rootTravelAt } from './motion-libraries.mjs';
 
 const up = new THREE.Vector3(0, 1, 0);
 const wrap = angle => Math.atan2(Math.sin(angle), Math.cos(angle));
@@ -49,7 +50,7 @@ export class Locomotion {
     this.basePosition = vrm.scene.position.clone(); this.baseQuaternion = vrm.scene.quaternion.clone();
     this.baseForward = forward.clone(); this.forward = forward.clone();
     this.yaw = 0; this.weight = 0; this.phase = 'idle'; this.elapsed = 0;
-    this.target = null; this.actions = new Map(); this.profiles = new Map(); this.retiring = [];
+    this.target = null; this.actions = new Map(); this.profiles = new Map(); this.rootMotions = new Map(); this.retiring = [];
     this.distance = 0; this.phaseChanges = 0; this.stopped = false;
     for (const [phase, id] of Object.entries(names)) {
       const animation = animations.get(id); if (!animation) continue;
@@ -65,11 +66,14 @@ export class Locomotion {
       }
       clip.name = `locomotion-${phase}`;
       this.profiles.set(phase, measureGait(vrm, clip, height, forward));
+      if (animation.rootMotion) this.rootMotions.set(phase, animation.rootMotion);
       const action = mixer.clipAction(clip); action.enabled = true; action.weight = 0;
       this.actions.set(phase, action);
     }
     this.available = Object.values(names).every(id => animations.has(id));
     this.speed = this.profiles.get('walk')?.speed || height * .42;
+    const authored = this.rootMotions.get('walk');
+    if (authored) this.speed = authored.distance / authored.times.at(-1) * vrm.humanoid.normalizedRestPose.hips.position[1] / authored.restHipsHeight;
     this.rate = 1; this.stageAngle = 0; this.cycle = 0; this.returning = false;
   }
   get active() { return this.phase !== 'idle' || this.weight > .002; }
@@ -130,7 +134,9 @@ export class Locomotion {
       const index = Math.min(this.profile.samples.length - 1, Math.floor(t / duration % 1 * (this.profile.samples.length - 1)));
       const sample = this.profile.samples[index];
       const stanceSpeed = Math.max(0, ...Object.values(sample).filter(s => s.low).map(s => -s.speed));
-      const velocity = Math.min(stanceSpeed, this.height * 1.1) * this.rate;
+      const authored = this.rootMotions.get(this.phase);
+      const authoredDistance = authored ? (rootTravelAt(authored, t) - rootTravelAt(authored, Math.max(0, t - dt * this.rate))) * this.vrm.humanoid.normalizedRestPose.hips.position[1] / authored.restHipsHeight : null;
+      const velocity = authoredDistance !== null ? authoredDistance / dt : Math.min(stanceSpeed, this.height * 1.1) * this.rate;
       if (this.target && velocity > 0) {
         const delta = this.target.clone().sub(this.vrm.scene.position); delta.y = 0;
         const travel = Math.min(delta.length(), velocity * dt);
@@ -164,5 +170,5 @@ export class Locomotion {
     this.retiring = []; this.action = null; this.profile = null; this.target = null; this.phase = 'idle'; this.weight = 0; this.yaw = 0; this.distance = 0;
     this.forward.copy(this.baseForward); this.vrm.scene.position.copy(this.basePosition); this.vrm.scene.quaternion.copy(this.baseQuaternion);
   }
-  snapshot() { return { available: this.available, active: this.active, phase: this.phase, elapsed: this.elapsed, weight: this.weight, yaw: this.yaw, speed: this.speed * this.rate, distance: this.distance, position: this.vrm.scene.position.toArray(), target: this.target?.toArray(), phases: this.phaseChanges }; }
+  snapshot() { return { available: this.available, active: this.active, phase: this.phase, elapsed: this.elapsed, weight: this.weight, yaw: this.yaw, speed: this.speed * this.rate, distance: this.distance, displacementSource: this.rootMotions.has('walk') ? 'authored-root-motion' : 'stance-velocity', position: this.vrm.scene.position.toArray(), target: this.target?.toArray(), phases: this.phaseChanges }; }
 }
