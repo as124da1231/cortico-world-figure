@@ -1,20 +1,22 @@
-Coo 魔术人偶工坊 / Coo Marionette Atelier
+Live2D 模型一键安装 / Live2D One-Click Install
 Copyright (C) 2026 as124da1231
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+The original code authored for this project is licensed under the GNU Affero
+General Public License, version 3 or (at your option) any later version, with the
+additional permission below. This permission is granted only for code whose
+copyright holders have authorized this project to grant it. Third-party software
+and user-supplied models retain their own licenses, identified in NOTICE.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
+Additional permission under GNU AGPL version 3 section 7
 
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
+If you modify this Program, or any covered work, by linking or combining it with the
+Steamworks API redistributable libraries of Valve Corporation's Steamworks SDK
+(steam_api, steam_api64, libsteam_api), or a modified version of those libraries,
+containing parts covered by the terms of the Steamworks SDK Access Agreement, the
+licensors of this Program grant you additional permission to convey the resulting work.
 
---------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------
+
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 

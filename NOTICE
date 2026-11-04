@@ -1,19 +1,31 @@
-Coo 魔术人偶工坊 / Coo Marionette Atelier
+Live2D 模型一键安装 / Live2D One-Click Install
 Copyright (C) 2026 as124da1231
 
-本包以 GNU Affero General Public License v3.0 or later 发布，完整文本见 LICENSE。
-打包产物（figure pack）不复制 body.js / rig.js：包里的 figure.js 只调用宿主传入的
-opts.kit.createBody，和 Coo 自带的形象、鲸鱼包、酒狐包走同一个公共 puppet 引擎。
-本仓库 workbench/vendor/coo-kit/ 只是工作台在浏览器里单独预览时用的副本，
-不进入安装产物。
+本项目自有代码：AGPL-3.0-or-later，附 AGPL 第 7 节 Steamworks 许可，见 LICENSE。
+该附加许可仅覆盖本项目作者有权许可的代码；第三方组件和用户素材不被改写许可。
+Coopanion 主许可与 Cortico 框架许可不同：前者是 AGPL（含附加许可），后者是 MIT。
 
-随包附带的第三方组件（Live2D Cubism SDK for Web、SoulLink Emotion Engine、Coopanion
-desktop-pet kit）的清单、许可边界与许可文本见 workbench/NOTICE 与 workbench/pack/sdk/。
+第三方代码与完整许可文本：
+- Coopanion 0.2.17 Kit：workbench/vendor/coo-kit/，上游 AGPL 及 Steamworks 附加许可。
+  原作者 Pal AI Lab；完整文本见该目录 LICENSE。仅供开发和临时预览，生成的正式形象包
+  不复制 body.js / rig.js，而通过 opts.kit.createBody 调用宿主公共引擎。
+- Coopanion 0.2.17 预览 frame：workbench/vendor/coo-preview/，同上游许可。
+  原作者 Pal AI Lab；本项目的修改说明、来源和 LICENSE 均保留在该目录。
+- SoulLink Emotion Engine 0.2.0-beta.1：Apache-2.0，见
+  workbench/pack/vendor/soullink/LICENSE；保留上游版权和 README。
+- fflate 0.8.3：MIT，Copyright (c) 2026 Arjun Barrett，见 licenses/fflate-MIT.txt。
+  它是 npm 运行依赖，安装时仍保留自身包内的许可证。
+- Cortico：MIT，Copyright (c) 2026 Phantivia，见 licenses/Cortico-MIT.txt。
+  本项目仅声明框架开发依赖和接口类型，不把 Cortico 整包重新分发。
+- Live2D SDK framework.js / shaders.js：Live2D Open Software License，见
+  workbench/pack/sdk/LICENSE-live2d-components.txt；不是本项目 AGPL 代码。
+- Cubism Core：Live2D Proprietary Software License，见
+  workbench/pack/sdk/LICENSE-live2d-core.txt；Core 二进制不随本扩展分发。
 
-Live2D Cubism Core（live2dcubismcore.min.js）**不随本包分发**：首次使用前由扩展在用户
-同意 Live2D 许可后，从 Live2D Inc. 的官方托管地址获取并校验 SHA-256，存到本地缓存。
-
-本包作为 Coo 扩展分发时，同样适用以上边界；pack/sdk 下的 Live2D 文件不属于 AGPL。
-
-使用本功能生成的形象包包含 Live2D Cubism Core；请仅在本机使用，不要上传、分享或再次分发。
+Cubism Core 仅在用户同意许可后由扩展从 Live2D 官方地址获取并校验，缓存于用户数据目录。
+扩展 npm 包不包含模型、moc3、贴图、原生表情或动作素材。用户导入素材仍属于原作者。
+生成的形象包与扩展 npm 包是不同产物：形象包包含用户素材和 Core，各自许可继续适用，
+并附 LICENSES.txt；按本项目既有须知仅供本机使用，请勿上传、分享或再次分发。
 Generated figure packs contain Live2D Cubism Core. Use locally; do not upload, share or redistribute them.
+
+完整分项来源见 workbench/NOTICE。重新分发本扩展时请保留所有版权、NOTICE 和许可文本。

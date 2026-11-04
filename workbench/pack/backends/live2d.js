@@ -27,14 +27,17 @@ import {
 } from '../sdk/framework.js';
 import { SHADERS } from '../sdk/shaders.js';
 import { roleValue } from './role-values.js';
-import { createAdaptiveRenderer } from './render-config.js';
+import { createAdaptiveRenderer, resizeMaskBuffers } from './render-config.js';
+import { graphicsLimits, displayPixels, resolutionPlan, texturePlan } from './render-quality.js';
+import { createNativeActions, applyNativeValues } from './native-actions.js';
+import {createWardrobe,wardrobeConfig} from './wardrobe.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
 
 /** 角色在 256 logo 方格里的画布。 */
 const BOX = 256;
-const CANVAS_PX = 512;
+const INITIAL_CANVAS_PX = 512;
 /** 简易模式：只走 role + 通用配方 + SoulLink，不播任何原生 exp3 / motion / Idle。 */
 const SIMPLE = true;
 
@@ -86,11 +89,13 @@ export async function createLive2DBody(base, opts, entry, kit) {
   } catch {
     throw new Error(`模型 ${entry.id} 缺 profile.js（role 表 / 表情配方 / 取景）`);
   }
+  const previewPixels=opts.preview&&[256,512,1024].includes(opts.previewSize)?opts.previewSize:null;
+  const renderPolicy = previewPixels?{mode:'economy',textureLimit:previewPixels,canvasLimit:previewPixels,strict:false}:profile.render ?? {mode:'original',textureLimit:0,canvasLimit:0,strict:true};
 
   // ---------- 画布（放 kit 的 SVG 组里） ----------
   const canvas = doc.createElementNS(XHTML, 'canvas');
-  canvas.width = CANVAS_PX;
-  canvas.height = CANVAS_PX;
+  canvas.width = previewPixels||Math.min(INITIAL_CANVAS_PX,renderPolicy.canvasLimit||INITIAL_CANVAS_PX);
+  canvas.height = canvas.width;
   canvas.style.width = '100%';
   canvas.style.height = '100%';
   canvas.style.pointerEvents = 'none';
@@ -106,6 +111,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     alpha: true, premultipliedAlpha: true, antialias: true,
   });
   if (!gl) throw new Error('这个环境无法启用 WebGL');
+  const limits = graphicsLimits(gl);
 
   // ---------- 模型（官方双轨回退：优先 fetch 原生 moc3，失败回退到 base64 模块） ----------
   const resolveAsset = (rel) => {
@@ -155,8 +161,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
   };
   applyFit();
 
+  const nativePhysicsOutputs = new Set();
   if (entry.physics) {
     const phys = (await import(new URL(`models/${entry.id}/${entry.physics}`, base))).default;
+    for (const setting of phys.PhysicsSettings ?? []) for (const output of setting.Output ?? []) {
+      if (output.Destination?.Id) nativePhysicsOutputs.add(output.Destination.Id);
+    }
     const bytes = new TextEncoder().encode(JSON.stringify(phys));
     model.loadPhysics(bytes.buffer, bytes.length);
   }
@@ -168,18 +178,22 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
   // Complex models exceed the SDK's single-buffer limit (36 clipping groups).
   // Overflow aliases masks onto one region, corrupting faces/eyes/clothing.
-  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height);
+  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height, {strict:renderPolicy.strict,maskSize:previewPixels||Math.min(512,renderPolicy.canvasLimit||512)});
   const { renderer, maskBuffers } = renderConfig;
-  let renderNotice = null;
-  if (renderConfig.warning) {
-    console.warn('[l2d]', renderConfig.warning);
-    renderNotice = doc.createElement('div');
-    renderNotice.setAttribute('role', 'status');
-    renderNotice.textContent = '兼容渲染 / Compatibility mode';
-    renderNotice.title = renderConfig.warning;
-    renderNotice.style.cssText = 'position:absolute;bottom:0;left:0;right:0;text-align:center;font:11px/1.5 sans-serif;color:#805500;background:#fff4d9dd;pointer-events:none';
-    host.root.appendChild(renderNotice);
-  }
+  const renderNotice = doc.createElement('div');
+  renderNotice.setAttribute('role','status'); renderNotice.hidden = true;
+  renderNotice.style.cssText = 'position:absolute;bottom:0;left:0;right:0;padding:4px;text-align:center;font:11px/1.5 sans-serif;color:#805500;background:#fff4d9ee;pointer-events:none';
+  host.root.appendChild(renderNotice);
+  const renderWarnings = new Set(); let renderFailure = '';
+  const showRenderNotice = (message, fatal = false) => {
+    if (fatal) renderFailure = message;
+    if (!renderWarnings.has(message)) console.warn('[l2d]',message);
+    renderWarnings.add(message); renderNotice.hidden = false;
+    renderNotice.textContent = (fatal ? '渲染受限：' : '') + message;
+    renderNotice.title = [...renderWarnings].join('\n');
+  };
+  if (renderConfig.warning) showRenderNotice(renderConfig.warning);
+  canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();showRenderNotice('图形上下文已丢失，请减小显示尺寸或降低画质后重新加载。',true);});
 
   // 着色器内联
   const shader = CubismShaderManager_WebGL.getInstance().getShader(gl);
@@ -190,18 +204,14 @@ export async function createLive2DBody(base, opts, entry, kit) {
   if (loading && typeof loading.then === 'function') await loading;
 
   // 贴图：后台加载，不阻塞 ready（8192² 在慢显卡上要几秒，kit 只等 20 秒）。
-  // 尺寸兜底：包里已经缩过图（convert --max-texture），但老包 / 别人给的包可能还是 4096~8192。
-  // 一张 8192² RGBA 显存 256 MB，桌宠实际只占 200 px 高——超过 maxTex 先在 2D canvas 里缩再上传。
-  const maxTex = Math.min(2048, Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 2048);
+  // 打包与播放使用同一精度约定；原图只受设备限制，不暗中降采样。
   const isPOT = (n) => n > 0 && (n & (n - 1)) === 0;
   const shrinkForUpload = (img) => {
     const w = img.naturalWidth || img.width;
     const h = img.naturalHeight || img.height;
-    const longest = Math.max(w, h);
-    if (longest <= maxTex) return { src: img, w, h };
-    const k = maxTex / longest;
-    const nw = Math.max(1, Math.round(w * k));
-    const nh = Math.max(1, Math.round(h * k));
+    const plan = texturePlan(w,h,renderPolicy,limits);
+    if (!plan.scaled) return { src: img, w, h };
+    const nw = plan.width, nh = plan.height;
     const c = doc.createElement('canvas');
     c.width = nw;
     c.height = nh;
@@ -209,11 +219,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
     cx.imageSmoothingEnabled = true;
     cx.imageSmoothingQuality = 'high';
     cx.drawImage(img, 0, 0, nw, nh);
-    console.warn(`[l2d] 贴图超上限，运行时缩到 ${nw}×${nh}（原 ${w}×${h}）：包里跑一次构建即可持久化`);
+    showRenderNotice(`按所选画质上传贴图 ${nw}×${nh}（文件 ${w}×${h}）。`);
     return { src: c, w: nw, h: nh };
   };
 
   let texturesReady = false;
+  const uploadedTextures = [];
   (async () => {
     for (let i = 0; i < entry.textures.length; i++) {
       const img = await opts.loadImage(new URL(`models/${entry.id}/${entry.textures[i]}`, base));
@@ -222,7 +233,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
-      // 缩小采样用 mipmap：8192→200 px 只用 LINEAR 会闪；缩到 2048 之后 mipmap 只要几毫秒。
+      if (gl.getError() !== gl.NO_ERROR) { gl.deleteTexture(tex); throw Error(`贴图 ${w}×${h} 上传失败，无法保持所选精度。`); }
+      uploadedTextures.push({file:entry.textures[i],width:w,height:h});
+      // 缩小时使用 mipmap，放大时仍采样原始上传级别。
       // 非 2 的幂（WebGL1）不能建 mipmap，退回 LINEAR。
       const pot = isPOT(w) && isPOT(h);
       if (pot) gl.generateMipmap(gl.TEXTURE_2D);
@@ -235,11 +248,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
         const max = gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) || 1;
         gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(4, max));
       }
+      if (gl.getError() !== gl.NO_ERROR) { gl.deleteTexture(tex); throw Error(`贴图 ${w}×${h} 的采样缓冲分配失败。`); }
       renderer.bindTexture(i, tex);
     }
     model.setInitialized(true);
     texturesReady = true;
-  })().catch((e) => console.error('贴图加载失败', e));
+  })().catch((e) => { showRenderNotice('贴图加载失败：'+e.message,true); console.error('贴图加载失败', e); });
 
   // ---------- 动作 ----------
   // 每条动作都必须 setEffectIds：CubismMotion 每帧读 _eyeBlinkParameterIds /
@@ -369,8 +383,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
   // 情绪词 → VAD → FACS → role，负责过渡、待机微动、呼吸和视线漂移。
   // 加载失败就退回下面的离散表情配方，包不会因此不可用。
   let performance = null;
+  let performanceFactory = null;
   try {
     const { createPerformance } = await import('./soullink.js');
+    performanceFactory = createPerformance;
     performance = createPerformance(profile, console.warn);
     if (performance) {
       console.info('[l2d] SoulLink 表演层已启用');
@@ -404,12 +420,24 @@ export async function createLive2DBody(base, opts, entry, kit) {
   for (let i = 0; i < model._model.getPartCount(); i++) {
     partIndex.set(model._model.getPartId(i).getString(), i);
   }
+  let native = profile.native?.version === 1 ? createNativeActions(profile.native) : null;
+  const wardrobe=createWardrobe(model._model,paramIndex,partIndex,{parts:{...profile.parts?.base,...profile.clean?.parts},params:profile.clean?.params});
+  wardrobe.configure(profile.wardrobe);wardrobe.scheme(opts.scheme);
+  let previewState = null;
+  const nativeParams = new Set(), nativeParts = new Map();
+  for (const resource of profile.native?.resources ?? []) {
+    for (const p of resource.kind === 'expression' ? (resource.data.Parameters ?? []).map(p => ({Id:p.Id,Target:'Parameter'})) : resource.data.Curves ?? []) {
+      if (p.Target === 'Parameter' && paramIndex.has(p.Id)) nativeParams.add(paramIndex.get(p.Id));
+      if (p.Target === 'PartOpacity' && partIndex.has(p.Id)) { const i = partIndex.get(p.Id); nativeParts.set(i, model._model.getPartOpacityByIndex(i)); }
+    }
+  }
+  function resetNativeBase() {
+    for (const i of nativeParams) model._model.setParameterValueByIndex(i, model._model.getParameterDefaultValue(i));
+    for (const [i, value] of nativeParts) model._model.setPartOpacityByIndex(i, value);
+  }
   const partTargets = new Map((entry.motions ?? []).map((m) => [m.id, m.partOpacity ?? null]));
   const baseParts = profile.parts?.base ?? { PartArmA: 1, PartArmB: 0 };
 
-  // ---------- 清理：水印 / 文字类部件与参数 ----------
-  // profile.clean 是打包时（设置里打开「清理」）写进来的：部件一律透明，
-  // 参数固定成作者“关掉水印”表情里的值。这里每帧最后写一次，压过表情 / 物理。
   const cleanParts = profile.clean?.parts ?? {};
   const cleanParams = profile.clean?.params ?? {};
   const cleanParamIdx = new Map();
@@ -592,7 +620,48 @@ export async function createLive2DBody(base, opts, entry, kit) {
   }
 
   // ---------- 绘制 ----------
+  let resolutionCheckedAt = -Infinity, shrinkTarget = 0, shrinkAt = 0, allocationCeiling = Infinity, validateTargets = true;
+  function qualityInfo() {
+    return {mode:renderPolicy.mode,canvas:[canvas.width,canvas.height],maskSize:renderConfig.maskSize,
+      maskBuffers,textureLimit:renderPolicy.textureLimit,canvasLimit:renderPolicy.canvasLimit,
+      textures:uploadedTextures,limits,warnings:[...renderWarnings],error:renderFailure};
+  }
+  function ensureResolution() {
+    if (renderFailure) return false;
+    const now = doc.defaultView.performance.now();
+    if (now - resolutionCheckedAt < 250 || !fo.isConnected) return true;
+    resolutionCheckedAt = now;
+    const pixels = displayPixels(fo.getScreenCTM?.(),fo.getBoundingClientRect(),BOX);
+    const plan = resolutionPlan(pixels,doc.defaultView.devicePixelRatio,renderPolicy,limits);
+    if (plan.warning) showRenderNotice(plan.warning);
+    const size = Math.min(plan.size,allocationCeiling), previous = canvas.width;
+    if (size === previous) { shrinkTarget = 0; return true; }
+    if (size < previous) {
+      if (size > previous * .65) return true;
+      if (shrinkTarget !== size) { shrinkTarget = size; shrinkAt = now; return true; }
+      if (now - shrinkAt < 1200) return true;
+    }
+    const allocate = target => {
+      canvas.width = target; canvas.height = target;
+      if (gl.isContextLost() || gl.drawingBufferWidth !== target || gl.drawingBufferHeight !== target) throw Error(`画布 ${target}×${target} 分配失败`);
+      renderer.setRenderTargetSize(target,target);
+      validateTargets = true;
+      resizeMaskBuffers(renderConfig,model,gl,target,renderPolicy.strict);
+      if (renderConfig.warning) showRenderNotice(renderConfig.warning);
+    };
+    try { allocate(size); shrinkTarget = 0; }
+    catch (error) {
+      if (renderPolicy.strict || gl.isContextLost()) { showRenderNotice(error.message+'，无法保持所选精度。',true); return false; }
+      try {
+        const fallback = Math.max(128,Math.min(previous,Math.floor(size/2)));
+        allocate(fallback); allocationCeiling = fallback;
+        showRenderNotice(`请求 ${size}px 渲染失败，实际回退到 ${fallback}px。`);
+      } catch (failure) { showRenderNotice(failure.message,true); return false; }
+    }
+    return true;
+  }
   function render() {
+    if (!ensureResolution()) return false;
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -602,7 +671,16 @@ export async function createLive2DBody(base, opts, entry, kit) {
     projection.multiplyByMatrix(model._modelMatrix);
     renderer.setMvpMatrix(projection);
     renderer.setRenderState(gl.getParameter(gl.FRAMEBUFFER_BINDING), [0, 0, canvas.width, canvas.height]);
-    renderer.drawModel();
+    try { renderer.drawModel(); }
+    catch (error) { showRenderNotice('模型绘制失败：'+error.message,true); return false; }
+    if (validateTargets) {
+      validateTargets = false;
+      const targets = [...(renderer._modelRenderTargets || []),...(renderer._drawableMasks || []),...(renderer._offscreenMasks || [])];
+      if (targets.some(target=>!target?.isValid()) || gl.getError() !== gl.NO_ERROR) {
+        showRenderNotice('渲染缓冲分配或绘制失败，无法保持所选精度。',true); return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -614,8 +692,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
   function renderNeutralPose() {
     if (!texturesReady) return false;
     model._model.loadParameters();
+    resetNativeBase();
     applyFrame({}, {}, 1 / 60, true);
     applyPartOpacity(null);
+    wardrobe.apply();
     model._model.saveParameters();
     // 物理是有状态的：同一中性姿势也会因为上一帧的惯性读出不同包围盒。
     // 简单模式量取景不跑物理（脚底 / 躯干 / 高度不受头发尾巴滞后影响）。
@@ -624,9 +704,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
       try { model._pose?.updateParameters(model._model, 1 / 60); } catch { /* 姿势失败不致命 */ }
     }
     applyCleanParams();
+    wardrobe.apply();
     model._model.update();
-    render();
-    return true;
+    return render();
   }
 
   function measureNeutralExtent() {
@@ -640,6 +720,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
    * 调用前必须刚 render 过，否则默认帧缓冲可能已被合成器清空。
    */
   function canvasPng(size = 512) {
+    if (renderFailure) throw Error(renderFailure);
     const w = canvas.width;
     const h = canvas.height;
     const src = new Uint8Array(w * h * 4);
@@ -685,6 +766,22 @@ export async function createLive2DBody(base, opts, entry, kit) {
   // profile.extent / profile.anchors 仍然可以覆盖（工作台校准后写死）。
   const DEFAULT_EXTENT = [20, 8, 236, 256];
   let extent = profile.extent ?? null;
+  let wardrobeBaseline=null,wardrobeLayoutDirty=false;
+  const fitCopy=()=>({...fitState,offset:[...(fitState.offset||[0,0])],padding:[...(fitState.padding||[0,0])]});
+  function changeWardrobe(update){const before=wardrobe.layoutKey(),active=wardrobe.grounding();update();if(before!==wardrobe.layoutKey()&&(active||wardrobe.grounding()))wardrobeLayoutDirty=true;}
+  function settleWardrobe(){
+    if(!wardrobeLayoutDirty||!wardrobeBaseline)return;
+    const previousFit=fitCopy();try{
+      fitState={...wardrobeBaseline.fit,offset:[...wardrobeBaseline.fit.offset]};applyFit();
+      let measured=measureNeutralExtent();if(!measured)throw Error('外观轮廓不可见');
+      if(wardrobe.grounding()){
+        fitState.offset=[fitState.offset[0],fitState.offset[1]+(measured[3]-wardrobeBaseline.feet)/128];applyFit();
+        measured=measureNeutralExtent();if(!measured)throw Error('外观贴地失败');
+      }
+      extent=measured;publishInfo();
+    }catch(error){fitState=previousFit;applyFit();console.warn('[l2d] 外观贴地跳过',error);}
+    wardrobeLayoutDirty=false;
+  }
   /** 命中圈按高度带取可见 alpha 的中心；整张 bbox 会被尾巴/胡须带偏。 */
   let hitBands = null;
 
@@ -803,6 +900,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       maskBuffers,
       renderMode: renderConfig.mode,
       renderWarning: renderConfig.warning,
+      renderQuality: qualityInfo(),
       expressions: [...expressions.keys()],
       idle: idleIds,
       motion: profile.motion?.kind === 'stand' ? 'stand' : 'roam',
@@ -884,7 +982,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
         const m = autoFitExtent({ height: 200, feet: 236, center: 128, maxWidth: 208 });
         if (!m) return null;
         if (!renderNeutralPose()) return null;
-        const png = canvasPng(canvas.width);
+        const png = canvasPng(512);
         const png128 = canvasPng(128);
         return png && png128 ? { png, png128 } : null;
       } catch (e) {
@@ -902,19 +1000,31 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
     draw(petG, face, frame) {
       if (fo.parentNode !== petG) petG.appendChild(fo);
-      if (!texturesReady) return;
+      if (!texturesReady || renderFailure) return;
+      if(extent&&!wardrobeBaseline)wardrobeBaseline={fit:fitCopy(),feet:extent[3]};
+      settleWardrobe();
 
+      if (opts.preview && previewState) frame = {...frame,face:previewState.word,gesture:null,talk:0,look:[0,0]};
       const dt = clamp(frame.dt ?? 0.016, 0.001, 0.05);
 
       model._model.loadParameters();
-      applyFrame(face, frame, dt, !extent);
+      resetNativeBase();
+      applyFrame(face, frame, dt, !extent || Boolean(previewState?.raw));
       stepMotion(frame, dt);
       stepExpression(frame.face, dt);
       applyPartOpacity(currentId);
+      let nativeValues = [];
+      if (native && extent) {
+        try { nativeValues = native.update(frame, dt); applyNativeValues(nativeValues.filter(v => !nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex); }
+        catch (error) { console.warn('[l2d] Native update failed; generic behavior retained', error); }
+      }
+      wardrobe.apply();
       model._model.saveParameters();            // ← 必须在 physics 之前
       try { model._physics?.evaluate(model._model, dt); } catch { /* 物理失败不致命 */ }
+      if (nativeValues.length) applyNativeValues(nativeValues.filter(v => nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex);
       try { model._pose?.updateParameters(model._model, dt); } catch { /* 姿势失败不致命 */ }
       applyCleanParams();
+      wardrobe.apply();
       model._model.update();
       render();
 
@@ -924,18 +1034,22 @@ export async function createLive2DBody(base, opts, entry, kit) {
         idleCount: idleIds.length,
         expr: currentExpr,
         exprCount: expressions.size,
+        native: native?.state() ?? null,
       };
 
       // 贴图就绪后的第 3 帧量一次可见范围（等姿势稳定，别量到眨眼/动作的瞬间）
       if (!extent && extentFrames < 30 && ++extentFrames >= 3) {
         let m = null;
+        const selected=wardrobe.state(),grounded=wardrobe.grounding();
         try {
+          if(grounded)wardrobe.select({});
           m = fitState.autoFit !== false ? autoFitExtent() : measureNeutralExtent();
         } catch (e) {
           console.warn('[l2d] 量取景失败', e);
-        }
+        }finally{if(grounded)wardrobe.select(selected);}
         if (m) {
           extent = m;
+          wardrobeBaseline={fit:fitCopy(),feet:m[3]};if(grounded)wardrobeLayoutDirty=true;
           publishInfo();
           console.info('[l2d] extent', JSON.stringify(m));
           console.info('[l2d] fit', JSON.stringify(fitState));
@@ -950,6 +1064,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       fo.remove();
       try { performance?.dispose(); } catch { /* 忽略 */ }
       try { model.release?.(); } catch { /* 忽略 */ }
+      if(opts.preview)try{gl.getExtension('WEBGL_lose_context')?.loseContext();}catch{}
     },
   };
 
@@ -957,6 +1072,11 @@ export async function createLive2DBody(base, opts, entry, kit) {
   const words = {};
   for (const m of entry.motions ?? []) {
     words[m.id] = { motion: { seconds: m.duration || 3 } };
+  }
+  for (const binding of profile.native?.bindings ?? []) {
+    const resource = profile.native.resources.find(r => r.id === binding.resource);
+    if (resource) words[binding.word] = resource.kind === 'expression' ? { expression: {} }
+      : { motion: { seconds: (resource.seconds || 1) + (resource.classification === 'pose' ? 2 : .25) } };
   }
 
   publishInfo();
@@ -969,9 +1089,61 @@ export async function createLive2DBody(base, opts, entry, kit) {
     return m;
   };
   globalThis.__l2dCover = figure.__cover;
+  globalThis.__l2dRenderQuality = qualityInfo;
+  if(opts.preview)globalThis.__l2dPreviewReady=()=>texturesReady&&!!extent&&!renderFailure;
   globalThis.__l2dExpr = figure.__expr;
 
   const body = kit.createBody(host, { figure, words, css: 'foreignObject{pointer-events:none}' });
+  body.setScheme=async id=>{changeWardrobe(()=>wardrobe.scheme(id));if(texturesReady)settleWardrobe();};
+  globalThis.__l2dWardrobe=()=>wardrobe.state();
+  if(opts.preview)globalThis.__l2dWardrobeValues=()=>wardrobe.inspect();
+  if (native) {
+    const doBase = body.do.bind(body);
+    body.do = (word) => { const accepted = doBase(word); if (accepted !== false) native.trigger(word); return accepted; };
+    globalThis.__l2dNativeSample = (id, time, word, generic = false, size = 384) => {
+      if (!texturesReady) return null;
+      model._model.loadParameters();
+      for (let i = 0; i < model._model.getParameterCount(); i++) model._model.setParameterValueByIndex(i, model._model.getParameterDefaultValue(i));
+      resetNativeBase();
+      const previousPerformance = performance;
+      performance = word && performanceFactory ? performanceFactory(profile, () => {}) : null;
+      try {
+        // Reset and warm the same generic layer for repeatable static comparisons.
+        for (let i = 0; i < (word ? 60 : 1); i++) applyFrame({}, {face:word,t:i / 60}, 1 / 60, !word);
+        applyPartOpacity(null);
+        if (id !== '__neutral__' && !generic) native.sample(id, time);
+        const values = id !== '__neutral__' && !generic ? native.update({},0) : [];
+        applyNativeValues(values.filter(v => !nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
+        wardrobe.apply();
+        model._model.saveParameters();
+        // Static comparisons use equilibrium, avoiding residual motion from a prior sample.
+        try { model._physics?.stabilization(model._model); } catch { /* optional */ }
+        applyNativeValues(values.filter(v => nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
+        wardrobe.apply();
+        model._model.update();render();return canvasPng(size);
+      }
+      finally { native.clearSample(); performance?.dispose(); performance = previousPerformance; }
+    };
+  }
+  if (opts.preview) globalThis.__l2dPreview = {
+    wardrobe(groups,picks){
+      changeWardrobe(()=>{wardrobe.configure(wardrobeConfig({resources:(profile.native?.resources||[]).map(r=>({...r,raw:r.data}))},groups||[]));wardrobe.select(picks||{});});
+    },
+    play(resource,word,bindings=[],raw=false) {
+      performance?.dispose(); performance=performanceFactory?.(profile,console.warn) || null;
+      previewState={word:word || 'neutral',raw};
+      const selected=bindings.filter(b=>b.word!==word);
+      if(resource)selected.push({...bindings.find(b=>b.word===word&&b.resource===resource),word:word || 'neutral',resource});
+      native=createNativeActions({...profile.native,bindings:selected});
+      body.do?.(word || 'neutral');
+    },
+    stop(){previewState=null;native=createNativeActions({...profile.native,bindings:[]});body.do?.('neutral');},
+  };
+  if(opts.preview)globalThis.__l2dStaticSample=sample=>{
+    changeWardrobe(()=>wardrobe.select(sample.picks||{}));settleWardrobe();
+    const png=globalThis.__l2dNativeSample(sample.resource||'__neutral__',sample.time,sample.word,false,previewPixels||512);
+    return {png,fit:fitCopy(),picks:wardrobe.state(),values:wardrobe.inspect()};
+  };
   const motionKind = profile.motion?.kind === 'stand' ? 'stand' : 'roam';
   if (SIMPLE && motionKind === 'stand') {
     // 站定：无论 Coo / 预览传什么 roam，都强制 off；正面立绘也不镜像。

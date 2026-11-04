@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-figure",
-  "version": "1.4.4",
+  "version": "3.0.0",
   "type": "module",
   "description": "自动适配 Live2D 模型的通用动作与表情，生成封面并打包安装到 Coo。 / Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo.",
   "license": "AGPL-3.0-or-later",
@@ -33,7 +33,8 @@
     "displayName": "Live2D 模型一键安装",
     "icon": "assets/icon.svg",
     "tags": [
-      "experimental"
+      "experimental",
+      "external-setup"
     ],
     "locales": {
       "zh": {
@@ -45,8 +46,8 @@
         "description": "Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo."
       }
     },
-    "webUiClient": "dist/webui-74b1a7e0d21d.js",
-    "webUiStyle": "dist/webui-e74ba7c0339e.css",
+    "webUiClient": "dist/webui-273424eff212.js",
+    "webUiStyle": "dist/webui-88623881090b.css",
     "describe": "describe.json"
   },
   "files": [
@@ -58,8 +59,10 @@
     "describe.json",
     "CHANGELOG.md",
     "README.md",
+    "RELEASE-3.0.0.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "licenses"
   ],
   "dependencies": {
     "fflate": "0.8.3"
@@ -69,6 +72,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
+    "cortico": "0.2.7",
     "jsdom": "^26.1.0",
     "typescript": "^5.9.3"
   },
@@ -76,6 +80,6 @@
     "build:ui": "node scripts/build-webui.mjs",
     "prepack": "npm run build:ui",
     "test": "node --experimental-strip-types --test test/*.test.mjs",
-    "check": "node --check dist/webui.js && tsc --noEmit -p tsconfig.check.json"
+    "check": "node --check dist/webui.js && tsc --noEmit -p tsconfig.check.json && tsc --noEmit -p tsconfig.automation.json"
   }
 }

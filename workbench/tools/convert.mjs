@@ -26,9 +26,9 @@
 import { inferRoles, ROLE_RULES } from './parameter-mapping.mjs';
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -55,10 +55,9 @@ const OVERRIDES_PATH = arg('overrides');
  * 6 张就是 1.5 GB，还会拖慢首帧。2048² 仍有 8~10 倍过采样，肉眼无损。
  */
 const MAX_TEX = Math.max(0, Number(arg('max-texture', 2048)) || 0);
-/** 清理：打包时把水印 / 文字类部件和参数按作者给的“关掉”状态固定住。 */
 const CLEAN = flag('clean');
 /** 生成器配方版本：写进 build.json；工作台用它判断包是否过期 */
-const GENERATOR_VERSION = 'rt-2026-10-31.mapping.1';
+const GENERATOR_VERSION = 'rt-2026-11-01.quality.1';
 /** 简易模式：只做 role + 通用配方，不产出/不引用任何原生 exp3 / motion / pose 绑定。 */
 const SIMPLE = true;
 
@@ -66,12 +65,15 @@ const readJson = async (p) => JSON.parse((await readFile(p, 'utf8')).replace(/^\
 
 /** 读 PNG 头拿尺寸（只读 24 字节，不解码整图）。非 PNG 返回 null。 */
 const pngSize = (file) => {
+  let fd;
   try {
-    const fd = readFileSync(file, { flag: 'r' });
-    if (fd.length < 24 || fd[0] !== 0x89 || fd[1] !== 0x50) return null;
-    if (fd.toString('ascii', 12, 16) !== 'IHDR') return null;
-    return { w: fd.readUInt32BE(16), h: fd.readUInt32BE(20) };
+    fd = openSync(file, 'r');
+    const head = Buffer.alloc(24);
+    if (readSync(fd, head, 0, 24, 0) !== 24 || head[0] !== 0x89 || head[1] !== 0x50) return null;
+    if (head.toString('ascii', 12, 16) !== 'IHDR') return null;
+    return { w: head.readUInt32BE(16), h: head.readUInt32BE(20) };
   } catch { return null; }
+  finally { if (fd !== undefined) closeSync(fd); }
 };
 const fmtMB = (n) => `${(n / 1048576).toFixed(1)} MB`;
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
@@ -90,7 +92,9 @@ async function findModel3(dir) {
   return null;
 }
 
-const model3Path = await findModel3(MODEL_DIR);
+const explicitModel = arg('model-file');
+if (explicitModel && (basename(explicitModel) !== explicitModel || !explicitModel.toLowerCase().endsWith('.model3.json'))) throw new Error('模型入口必须是所选目录内的 .model3.json 文件');
+const model3Path = explicitModel ? join(MODEL_DIR, explicitModel) : await findModel3(MODEL_DIR);
 if (!model3Path) {
   console.error('没找到 *.model3.json：', MODEL_DIR);
   process.exit(1);
@@ -112,12 +116,15 @@ const OUT = resolve(arg('out', join(HERE, '..', 'build', id)));
 
 // ---------------------------------------------------------------- 模型资产
 const resolveAsset = (p) => {
-  if (typeof p !== 'string' || isAbsolute(p) || p.split(/[\\/]/).includes('..')) return null;
+  if (typeof p !== 'string' || isAbsolute(p) || /[:\u0000-\u001f]/.test(p) || p.split(/[\\/]/).some(part => part === '..' || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) return null;
   const direct = resolve(modelDir, p);
-  if (relative(modelDir, direct).startsWith('..')) return null;
-  if (existsSync(direct)) return direct;
-  const flat = join(modelDir, basename(p));
-  return existsSync(flat) ? flat : null;
+  const safe = (file) => {
+    try {
+      const real = realpathSync(file), rel = relative(realpathSync(modelDir), real);
+      return rel && rel.split(sep)[0] !== '..' && !isAbsolute(rel) && statSync(real).isFile() ? real : null;
+    } catch { return null; }
+  };
+  return safe(direct) || safe(join(modelDir, basename(p)));
 };
 
 const mocName = files.Moc ?? files.MocFile;
@@ -126,16 +133,19 @@ if (!mocPath) {
   console.error('没找到 moc3（model3.json 的 FileReferences.Moc）：', mocName);
   process.exit(1);
 }
+const mocBytes = await readFile(mocPath);
+if (mocBytes.length < 64 || mocBytes.toString('ascii', 0, 4) !== 'MOC3') throw new Error('模型的 moc3 文件无效或不完整，请重新获取完整素材');
 
 const physicsPath = files.Physics ? resolveAsset(files.Physics) : null;
 const posePath = files.Pose ? resolveAsset(files.Pose) : null;
-const textures = (files.Textures ?? []).map((t) => resolveAsset(t)).filter(Boolean);
+const textureRefs = Array.isArray(files.Textures) ? files.Textures : [];
+const textures = textureRefs.map((t) => resolveAsset(t));
+if (!textures.length || textures.some(p => !p)) throw new Error('模型缺少贴图文件，请导入包含全部配套资源的完整文件夹');
 
 const cdiPath = (() => {
   const declared = files.DisplayInfo ? resolveAsset(files.DisplayInfo) : null;
   if (declared) return declared;
-  const guess = join(modelDir, basename(mocPath).replace(/\.moc3$/i, '.cdi3.json'));
-  return existsSync(guess) ? guess : null;
+  return resolveAsset(basename(mocPath).replace(/\.moc3$/i, '.cdi3.json'));
 })();
 
 const display = cdiPath ? await readJson(cdiPath) : { Parameters: [], ParameterGroups: [] };
@@ -146,7 +156,6 @@ const paramMeta = new Map((display.Parameters ?? []).map((p) => [
   { label: p.Name ?? p.Id, group: groups.get(p.GroupId) ?? '' },
 ]));
 
-// ---------------------------------------------------------------- 清理（水印 / 文字类）
 const CLEAN_KEYS = ['水印', 'watermark', '版权', '须知', '说明', 'readme', '署名', '公告', 'logo'];
 const isCleanKey = (text) => {
   const t = String(text ?? '').toLowerCase();
@@ -159,7 +168,7 @@ if (CLEAN) {
   for (const p of display.Parts ?? []) {
     if (p?.Id && isCleanKey(p.Name)) cleanParts[p.Id] = 0;
   }
-  // 2) 表情 / 热键命中 → 读作者设好的参数值（这就是“关掉水印”的状态）
+  // 2) 表情 / 热键命中 → 读作者设好的参数值
   for (const e of await collectExpressions()) {
     if (!isCleanKey(e.name) && !isCleanKey(basename(e.path))) continue;
     const raw = await readJson(e.path).catch(() => null);
@@ -467,7 +476,7 @@ for (const r of resources) {
  * 混进 GENERATOR_VERSION 会让升级转换器把所有手工校准（role 归类 / 取景 / 绑词）一起作废；
  * 生成器版本由 signatureOf() 单独参与过期判断。 */
 const sha = (buf) => createHash('sha1').update(buf).digest('hex');
-const hashParts = [`model3:${sha(JSON.stringify(model3))}`, `moc3:${sha(await readFile(mocPath))}`];
+const hashParts = [`model3:${sha(JSON.stringify(model3))}`, `moc3:${sha(mocBytes)}`];
 if (physicsPath) hashParts.push(`physics:${sha(JSON.stringify(await readJson(physicsPath)))}`);
 if (vts) hashParts.push(`vts:${sha(JSON.stringify(vts.ParameterSettings ?? []))}`);
 if (cdiPath) hashParts.push(`cdi3:${sha(JSON.stringify(display))}`);
@@ -549,10 +558,10 @@ if (!SIMPLE) await mkdir(join(OUT, 'models', id, 'motions'), { recursive: true }
 await mkdir(join(OUT, 'models', id, 'textures'), { recursive: true });
 
 // 1) moc3 原始文件（供 Coopanion 0.2.14+ 原生 fetch） + base64 模块（旧版本回退）
-await copyFile(mocPath, join(OUT, 'models', id, 'model.moc3'));
+await writeFile(join(OUT, 'models', id, 'model.moc3'), mocBytes);
 await writeFile(
   join(OUT, 'models', id, 'moc3.js'),
-  `// ${basename(mocPath)}（base64：旧版本沙箱不能 fetch 二进制时的回退兜底）\nexport default "${(await readFile(mocPath)).toString('base64')}";\n`,
+  `// ${basename(mocPath)}（base64：旧版本沙箱不能 fetch 二进制时的回退兜底）\nexport default "${mocBytes.toString('base64')}";\n`,
   'utf8',
 );
 
@@ -650,13 +659,14 @@ export default {
 ${overrides.fit ? `  fit: ${JSON.stringify(overrides.fit)},` : "  fit: { mode: 'contain', anchor: 'bottom', padding: [0.04, 0.02], offset: [0, 0], zoom: 1 },"}
   // roam：跟随 Coo 的走动偏好；stand：固定站定（后端强制 roam off）
   motion: ${JSON.stringify(motion)},
+  render: ${JSON.stringify(overrides.render ?? {mode:'original',textureLimit:MAX_TEX,canvasLimit:0,strict:true})},
 ${overrides.extent ? `  extent: ${JSON.stringify(overrides.extent)},` : ''}
 ${overrides.anchors ? `  anchors: ${JSON.stringify(overrides.anchors)},` : ''}
   // 简易模式不播 motion，但 motion 里的 PartOpacity 是“中性姿势”的一部分：
   // 少了它，hiyori 这类模型会同时显示 PartArmA / PartArmB（四只手）。
   parts: { base: ${JSON.stringify(guessBaseParts(motions))} },
 ${Object.keys(cleanParts).length || Object.keys(cleanParams).length
-    ? `  // 清理：水印 / 文字类部件与参数（打包时 --clean 写入，运行时每帧固定）\n  clean: { parts: ${JSON.stringify(cleanParts)}, params: ${JSON.stringify(cleanParams)} },\n`
+    ? `  clean: { parts: ${JSON.stringify(cleanParts)}, params: ${JSON.stringify(cleanParams)} },\n`
     : ''}  roles: {
 ${Object.entries(roles).map(([n, r]) => `    ${n}: ${JSON.stringify(r)},`).join('\n')}
   },
@@ -668,6 +678,7 @@ ${!SIMPLE && Object.keys(nativeMap).length
     : ''}  // 表演层（SoulLink）：情绪词 → 连续参数。不写就用通用默认；
   // 换模型先调这里（强度/过渡），不要改 backends/ 里的渲染代码。
   performance: ${JSON.stringify(performance, null, 2)},
+${overrides.native?.version === 1 ? `  native: ${JSON.stringify(overrides.native)},` : ''}
 };
 `;
 await writeFile(join(OUT, 'models', id, 'profile.js'), profileJs, 'utf8');
@@ -710,7 +721,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js']) {
+for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/wardrobe.js', 'backends/wardrobe-slots.js']) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);
@@ -768,10 +779,11 @@ await writeFile(join(OUT, 'LICENSES.txt'), `本形象包 / This figure pack
 The files in this pack come from three sources, each under its own license.
 
 1. figure.js、backends/
-   Live2D 简易工作台 / Live2D Simple Workbench
+   Live2D 模型一键安装 / Live2D One-Click Install
    GNU Affero General Public License v3.0 or later
+   附加许可仅覆盖本项目作者有权许可的代码，见 LICENSE；不覆盖 sdk/ 或用户素材。
    完整文本：同目录 LICENSE
-   源码：https://github.com/as124da1231/live2d-simple-workbench
+   源码：https://github.com/as124da1231/cortico-world-figure
    Copyright (C) 2026 as124da1231
 
 2. sdk/
@@ -841,6 +853,14 @@ const figureJson = {
   sounds: {},
   can: { walk: motion.kind === 'roam' },
 };
+for (const b of overrides.native?.bindings ?? []) {
+  if (b.word === 'idle' || figureJson.vocab.some(v => v.id === b.word)) continue;
+  const resource = overrides.native.resources?.find(r => r.id === b.resource);
+  if (!resource) continue;
+  const names = {nod:['点头','Nod'],shake:['摇头','Shake'],wave:['招手','Wave'],bow:['鞠躬','Bow'],cheer:['欢呼','Cheer'],dance:['跳舞','Dance'],jump:['跳跃','Jump'],sit:['坐下','Sit'],stretch:['伸展','Stretch'],shiver:['发抖','Shiver']};
+  const labels = names[b.word] ?? [b.word,b.word];
+  figureJson.vocab.push({id:b.word,kind:resource.kind === 'expression' ? 'expression' : 'motion',names:{zh:[labels[0]],en:[labels[1]]},about:{zh:`自动适配的${labels[0]}`,en:`Mapped native ${labels[1]}`},seconds:Math.max(.1,resource.seconds || 1)});
+}
 await writeFile(join(OUT, 'figure.json'), JSON.stringify(figureJson, null, 2) + '\n', 'utf8');
 await writeFile(join(OUT, 'build.json'), JSON.stringify({
   tool: 'cortico-live2d-pack',
@@ -849,6 +869,7 @@ await writeFile(join(OUT, 'build.json'), JSON.stringify({
   at: new Date().toISOString(),
   maxTexture: MAX_TEX,
   ...(textureShrink ? { textureShrink } : {}),
+  model: {id,title,params:params.length,roles:Object.keys(roles).length,expressions:Object.keys(expressions).length,textures:textureFiles.length},
   mappingDiagnostics,
   mappingWarnings,
   resourceRoles: Object.fromEntries(resources.filter((r) => r.custom).map((r) => [r.file, r.cls])),
