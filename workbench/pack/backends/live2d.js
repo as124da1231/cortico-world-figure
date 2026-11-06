@@ -89,11 +89,13 @@ export async function createLive2DBody(base, opts, entry, kit) {
   } catch {
     throw new Error(`模型 ${entry.id} 缺 profile.js（role 表 / 表情配方 / 取景）`);
   }
+  const previewPixels=opts.preview&&[256,512,1024].includes(opts.previewSize)?opts.previewSize:null;
+  const renderPolicy = previewPixels?{mode:'economy',textureLimit:previewPixels,canvasLimit:previewPixels,strict:false}:profile.render ?? {mode:'original',textureLimit:0,canvasLimit:0,strict:true};
 
   // ---------- 画布（放 kit 的 SVG 组里） ----------
   const canvas = doc.createElementNS(XHTML, 'canvas');
-  canvas.width = INITIAL_CANVAS_PX;
-  canvas.height = INITIAL_CANVAS_PX;
+  canvas.width = previewPixels||Math.min(INITIAL_CANVAS_PX,renderPolicy.canvasLimit||INITIAL_CANVAS_PX);
+  canvas.height = canvas.width;
   canvas.style.width = '100%';
   canvas.style.height = '100%';
   canvas.style.pointerEvents = 'none';
@@ -110,7 +112,6 @@ export async function createLive2DBody(base, opts, entry, kit) {
   });
   if (!gl) throw new Error('这个环境无法启用 WebGL');
   const limits = graphicsLimits(gl);
-  const renderPolicy = profile.render ?? {mode:'original',textureLimit:0,canvasLimit:0,strict:true};
 
   // ---------- 模型（官方双轨回退：优先 fetch 原生 moc3，失败回退到 base64 模块） ----------
   const resolveAsset = (rel) => {
@@ -177,7 +178,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
   // Complex models exceed the SDK's single-buffer limit (36 clipping groups).
   // Overflow aliases masks onto one region, corrupting faces/eyes/clothing.
-  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height, {strict:renderPolicy.strict});
+  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height, {strict:renderPolicy.strict,maskSize:previewPixels||Math.min(512,renderPolicy.canvasLimit||512)});
   const { renderer, maskBuffers } = renderConfig;
   const renderNotice = doc.createElement('div');
   renderNotice.setAttribute('role','status'); renderNotice.hidden = true;
@@ -765,6 +766,22 @@ export async function createLive2DBody(base, opts, entry, kit) {
   // profile.extent / profile.anchors 仍然可以覆盖（工作台校准后写死）。
   const DEFAULT_EXTENT = [20, 8, 236, 256];
   let extent = profile.extent ?? null;
+  let wardrobeBaseline=null,wardrobeLayoutDirty=false;
+  const fitCopy=()=>({...fitState,offset:[...(fitState.offset||[0,0])],padding:[...(fitState.padding||[0,0])]});
+  function changeWardrobe(update){const before=wardrobe.layoutKey(),active=wardrobe.grounding();update();if(before!==wardrobe.layoutKey()&&(active||wardrobe.grounding()))wardrobeLayoutDirty=true;}
+  function settleWardrobe(){
+    if(!wardrobeLayoutDirty||!wardrobeBaseline)return;
+    const previousFit=fitCopy();try{
+      fitState={...wardrobeBaseline.fit,offset:[...wardrobeBaseline.fit.offset]};applyFit();
+      let measured=measureNeutralExtent();if(!measured)throw Error('外观轮廓不可见');
+      if(wardrobe.grounding()){
+        fitState.offset=[fitState.offset[0],fitState.offset[1]+(measured[3]-wardrobeBaseline.feet)/128];applyFit();
+        measured=measureNeutralExtent();if(!measured)throw Error('外观贴地失败');
+      }
+      extent=measured;publishInfo();
+    }catch(error){fitState=previousFit;applyFit();console.warn('[l2d] 外观贴地跳过',error);}
+    wardrobeLayoutDirty=false;
+  }
   /** 命中圈按高度带取可见 alpha 的中心；整张 bbox 会被尾巴/胡须带偏。 */
   let hitBands = null;
 
@@ -984,6 +1001,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
     draw(petG, face, frame) {
       if (fo.parentNode !== petG) petG.appendChild(fo);
       if (!texturesReady || renderFailure) return;
+      if(extent&&!wardrobeBaseline)wardrobeBaseline={fit:fitCopy(),feet:extent[3]};
+      settleWardrobe();
 
       if (opts.preview && previewState) frame = {...frame,face:previewState.word,gesture:null,talk:0,look:[0,0]};
       const dt = clamp(frame.dt ?? 0.016, 0.001, 0.05);
@@ -1021,13 +1040,16 @@ export async function createLive2DBody(base, opts, entry, kit) {
       // 贴图就绪后的第 3 帧量一次可见范围（等姿势稳定，别量到眨眼/动作的瞬间）
       if (!extent && extentFrames < 30 && ++extentFrames >= 3) {
         let m = null;
+        const selected=wardrobe.state(),grounded=wardrobe.grounding();
         try {
+          if(grounded)wardrobe.select({});
           m = fitState.autoFit !== false ? autoFitExtent() : measureNeutralExtent();
         } catch (e) {
           console.warn('[l2d] 量取景失败', e);
-        }
+        }finally{if(grounded)wardrobe.select(selected);}
         if (m) {
           extent = m;
+          wardrobeBaseline={fit:fitCopy(),feet:m[3]};if(grounded)wardrobeLayoutDirty=true;
           publishInfo();
           console.info('[l2d] extent', JSON.stringify(m));
           console.info('[l2d] fit', JSON.stringify(fitState));
@@ -1042,6 +1064,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       fo.remove();
       try { performance?.dispose(); } catch { /* 忽略 */ }
       try { model.release?.(); } catch { /* 忽略 */ }
+      if(opts.preview)try{gl.getExtension('WEBGL_lose_context')?.loseContext();}catch{}
     },
   };
 
@@ -1067,16 +1090,17 @@ export async function createLive2DBody(base, opts, entry, kit) {
   };
   globalThis.__l2dCover = figure.__cover;
   globalThis.__l2dRenderQuality = qualityInfo;
+  if(opts.preview)globalThis.__l2dPreviewReady=()=>texturesReady&&!!extent&&!renderFailure;
   globalThis.__l2dExpr = figure.__expr;
 
   const body = kit.createBody(host, { figure, words, css: 'foreignObject{pointer-events:none}' });
-  body.setScheme=async id=>{wardrobe.scheme(id);};
+  body.setScheme=async id=>{changeWardrobe(()=>wardrobe.scheme(id));if(texturesReady)settleWardrobe();};
   globalThis.__l2dWardrobe=()=>wardrobe.state();
   if(opts.preview)globalThis.__l2dWardrobeValues=()=>wardrobe.inspect();
   if (native) {
     const doBase = body.do.bind(body);
     body.do = (word) => { const accepted = doBase(word); if (accepted !== false) native.trigger(word); return accepted; };
-    globalThis.__l2dNativeSample = (id, time, word, generic = false) => {
+    globalThis.__l2dNativeSample = (id, time, word, generic = false, size = 384) => {
       if (!texturesReady) return null;
       model._model.loadParameters();
       for (let i = 0; i < model._model.getParameterCount(); i++) model._model.setParameterValueByIndex(i, model._model.getParameterDefaultValue(i));
@@ -1090,18 +1114,20 @@ export async function createLive2DBody(base, opts, entry, kit) {
         if (id !== '__neutral__' && !generic) native.sample(id, time);
         const values = id !== '__neutral__' && !generic ? native.update({},0) : [];
         applyNativeValues(values.filter(v => !nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
+        wardrobe.apply();
         model._model.saveParameters();
         // Static comparisons use equilibrium, avoiding residual motion from a prior sample.
         try { model._physics?.stabilization(model._model); } catch { /* optional */ }
         applyNativeValues(values.filter(v => nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
-        model._model.update();render();return canvasPng(384);
+        wardrobe.apply();
+        model._model.update();render();return canvasPng(size);
       }
       finally { native.clearSample(); performance?.dispose(); performance = previousPerformance; }
     };
   }
   if (opts.preview) globalThis.__l2dPreview = {
     wardrobe(groups,picks){
-      wardrobe.configure(wardrobeConfig({resources:(profile.native?.resources||[]).map(r=>({...r,raw:r.data}))},groups||[]));wardrobe.select(picks||{});
+      changeWardrobe(()=>{wardrobe.configure(wardrobeConfig({resources:(profile.native?.resources||[]).map(r=>({...r,raw:r.data}))},groups||[]));wardrobe.select(picks||{});});
     },
     play(resource,word,bindings=[],raw=false) {
       performance?.dispose(); performance=performanceFactory?.(profile,console.warn) || null;
@@ -1112,6 +1138,11 @@ export async function createLive2DBody(base, opts, entry, kit) {
       body.do?.(word || 'neutral');
     },
     stop(){previewState=null;native=createNativeActions({...profile.native,bindings:[]});body.do?.('neutral');},
+  };
+  if(opts.preview)globalThis.__l2dStaticSample=sample=>{
+    changeWardrobe(()=>wardrobe.select(sample.picks||{}));settleWardrobe();
+    const png=globalThis.__l2dNativeSample(sample.resource||'__neutral__',sample.time,sample.word,false,previewPixels||512);
+    return {png,fit:fitCopy(),picks:wardrobe.state(),values:wardrobe.inspect()};
   };
   const motionKind = profile.motion?.kind === 'stand' ? 'stand' : 'roam';
   if (SIMPLE && motionKind === 'stand') {

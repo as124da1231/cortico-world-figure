@@ -8,6 +8,10 @@ import { motions } from './motion.mjs';
 import { AvatarPerformance } from './performance.js';
 import { LocalSpeech } from './speech.js';
 import { motionLibraries, previewsFor } from './motion-libraries.mjs';
+import {
+  BINDING_WORDS, BINDING_SOURCES, bindingStats, exportBindings,
+  loadBindings, resetBindings, saveBindings, sourceById,
+} from './bindings.mjs';
 
 const $ = id => document.getElementById(id);
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -152,7 +156,7 @@ function setLoading(value, label = '正在载入模型…') {
 
 function syncControls() {
   const unavailable = !state.ready || state.loading;
-  for (const el of document.querySelectorAll('.motion-button,.expression-button,[data-engagement],#motion-library,#library-open,#compare-walk,#scenario,#say,#open-audio,#interrupt,#pause,#reset,#capture,#neutral,#amplitude,#weight,#full,#face,#home,#blink,#gaze,#talk,#loop,#life')) {
+  for (const el of document.querySelectorAll('.motion-button,.expression-button,.bound-motion,[data-engagement],#motion-library,#library-open,#compare-walk,#scenario,#say,#open-audio,#interrupt,#pause,#reset,#capture,#neutral,#amplitude,#weight,#full,#face,#home,#blink,#gaze,#talk,#loop,#life')) {
     el.disabled = unavailable || (el.dataset.unsupported === 'true');
   }
   $('pause').textContent = state.paused ? '▶' : 'Ⅱ';
@@ -168,6 +172,11 @@ function syncControls() {
     const active = el.dataset.expression === state.expression;
     el.classList.toggle('active', active); el.setAttribute('aria-pressed', String(active));
   }
+  for (const el of document.querySelectorAll('.bound-motion')) {
+    const active = el.dataset.word === state.action;
+    el.classList.toggle('active', active); el.setAttribute('aria-pressed', String(active));
+  }
+  updateBindingSummary();
 }
 
 function initScene() {
@@ -328,7 +337,7 @@ async function loadBuffer(buffer, fileName, generation) {
     gazeTarget.position.set(0, size.y * .9, size.y * 2);
     $('empty').hidden = true; $('status').textContent = '正在预览'; $('status').classList.add('ready');
     $('format').hidden = false; $('format').textContent = `VRM ${vrm.meta?.metaVersion === '0' ? '0.x' : '1.0'}`;
-    renderExpressions(); renderInfo(); updateCapabilities(); frameModel('full'); syncControls();
+    renderExpressions(); renderInfo(); updateCapabilities(); frameModel('full'); renderBoundMotions(); syncControls();
     error(state.assetWarning);
   } catch (err) { if (state.vrm !== vrm) release(vrm); throw err; }
 }
@@ -452,6 +461,149 @@ function resetAll() {
   syncControls();
 }
 
+// ---------- 动作绑定工作台 ----------
+let bindings = loadBindings();
+
+function bindingAssetPool(source) {
+  if (!source) return null;
+  if (source.id.startsWith('m/')) return state.libraries.get('mixamo') || null;
+  if (source.id.startsWith('o/')) return state.libraries.get('overte') || null;
+  return state.libraries.get('quaternius') || state.libraries.get(state.library) || null;
+}
+
+function updateBindingSummary() {
+  const stats = bindingStats(bindings);
+  $('binding-count').textContent = `${stats.bound} / ${stats.total}`;
+  $('binding-model').textContent = state.file ? state.file.replace(/\.vrm$/i, '') : '未载入模型';
+}
+
+function renderBoundMotions() {
+  const host = $('bound-motions');
+  if (!host) return;
+  const bound = BINDING_WORDS.filter((word) => sourceById(bindings[word.id]));
+  $('bound-count').textContent = String(bound.length);
+  host.replaceChildren();
+  if (!state.ready) {
+    const note = document.createElement('p');
+    note.className = 'no-content'; note.textContent = '载入后显示已绑定的动作';
+    host.appendChild(note);
+    return;
+  }
+  if (!bound.length) {
+    const note = document.createElement('p');
+    note.className = 'no-content'; note.textContent = '还没有绑定动作，点下面的「编辑绑定」。';
+    host.appendChild(note);
+    return;
+  }
+  for (const word of bound) {
+    const source = sourceById(bindings[word.id]);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'expression-button bound-motion';
+    button.dataset.word = word.id;
+    button.title = source.label;
+    const strong = document.createElement('strong'); strong.textContent = word.zh;
+    const small = document.createElement('small');
+    small.textContent = source.label.replace(/^[^·]+·\s*/, '');
+    button.append(strong, small);
+    button.onclick = () => previewBinding(word);
+    host.appendChild(button);
+  }
+}
+
+function openBindings() {
+  if (!state.ready) { error('先载入一个 VRM，再绑定动作。'); return; }
+  renderBindings(); $('binding-dialog').showModal();
+}
+
+function renderBindings() {
+  const list = $('binding-list');
+  list.replaceChildren();
+  for (const word of BINDING_WORDS) {
+    const row = document.createElement('div');
+    row.className = 'binding-row' + (bindings[word.id] ? '' : ' unbound');
+
+    const label = document.createElement('div');
+    label.className = 'binding-word';
+    const name = document.createElement('strong'); name.textContent = word.zh;
+    const note = document.createElement('small'); note.textContent = `${word.id} · ${word.note}`;
+    label.append(name, note);
+
+    const select = document.createElement('select');
+    select.className = 'binding-select';
+    select.setAttribute('aria-label', `${word.zh} 的动作`);
+    const empty = document.createElement('option');
+    empty.value = ''; empty.textContent = word.empty ? '（暂无可绑素材）' : '（留空 · 走通用兜底）';
+    select.appendChild(empty);
+    for (const source of BINDING_SOURCES) {
+      const option = document.createElement('option');
+      option.value = source.id; option.textContent = source.label;
+      select.appendChild(option);
+    }
+    select.value = bindings[word.id] || '';
+
+    const play = document.createElement('button');
+    play.type = 'button'; play.className = 'binding-play'; play.textContent = '▶';
+    play.title = '在舞台上试播这段动作';
+    play.setAttribute('aria-label', `试播 ${word.zh}`);
+    play.disabled = !select.value || !state.ready;
+
+    select.onchange = () => {
+      bindings[word.id] = select.value;
+      row.classList.toggle('unbound', !select.value);
+      play.disabled = !select.value || !state.ready;
+      saveBindings(bindings);
+      updateBindingSummary();
+    };
+    play.onclick = () => previewBinding(word);
+
+    row.append(label, select, play);
+    list.appendChild(row);
+  }
+  updateBindingSummary();
+  renderBoundMotions();
+}
+
+function previewBinding(word) {
+  if (!state.ready || !state.performance) return;
+  cancelSequence({ stopMovement: true });
+  state.performance.engage('idle');
+  state.paused = false;
+  void speech.pause(false).catch(() => {});
+
+  // 移动类词交给行走控制器：真实位移 + 足部约束，而不是原地播片段。
+  if (word.id === 'walk' || word.id === 'run' || word.id === 'turn') {
+    state.wide = true; frameModel('full');
+    const pace = word.id === 'run' ? 1.25 : word.id === 'turn' ? .7 : 1;
+    if (!state.performance.walk(undefined, { pace })) { error('行走素材没有载入，无法走动。'); return; }
+    state.action = word.id;
+    syncControls();
+    return;
+  }
+
+  const source = sourceById(bindings[word.id]);
+  if (!source) return;
+  const pool = bindingAssetPool(source);
+  const loop = word.loop === true || source.loop === true;
+  if (source.kind === 'gesture') state.performance.playGesture(source.key, { loop });
+  else if (word.id === 'sit') {
+    // 坐下是两段式：先播进入，再自动接坐姿循环。
+    if (!state.performance.playAsset(source.key, { pool, chain: 'preview-sit-idle' })) { error(`这段素材没有载入：${source.label}`); return; }
+  } else if (!state.performance.playAsset(source.key, { loop, pool })) { error(`这段素材没有载入：${source.label}`); return; }
+  state.action = word.id;
+  syncControls();
+}
+
+function downloadBindings() {
+  const data = exportBindings(bindings, state.file);
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.download = `${(state.file || 'vrm').replace(/\.vrm$/i, '')}-bindings.json`;
+  a.href = URL.createObjectURL(blob);
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 function bindUI() {
   for (const library of motionLibraries) {
     const option = document.createElement('option'); option.value = library.id; option.textContent = library.name; $('motion-library').append(option);
@@ -460,6 +612,16 @@ function bindUI() {
   $('library-open').onclick = () => { renderLibraryDialog(); $('library-dialog').showModal(); };
   $('close-library').onclick = () => $('library-dialog').close();
   $('compare-walk').onclick = () => { void compareWalks(); };
+  $('bind-open').onclick = openBindings;
+  $('edit-bindings').onclick = openBindings;
+  $('close-binding').onclick = () => $('binding-dialog').close();
+  $('binding-save').onclick = () => {
+    saveBindings(bindings);
+    $('binding-save').textContent = '已保存';
+    setTimeout(() => { $('binding-save').textContent = '保存到本机'; }, 1200);
+  };
+  $('binding-export').onclick = downloadBindings;
+  $('binding-reset').onclick = () => { bindings = resetBindings(); renderBindings(); };
   $('life').checked = state.life;
   for (const motion of motions) {
     const button = document.createElement('button'); button.className = 'motion-button'; button.dataset.motion = motion.id;
@@ -468,8 +630,9 @@ function bindUI() {
     name.textContent = motion.name; note.textContent = motion.note; copy.append(name, note); button.append(icon, copy);
     button.onclick = () => {
       cancelSequence({ stopMovement: false }); state.performance.engage('idle');
-      if (motion.id === 'walk') { state.wide = true; frameModel('full'); }
-      state.performance.playGesture(motion.id, { loop: state.loop }); state.action = motion.id; state.paused = false; void speech.pause(false); syncControls();
+      if (motion.id === 'walk') { state.wide = true; frameModel('full'); state.performance.walk(undefined, { pace: 1 }); }
+      else state.performance.playGesture(motion.id, { loop: state.loop });
+      state.action = motion.id; state.paused = false; void speech.pause(false); syncControls();
     };
     $('motions').append(button);
   }

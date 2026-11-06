@@ -1,7 +1,8 @@
 import {randomUUID} from 'node:crypto';
 import {cp,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
-import {join,relative,resolve,sep} from 'node:path';
-import {PreviewServer} from './preview.ts';
+import {join} from 'node:path';
+import {manualPreviewPlan,previewSize} from './manual-preview.ts';
+import {StaticPreviewRenderer,type PreviewWorker} from './preview-renderer.ts';
 import {assertRegularTree} from './pipeline.ts';
 import {packFingerprint} from './pack-fingerprint.ts';
 import {nativeConfig,validateBindings,FACE_WORDS,MOTION_WORDS} from '../workbench/tools/native-catalog.mjs';
@@ -40,7 +41,7 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
       const resource=catalog.resources.find((r:any)=>r.id===b.resource);
       manifest.vocab.push({id:b.word,kind:resource.kind==='expression'?'expression':'motion',names:{zh:[b.word],en:[b.word]},seconds:resource.seconds});
     }
-    manifest.axes=[...axes,...runtimeGroups.map(g=>({id:g.id,name:{zh:g.name,en:g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]}))];
+    manifest.axes=[...axes,...runtimeGroups.map(g=>({id:g.id,name:{zh:g.name,en:g.en||g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]}))];
     manifest.presets=(manifest.presets||[]).map((p:any)=>({...p,pick:Object.fromEntries(manifest.axes.map((a:any)=>[a.id,a.options.some((o:any)=>o.id===p.pick?.[a.id])?p.pick[a.id]:a.options[0].id]))}));
     // Empty groups are editor drafts only; runtime offsets follow the actual emitted axes.
     await writeFile(manifestFile,JSON.stringify(manifest,null,2)+'\n');
@@ -50,15 +51,15 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
 
 export class ManualSessions {
   sessions=new Map<string,any>();
-  private preview=new PreviewServer(token=>{try{return this.get(token);}catch{return null;}});
   private root:string;
   private workbench:string;
   private reaper:ReturnType<typeof setInterval>|null=null;
   private receipts=new Map<string,{at:number;result:any}>();
   private openingTokens=new Map<string,{cancelled:boolean}>();
   private cancelled=new Set<string>();
-  constructor(root:string,workbench:string){this.root=root;this.workbench=workbench;}
-  async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string,requestedToken?:string,groups:any[]=[]){
+  private createRenderer:(pack:string,workbench:string)=>PreviewWorker;
+  constructor(root:string,workbench:string,createRenderer=(pack:string,bench:string):PreviewWorker=>new StaticPreviewRenderer(pack,bench)){this.root=root;this.workbench=workbench;this.createRenderer=createRenderer;}
+  async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string,requestedToken?:string,groups:any[]=[],resolution:unknown=512){
     const fixed=fixedWardrobeGroups(groups),wardrobeNeedsSave=groups.some(g=>g.options.length)&&JSON.stringify(fixed)!==JSON.stringify(groups);groups=fixed;
     await this.prune();
     if(this.sessions.size>=3)throw Error('请先关闭已有动作编辑窗口');
@@ -74,46 +75,55 @@ export class ManualSessions {
       for(const file of ['live2d.js','native-actions.js','wardrobe.js','wardrobe-slots.js','render-config.js','render-quality.js','role-values.js','soullink.js'])
         await cp(join(this.workbench,'pack','backends',file),join(copy,'backends',file));
       await writeNativePack(copy,catalog,bindings,true,groups);
-      await cp(join(this.workbench,'vendor','coo-kit','kit'),join(dir,'web','kit'),{recursive:true});
-      for(const name of ['figure-frame.js','i18n.js'])await cp(join(this.workbench,'vendor','coo-preview',name),join(dir,'web',name));
       // Preview settings are isolated from the source pack and final installation.
       for(const model of await readdir(join(copy,'models'),{withFileTypes:true}))if(model.isDirectory()){
         const file=join(copy,'models',model.name,'profile.js');let text=await readFile(file,'utf8');
         text=text.replace(/^  render: .*\r?\n/gm,'').replace(/\r?\n};\s*$/, '\n  render: {mode:"economy",textureLimit:512,canvasLimit:512,strict:false},\n};\n');await writeFile(file,text);
       }
-      const files:Array<{path:string;size:number}>=[];let bytes=0;
+      let files=0,bytes=0;
       const walk=async(base:string)=>{for(const e of await readdir(base,{withFileTypes:true})){
         const path=join(base,e.name);if(e.isDirectory())await walk(path);
-        else {const size=(await stat(path)).size;bytes+=size;files.push({path:relative(dir,path).split(sep).join('/'),size});}
+        else {bytes+=(await stat(path)).size;files++;}
       }};await walk(dir);
-      if(bytes>512*1048576||files.length>1000)throw Error('预览资源过大');
-      const value={token,dir,pack,catalog,bindings,source,buildId,hash:await packFingerprint(pack),at:Date.now(),files};
+      if(bytes>512*1048576||files>1000)throw Error('预览资源过大');
+      const value={token,dir,copy,pack,catalog,bindings,source,buildId,hash:await packFingerprint(pack),at:Date.now(),generation:0,cache:new Map(),cacheBytes:0};
       if(pending.cancelled)throw Error('这次编辑已取消');
       this.sessions.set(token,value);
       if(!this.reaper){this.reaper=setInterval(()=>void this.prune().catch(()=>{}),60000);this.reaper.unref();}
-      const origin=await this.preview.start();const base=`${origin}/figure-preview/${token}/`;
       if(pending.cancelled||!this.sessions.has(token))throw Error('这次编辑已取消');
-      return {token,buildId,wardrobe:groups,wardrobeNeedsSave,preview:{url:base+'frame.html',base:base+'pack/',entry:base+'pack/figure.js'},title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,files,
+      return {token,buildId,previewSize:previewSize(resolution),wardrobe:groups,wardrobeNeedsSave,title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,
         words:{expressions:FACE_WORDS,motions:MOTION_WORDS},
         resources:catalog.resources.map((r:any)=>{const channels=wardrobeChannels(r);let wardrobeError='';try{wardrobeTracks(r);}catch(e){wardrobeError=String((e as Error).message);}const {id,title,kind,classification,seconds,release}=r;return {id,title,kind,classification,seconds,release,channels,wardrobeError};}),warnings:catalog.warnings||[],truncated:catalog.truncated};
-    }catch(e){this.sessions.delete(token);if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;await this.preview.stop();}await rm(dir,{recursive:true,force:true});throw e;}
+    }catch(e){this.sessions.delete(token);if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;}await rm(dir,{recursive:true,force:true});throw e;}
     finally{this.openingTokens.delete(token);}
   }
   get(token:string){const s=this.sessions.get(token);if(!s||!s.saving&&Date.now()-s.at>2*3600000){if(s)void this.close(token).catch(()=>{});throw Error('编辑已过期，请重新打开');}s.at=Date.now();return s;}
   async prune(){for(const [token,s]of this.sessions)if(!s.saving&&Date.now()-s.at>2*3600000)await this.close(token).catch(()=>{});}
   saved(token:string){for(const [key,value]of this.receipts)if(Date.now()-value.at>2*3600000)this.receipts.delete(key);return this.receipts.get(token)?.result;}
   complete(token:string,result:any){this.receipts.set(token,{at:Date.now(),result});while(this.receipts.size>64)this.receipts.delete(this.receipts.keys().next().value!);}
-  async asset(token:string,path:string,offset:number){
-    const s=this.get(token),file=s.files.find((f:any)=>f.path===path);
-    if(!file||!Number.isInteger(offset)||offset<0||offset>file.size)throw Error('预览资源无效');
-    const target=resolve(s.dir,path);if(!target.startsWith(resolve(s.dir)+sep))throw Error('预览路径无效');
-    const bytes=await readFile(target);return {b64:bytes.subarray(offset,offset+1048576).toString('base64')};
+  async preview(token:string,input:unknown){
+    const s=this.get(token);if(s.saving)throw Error('正在保存，请稍后预览');
+    const plan=manualPreviewPlan(s.catalog,input),key=JSON.stringify(plan),generation=++s.generation;
+    s.renderAbort?.abort();await s.renderTask?.catch(()=>{});
+    if(!this.sessions.has(token)||generation!==s.generation)throw Error('预览已取消');
+    if(s.cache.has(key))return s.cache.get(key);
+    const abort=new AbortController();s.renderAbort=abort;
+    if(!s.renderer||s.renderer.closed)s.renderer=this.createRenderer(s.copy,this.workbench);
+    const task=s.renderer.render(plan,abort.signal);s.renderTask=task;
+    try{
+      const result=await task;
+      if(!this.sessions.has(token)||generation!==s.generation||abort.signal.aborted)throw Error('预览已取消');
+      const value={frames:result.frames,quality:result.quality};s.cache.set(key,value);
+      const bytes=(v:any)=>v.frames.reduce((n:number,f:any)=>n+f.png.length,0);s.cacheBytes+=bytes(value);
+      while(s.cache.size>24||s.cacheBytes>32*1048576){const oldest=s.cache.keys().next().value;s.cacheBytes-=bytes(s.cache.get(oldest));s.cache.delete(oldest);}
+      return value;
+    }finally{if(s.renderTask===task){s.renderTask=null;s.renderAbort=null;}}
   }
   async validate(token:string,bindings:any[]){
     const s=this.get(token);await assertRegularTree(s.pack);
     if(await packFingerprint(s.pack)!==s.hash)throw Error('形象包已变化，请重新打开编辑');
     return {session:s,bindings:validateBindings(s.catalog,bindings)};
   }
-  async close(token:string){const pending=this.openingTokens.get(token);if(pending)pending.cancelled=true;const s=this.sessions.get(token);if(s){if(s.saving){s.closeRequested=true;return;}this.sessions.delete(token);try{await rm(s.dir,{recursive:true,force:true});if(s.ownedRoot)await rm(s.ownedRoot,{recursive:true,force:true});}finally{if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;await this.preview.stop();}}}else if(/^[a-f0-9-]{36}$/i.test(token)){this.cancelled.add(token);while(this.cancelled.size>128)this.cancelled.delete(this.cancelled.values().next().value!);}}
-  async stop(){try{await Promise.allSettled([...this.sessions.keys()].map(key=>this.close(key)));}finally{if(this.reaper)clearInterval(this.reaper);this.reaper=null;await this.preview.stop();}}
+  async close(token:string){const pending=this.openingTokens.get(token);if(pending)pending.cancelled=true;const s=this.sessions.get(token);if(s){if(s.saving){s.closeRequested=true;return;}this.sessions.delete(token);s.generation++;s.renderAbort?.abort();try{await s.renderTask?.catch(()=>{});await s.renderer?.close();s.cache.clear();await rm(s.dir,{recursive:true,force:true});if(s.ownedRoot)await rm(s.ownedRoot,{recursive:true,force:true});}finally{if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;}}}else if(/^[a-f0-9-]{36}$/i.test(token)){this.cancelled.add(token);while(this.cancelled.size>128)this.cancelled.delete(this.cancelled.values().next().value!);}}
+  async stop(){try{await Promise.allSettled([...this.sessions.keys()].map(key=>this.close(key)));}finally{if(this.reaper)clearInterval(this.reaper);this.reaper=null;}}
 }

@@ -10,8 +10,27 @@ const NOTICE_TEXT = {
   en: 'Generated figure packs contain Live2D Cubism Core. Use these packs locally; do not upload, share or redistribute them. Models, textures and third-party components remain subject to their respective licenses.',
 };
 
-// Both the primary configuration page and its quick popup use this form.
-function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDisposed = () => ctx.signal?.aborted } = {}) {
+// Theme only extension-owned roots. Restore inherited host values on unmount.
+function applyAppearance(root, cfg) {
+  const preferences=normalizeAppearance(cfg),classic=preferences.uiStyle==='classic';
+  const appearance=classic?{...preferences,gearTheme:'purple',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'off',uiButtonFill:'solid'}:preferences;
+  const theme=GEAR_THEMES.find(t=>t.id===appearance.gearTheme);
+  root.classList.add('l2d-themed');
+  for(const [key,value] of Object.entries(appearance)) root.dataset[key]=value;
+  root.style.setProperty('--appearance-accent',theme.color);
+  root.style.setProperty('--gear-max-color',classic?theme.color:'var(--appearance-effective, '+theme.color+')');
+  root.style.setProperty('--gear-max-fill',theme.fill);
+  root.style.setProperty('--gear-spark-glow',theme.glow);
+}
+function ownAppearance(root) {
+  const keys=Object.keys(normalizeAppearance()),props=['--appearance-accent','--gear-max-color','--gear-max-fill','--gear-spark-glow'];
+  const data=keys.map(k=>root.dataset[k]),styles=props.map(k=>[root.style.getPropertyValue(k),root.style.getPropertyPriority(k)]),hadClass=root.classList.contains('l2d-themed');
+  let restored=false;
+  return ()=>{if(restored)return;restored=true;keys.forEach((k,i)=>{if(data[i]===undefined)delete root.dataset[k];else root.dataset[k]=data[i];});props.forEach((k,i)=>{if(styles[i][0])root.style.setProperty(k,...styles[i]);else root.style.removeProperty(k);});if(!hadClass)root.classList.remove('l2d-themed');};
+}
+
+// Primary configuration and the quick popup share saving and dependency handling.
+function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNotice, onSaved, onAppearance, isDisposed = () => ctx.signal?.aborted } = {}) {
   const doc = ctx.root.ownerDocument;
   const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
   const t = (a, b) => zh ? a : b;
@@ -26,6 +45,23 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
   const dirty = {};
   const controls = [];
   const fields = new Map();
+  const appearance=normalizeAppearance(cfg);
+  const paintAppearance=()=>{
+    applyAppearance(body,appearance);onAppearance?.(appearance);
+    if(appearanceOnly)for(const input of controls){if(input.type==='radio'&&input.name!=='l2d-uiStyle'){input.disabled=appearance.uiStyle==='classic';input.closest('.l2d-setting-row').classList.toggle('inactive',input.disabled);}}
+  };
+  paintAppearance();
+  function appearanceField(key,title,hint,choices){
+    const row=el('div','l2d-setting-row l2d-appearance-row'),label=el('span','l2d-setting-label');label.append(el('span',null,title),el('small',null,hint));
+    const group=el('div',key==='gearTheme'?'l2d-theme-options':'l2d-particle-options');group.style.setProperty('--appearance-options',String(choices.length));group.setAttribute('role','radiogroup');group.setAttribute('aria-label',title);
+    for(const choice of choices){
+      const option=el('label','l2d-appearance-option'),input=el('input','l2d-appearance-radio');input.type='radio';input.name='l2d-'+key;input.value=choice.id;input.checked=appearance[key]===choice.id;input.setAttribute('aria-label',zh?choice.name:choice.en);
+      const icon=el('span',key==='gearTheme'?'l2d-theme-swatch':'l2d-particle-icon',key==='gearTheme'?null:choice.icon);icon.setAttribute('aria-hidden','true');if(choice.fill){icon.style.background=choice.fill;option.style.setProperty('--choice-color',choice.color);}
+      option.append(input,icon,el('span',null,zh?choice.name:choice.en));group.append(option);controls.push(input);
+      input.addEventListener('change',()=>{if(input.disabled||!input.checked)return;appearance[key]=choice.id;paintAppearance();dirty['worlds.figure.'+key]=choice.id;});
+    }
+    row.append(label,group);body.append(row);
+  }
   function field(key, title, hint, type, choices) {
     const row = el('label', 'l2d-setting-row');
     const label = el('span', 'l2d-setting-label');
@@ -50,7 +86,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
       input = el('input', 'l2d-gear-input');
       input.type = 'range'; input.min = '0'; input.max = String(choices.length - 1); input.step = '1';
       const initial = choices.findIndex(([v]) => v === cfg[key]);
-      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : key === 'adaptationMode' ? 'none' : 'auto')) : initial);
+      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'previewSize' ? '512' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : key === 'adaptationMode' ? 'none' : 'auto')) : initial);
       readValue = () => choices[Number(input.value)][0];
       paint = () => {
         const index = Number(input.value), title = choices[index][1];
@@ -72,6 +108,27 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
     fields.set(key,{input,paint,readValue,choices});
     controls.push(input); row.append(label, control || input); body.append(row); return input;
   }
+  let depend=()=>{};
+  if(appearanceOnly){
+    const preview=el('section','l2d-appearance-preview');preview.setAttribute('aria-label',t('外观实时预览','Live appearance preview'));
+    const intro=el('div','l2d-preview-intro');intro.append(el('strong',null,t('即刻看见你的风格','Your style, live')),el('small',null,t('滚动时保持悬浮，修改后自动保存','Stays visible while scrolling. Changes save automatically.')));
+    const bar=el('div','l2d-gear is-max l2d-preview-bar');bar.setAttribute('role','img');bar.setAttribute('aria-label',t('满档光效预览','Maximum effect preview'));
+    const track=el('span','l2d-gear-track'),fill=el('span','l2d-gear-fill'),sparks=el('span','l2d-gear-sparks');sparks.setAttribute('aria-hidden','true');
+    for(let i=0;i<10;i++){const spark=el('i');spark.style.cssText=`--spark-x:${8+i*8.4}%;--spark-y:${6+i*7%18}px;--spark-delay:${-i*.37}s;--spark-duration:${1.8+i%3*.4}s`;sparks.append(spark);}fill.append(sparks);track.append(fill,el('span','l2d-preview-thumb'));bar.append(track);
+    const samples=el('div','l2d-preview-samples'),sample=el('div','l2d-card l2d-preview-card');sample.append(el('strong',null,t('模型卡片','Model card')),el('small',null,t('材质与层次预览','Material and depth')));
+    const button=el('button','l2d-btn primary',t('主要按钮','Primary button'));button.type='button';button.disabled=true;
+    const input=el('input','l2d-input');input.value=t('输入框预览','Input preview');input.readOnly=true;input.setAttribute('aria-label',input.value);
+    samples.append(sample,input,button);preview.append(intro,bar,samples);body.append(preview);
+    appearanceField('uiStyle',t('外观方案','Appearance preset'),t('默认恢复改红色之前的完整样式；保留自定义选择','Default restores the original blue and purple style; custom choices are kept'),UI_STYLES);
+    appearanceField('gearTheme',t('主题配色','Theme colour'),t('按钮、选中状态与满档光效统一换色','Colours buttons, selections and maximum effects'),GEAR_THEMES);
+    appearanceField('uiButtonFill',t('按钮填色','Button fill'),t('主要按钮使用纯色或渐变','Solid or gradient fill for primary buttons'),UI_BUTTON_FILLS);
+    appearanceField('uiMaterial',t('界面材质','Material'),t('应用于卡片、面板和弹窗','Applies to cards, panels and dialogs'),UI_MATERIALS);
+    appearanceField('uiMode',t('明暗风格','Brightness'),t('只改变本扩展的界面','Applies only to this extension'),UI_MODES);
+    appearanceField('uiCorners',t('边角风格','Corners'),t('保持控件大小与布局','Keeps control sizes and layout'),UI_CORNERS);
+    appearanceField('uiGlow',t('光效强度','Glow'),t('调整按钮与面板的光晕','Adjusts button and panel glow'),UI_GLOWS);
+    appearanceField('particleEffect',t('粒子效果','Particle effect'),t('六种动态效果；悬浮预览随调整更新','Six effects; the floating preview updates as you adjust'),GEAR_PARTICLES);
+    paintAppearance();
+  } else {
   field('cover', t('生成封面', 'Generate cover'), t('同时自动调整模型取景', 'Also fits the model framing'), 'checkbox');
   const quality = field('quality',t('画质','Quality'),t('画布随显示大小调整；原图不设软件精度上限。已有形象需重新打包安装。','Canvas follows display size; Original has no software cap. Repack existing figures to apply.'),'gear',[['economy',t('流畅','Smooth')],['balanced',t('标准','Standard')],['high',t('高清','HD')],['original',t('原图','Original')]]);
   const texture = field('texture', t('贴图精度', 'Texture resolution'), t('原图档可调整；较小的贴图占用更少显存', 'Adjustable in Original mode; smaller textures use less VRAM'), 'gear', ['512','1024','2048','4096','original'].map(value=>[value,value==='original'?t('原精度','Original'):value+' px']));
@@ -93,6 +150,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
     texture.addEventListener(event,()=>{if(quality.value==='3'){customTexture=fields.get('texture').readValue();syncQuality();}});
   }
   syncQuality();
+  field('previewSize',t('预览精度','Preview resolution'),t('仅影响动作与装扮对照图；默认 512','Only affects action and wardrobe comparison images; default 512'),'gear',['256','512','1024'].map(v=>[v,v+' px']));
   field('clean', t('清理', 'Clean'), '', 'checkbox');
   field('autoDelete', t('安装后删除打包产物', 'Delete pack after installation'), t('仅在安装成功后执行，保留原始素材', 'Only after a successful install; source files are kept'), 'checkbox');
   const folder = field('figuresDir', t('安装目录', 'Install folder'), t('通常无需修改', 'Usually no change needed'), 'text');
@@ -118,7 +176,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
   const automatic = field('assistAuto',t('自动安装','Automatic installation'),t('满足安装条件后自动执行；需要确认时暂停','Install when requirements are met; pause for confirmation when needed'),'checkbox');
   const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
   roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
-  const depend = () => {
+  depend = () => {
     syncQuality();
     for (const input of [gear,automatic,roots,depth]) {
       input.disabled = mode.value !== '2' || input === depth && gear.value !== '2';
@@ -126,6 +184,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
     }
   };
   mode.addEventListener('change',depend); mode.addEventListener('input',depend); gear.addEventListener('change',depend); gear.addEventListener('input',depend); depend();
+  }
   const actions = el('div', 'l2d-dialog-actions');
   if (onNotice) {
     const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
@@ -174,32 +233,46 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
 }
 
 const configuration = {
-  // Local Coo configuration renderer hook; ordinary hosts retain the schema view.
-  panelId: 'workbench',
   async mount(ctx) {
     const [cfg, state] = await Promise.all([ctx.invoke('settings', []), ctx.invoke('state', [])]);
     if (ctx.signal?.aborted) return;
+    const restoreAppearance=ownAppearance(ctx.root);applyAppearance(ctx.root,cfg);
     const doc = ctx.root.ownerDocument;
     const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
     const shell = doc.createElement('section'); shell.className = 'l2d-config-page';
     const header = doc.createElement('header'); header.className = 'l2d-config-header';
-    const title = doc.createElement('h2'); title.textContent = zh ? '配置' : 'Configuration';
+    const title = doc.createElement('h2'); title.textContent = zh ? '模型设置' : 'Model settings';
     const version = doc.createElement('span'); version.className = 'l2d-version-corner'; version.textContent = 'v' + state.version;
     header.append(title, version);
     const form = settingsForm(ctx, cfg, {autosave:true});
     shell.append(header, form); ctx.root.append(shell);
-    return {dispose() { shell.remove(); }};
+    return {dispose() { shell.remove();restoreAppearance(); }};
   },
 };
 
 export default {
-  configuration,
   panels: {
+    settings: configuration,
+    appearance: {
+      async mount(ctx){
+        const [cfg,state]=await Promise.all([ctx.invoke('settings',[]),ctx.invoke('state',[])]);
+        if(ctx.signal?.aborted)return;
+        const restoreAppearance=ownAppearance(ctx.root),doc=ctx.root.ownerDocument,zh=String(ctx.language||'zh').startsWith('zh');
+        const shell=doc.createElement('section');shell.className='l2d-config-page l2d-appearance-page';
+        const header=doc.createElement('header');header.className='l2d-config-header';
+        const title=doc.createElement('h2');title.textContent=zh?'外观':'Appearance';
+        const version=doc.createElement('span');version.className='l2d-version-corner';version.textContent='v'+state.version;header.append(title,version);
+        const form=settingsForm(ctx,cfg,{autosave:true,appearanceOnly:true,onAppearance:value=>applyAppearance(ctx.root,value)});
+        shell.append(header,form);ctx.root.append(shell);
+        return {dispose(){shell.remove();restoreAppearance();}};
+      },
+    },
     workbench: {
       mount(ctx) {
         const ui = ctx.ui;
         const doc = ctx.root.ownerDocument;
         const win = doc.defaultView;
+        const restoreAppearance=ownAppearance(ctx.root);
         const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
         const t = (a, b) => (zh ? a : b);
         const el = (tag, cls, text) => {
@@ -225,9 +298,11 @@ export default {
         let assistPolling = false;
         let assistState = {enabled:false,plans:[]};
         const ownedOverlays = new Set();
+        let currentAppearance=normalizeAppearance();
         function showDialog(title, body) {
           overlay?.dispose?.();
           ownedOverlays.delete(overlay);
+          if(body?.nodeType===1)applyAppearance(body,currentAppearance);
           overlay = ui.drawer(title, body);
           if (overlay) ownedOverlays.add(overlay);
           return overlay;
@@ -1335,8 +1410,10 @@ export default {
 
         // Host calls the returned disposer when switching panels.
         setBusy(true, t('读取…', 'Loading…'));
-        Promise.all([loadCore(), ctx.invoke('state', [])]).then(async ([, initial]) => {
+        Promise.all([loadCore(), ctx.invoke('state', []),ctx.invoke('settings',[])]).then(async ([, initial,cfg]) => {
           if (disposed) return;
+          currentAppearance=normalizeAppearance(cfg);
+          applyAppearance(ctx.root,cfg);
           notice = initial.notice;
           version = initial.version;
 
@@ -1364,6 +1441,7 @@ export default {
           shell.remove();
           cancelOwnedImport();
           ctx.root.removeAttribute('aria-busy');
+          restoreAppearance();
         } };
       },
     },

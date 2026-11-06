@@ -779,10 +779,11 @@ await writeFile(join(OUT, 'LICENSES.txt'), `本形象包 / This figure pack
 The files in this pack come from three sources, each under its own license.
 
 1. figure.js、backends/
-   Live2D 简易工作台 / Live2D Simple Workbench
+   Live2D 模型一键安装 / Live2D One-Click Install
    GNU Affero General Public License v3.0 or later
+   附加许可仅覆盖本项目作者有权许可的代码，见 LICENSE；不覆盖 sdk/ 或用户素材。
    完整文本：同目录 LICENSE
-   源码：https://github.com/as124da1231/live2d-simple-workbench
+   源码：https://github.com/as124da1231/cortico-world-figure
    Copyright (C) 2026 as124da1231
 
 2. sdk/

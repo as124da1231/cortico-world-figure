@@ -10,6 +10,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { extname, join, normalize, sep } from 'node:path';
+import type {StaticPreviewPlan} from './manual-preview.ts';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -45,10 +46,19 @@ try {
     img.src = String(u);
   });
   const asset = (p) => new URL(p, new URL('/pack/', location.origin));
-  const body = await mod.createFigureBody(new URL('/pack/', location.origin), { kit, host, loadImage, asset, scheme: '', model: undefined });
+  const plan = __STATIC_PREVIEW__;
+  const body = await mod.createFigureBody(new URL('/pack/', location.origin), { kit, host, loadImage, asset, scheme: '', model: undefined, preview: !!plan });
   body.do?.('neutral');
   body.set?.({ roam: 'off' });
   await new Promise((r) => setTimeout(r, 1200));
+  if(plan){
+    if(!globalThis.__l2dStaticSample)throw Error('静态预览接口不可用');
+    globalThis.__l2dPreview.wardrobe(plan.groups,{});
+    for(let i=0;i<8;i++)body.step(1/60);
+    const frames=plan.samples.map(sample=>({...sample,...globalThis.__l2dStaticSample(sample)}));
+    await post({frames,quality:globalThis.__l2dRenderQuality?.()});
+    body.dispose?.();document.title='done';
+  }else{
   let fit = null;
   if (!__WARDROBE_ONLY__) try { globalThis.__l2dAutoFit?.(); fit = globalThis.__l2dFit?.get?.() ?? null; } catch (e) { fit = null; }
   await new Promise((r) => setTimeout(r, 400));
@@ -69,6 +79,7 @@ try {
   }
   await post({ png: r.png, png128: r.png128, fit, evidence, wardrobe });
   document.title = 'done';
+  }
 } catch (e) {
   await post({ error: String((e && e.message) || e) }).catch(() => {});
   document.title = 'failed';
@@ -82,6 +93,8 @@ export interface CoverResult {
   fit?: { zoom?: number; offset?: [number, number]; autoFit?: boolean } | null;
   evidence?: Array<{id:string;time:number;png:string}>;
   thumbnails?: number;
+  frames?: Array<any>;
+  quality?: any;
 }
 
 /** Use the host's axis order; all other axes remain at their default option. */
@@ -124,7 +137,7 @@ export async function captureCover(
   timeoutMs = 60000,
   samples: Array<{id:string;time:number}> = [],
   signal?: AbortSignal,
-  options: {wardrobe?:boolean} = {},
+  options: {wardrobe?:boolean;preview?:StaticPreviewPlan} = {},
 ): Promise<CoverResult> {
   signal?.throwIfAborted();
   if (samples.length > 6) throw new Error('动作采样最多 6 帧');
@@ -155,6 +168,16 @@ export async function captureCover(
       try {
         const body = JSON.parse(raw);
         if (body.error) { resolveResult({ ok: false, error: String(body.error) }); return; }
+        if(options.preview){
+          if(!Array.isArray(body.frames)||body.frames.length!==options.preview.samples.length)throw Error('预览图片不完整');
+          const frames=body.frames.map((frame:any,i:number)=>{
+            const png=pngOf(frame.png);if(png.length<24||png.length>262144||png.readUInt32BE(16)!==256||png.readUInt32BE(20)!==256)throw Error('预览图片尺寸无效');
+            return {...options.preview!.samples[i],png:frame.png,fit:frame.fit,picks:frame.picks,values:frame.values};
+          });
+          if(body.quality?.error)throw Error(body.quality.error);
+          if(body.quality?.textureLimit!==256||body.quality?.canvas?.some((n:number)=>n>256)||body.quality?.maskSize>256)throw Error('预览画质上限无效');
+          resolveResult({ok:true,frames,quality:body.quality});return;
+        }
         const fit = body.fit && typeof body.fit === 'object' ? body.fit : null;
         const main = pngOf(body.png);
         const small = pngOf(body.png128);
@@ -190,7 +213,8 @@ export async function captureCover(
       return;
     }
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(COVER_PAGE.replace('__NATIVE_SAMPLES__', JSON.stringify(samples)).replace('__WARDROBE_ONLY__',String(!!options.wardrobe)).replace('__WARDROBE_SAMPLES__',JSON.stringify(wardrobe)));
+      const json=(v:unknown)=>JSON.stringify(v).replaceAll('<','\\u003c');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(COVER_PAGE.replace('__STATIC_PREVIEW__',json(options.preview||null)).replace('__NATIVE_SAMPLES__', json(samples)).replace('__WARDROBE_ONLY__',String(!!options.wardrobe)).replace('__WARDROBE_SAMPLES__',json(wardrobe)));
       return;
     }
     const isKit = url.pathname.startsWith('/kit/');
@@ -251,7 +275,7 @@ export async function captureCover(
 }
 
 /** PNG data URL → Buffer，顺带校验头。 */
-function pngOf(raw: unknown): Buffer {
+export function pngOf(raw: unknown): Buffer {
   const m = /^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/.exec(String(raw ?? ''));
   if (!m) throw new Error('封面不是 PNG data URL');
   const buf = Buffer.from(m[1].replace(/\s+/g, ''), 'base64');

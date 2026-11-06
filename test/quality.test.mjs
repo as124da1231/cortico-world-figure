@@ -31,12 +31,17 @@ test('workbench settings expose only declared editable values and the notice has
   const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({});
   t.after(() => world.stop());
   const page = world.webUi('zh');
-  assert.deepEqual(page.panels.map(p => p.id), ['workbench']);
-  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:false,modelRoots:'' });
+  assert.deepEqual(page.panels.map(p => p.id), ['workbench','appearance']);
+  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',gearTheme:'red',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'subtle',uiStyle:'custom',uiButtonFill:'gradient',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:false,modelRoots:'' });
+  assert.ok(page.panels.some(p=>p.id==='appearance'));assert.deepEqual(await page.invoke('appearance','settings',[]),await page.invoke('workbench','settings',[]));
+  await assert.rejects(()=>page.invoke('appearance','install',[]),/未知面板/);
   cfg.clean=true; cfg.texture='1024';
   const next=await page.invoke('workbench', 'settings', []);
   assert.equal(next.clean,true); assert.equal(next.texture,'1024');
   assert.equal('modelDir' in next,false); assert.equal('workDir' in next,false);
+  cfg.gearTheme='cyan';cfg.particleEffect='meteors';const appearance=await page.invoke('workbench','settings',[]);assert.equal(appearance.gearTheme,'cyan');assert.equal(appearance.particleEffect,'meteors');
+  const props=page.config[0].schema.properties;assert.equal(props['worlds.figure.gearTheme'].enum.length,6);assert.equal(props['worlds.figure.particleEffect'].enum.length,3);
+  cfg.gearTheme='unknown';cfg.particleEffect='unknown';const fallback=await page.invoke('workbench','settings',[]);assert.equal(fallback.gearTheme,'red');assert.equal(fallback.particleEffect,'stars');assert.equal(cfg.gearTheme,'unknown');
 });
 
 test('zip/bundle parsing rejects malformed data and traversal without touching neighboring files', async (t) => {

@@ -81,10 +81,14 @@ export class Locomotion {
   enter(phase) {
     if (this.action) this.retiring.push({ action: this.action, weight: this.action.weight });
     this.phase = phase; this.elapsed = 0; this.phaseChanges++;
-    this.action = this.actions.get(phase); this.profile = this.profiles.get(phase);
+    // 转身不播 Overte 的 turn 片段：那段几乎没有手臂摆动，接上 Quaternius 走路会突然僵住。
+    // 改成用走路的姿势原地转身，手脚一直在动，过渡连续。
+    const pivot = phase === 'left' || phase === 'right';
+    this.action = pivot ? this.actions.get('walk') : this.actions.get(phase);
+    this.profile = pivot ? { duration: .55, samples: [] } : this.profiles.get(phase);
     if (this.action) {
       this.retiring = this.retiring.filter(entry => entry.action !== this.action);
-      this.action.stopFading().reset().setLoop(phase === 'walk' ? THREE.LoopRepeat : THREE.LoopOnce, phase === 'walk' ? Infinity : 1);
+      this.action.stopFading().reset().setLoop(phase === 'walk' || pivot ? THREE.LoopRepeat : THREE.LoopOnce, phase === 'walk' || pivot ? Infinity : 1);
       this.action.clampWhenFinished = true; this.action.weight = 0; this.action.play();
     }
     this.stageYaw = this.yaw;
@@ -108,12 +112,13 @@ export class Locomotion {
     if (Math.abs(this.turnRemaining) > .13) {
       this.stageAngle = THREE.MathUtils.clamp(this.turnRemaining, -Math.PI / 2, Math.PI / 2);
       this.enter(this.stageAngle > 0 ? 'left' : 'right');
-    } else { this.yaw = this.desiredYaw; this.enter(this.returning ? 'idle' : 'start'); }
+    } else { this.yaw = this.desiredYaw; this.enter(this.returning ? 'idle' : 'walk'); }
   }
   stop() {
     if (!this.moving) return;
     this.stopped = true; this.target = null;
-    if (this.phase !== 'stop') this.enter('stop');
+    // 直接收进待机：Overte 的停步片段有 1.3~1.9 秒且手臂几乎不动，接在活泼的走路后面很僵。
+    if (this.phase !== 'idle') this.enter('idle');
   }
   update(dt) {
     if (dt <= 0) return;
@@ -141,24 +146,22 @@ export class Locomotion {
         const delta = this.target.clone().sub(this.vrm.scene.position); delta.y = 0;
         const travel = Math.min(delta.length(), velocity * dt);
         if (travel > 0) { this.vrm.scene.position.addScaledVector(delta.normalize(), travel); this.distance += travel; }
-        // The stop clip begins at the same gait boundary as the cycle. Wait
-        // for a phase boundary instead of splicing a raised foot into a plant.
+        // 到点就收：不再插一段 1.3~1.9 秒的停步片段，直接原地转回观察者再回待机。
         const stopDistance = (this.profiles.get('stop')?.travel || this.height * .08) + this.height * .025;
         const cycleRemaining = this.profile.duration - this.action.time;
-        if (this.phase === 'walk' && this.vrm.scene.position.distanceTo(this.target) < stopDistance && cycleRemaining < dt * this.rate * 1.5) this.enter('stop');
-        else if (this.phase === 'walk' && this.vrm.scene.position.distanceTo(this.target) < this.height * .015) this.enter('stop');
+        const near = this.vrm.scene.position.distanceTo(this.target);
+        if (this.phase === 'walk' && (near < this.height * .02 || (near < stopDistance && cycleRemaining < dt * this.rate * 1.5))) {
+          this.target = null; this.returning = true; this.desiredYaw = 0;
+          this.turnRemaining = wrap(-this.yaw); this.beginTurn();
+        }
       }
       if (t >= duration && phase === 'start' && this.phase === phase) this.enter('walk');
-      else if (t >= duration && phase === 'stop' && this.phase === phase) {
-        this.target = null; this.returning = true; this.desiredYaw = 0;
-        this.turnRemaining = wrap(-this.yaw); this.beginTurn();
-      }
     }
     this.forward.copy(this.baseForward).applyAxisAngle(up, this.yaw);
     this.vrm.scene.quaternion.copy(new THREE.Quaternion().setFromAxisAngle(up, this.yaw).multiply(this.baseQuaternion));
   }
   contact(side) {
-    if (!this.profile || !this.action) return null;
+    if (!this.profile || !this.action || !this.profile.samples?.length) return null;
     const phase = this.action.time / this.profile.duration;
     const index = Math.min(this.profile.samples.length - 1, Math.floor(phase * (this.profile.samples.length - 1)));
     const sample = this.profile.samples[index][side];

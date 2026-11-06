@@ -13,3 +13,10 @@ figures/
 # Live2D Cubism Core£º²»Ëæ°ü·Ö·¢£¬ÓÃ»§Í¬ÒâĞí¿Éºó´Ó¹Ù·½µØÖ·»ñÈ¡
 workbench/pack/sdk/live2dcubismcore.min.js
 *.part
+
+# æœ¬æœº agent çŠ¶æ€ä¸æœ¬åœ°å¯¼å‡º
+.codex/
+output/
+
+# Mixamo æ´¾ç”ŸåŠ¨ä½œï¼ˆAdobe æˆæƒï¼Œä¸è¿›å…¥å…¬å¼€ä»“åº“ï¼‰
+experiments/vrm-preview/assets/animations/mixamo/

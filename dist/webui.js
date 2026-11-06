@@ -1,53 +1,82 @@
-const WARDROBE_SLOTS = [
+const GEAR_THEMES = [
+  {id:'purple',name:'紫色',en:'Purple',color:'#9654ff',fill:'linear-gradient(105deg,#343bdc 0%,#7957f5 36%,#bd75ff 65%,#8c52ff 100%)',glow:'#ece0ff90'},
+  {id:'red',name:'红色',en:'Red',color:'#d63c43',fill:'linear-gradient(105deg,#b91c3c 0%,#e83e50 36%,#ff7c66 65%,#e53e3e 100%)',glow:'#ffe3df90'},
+  {id:'amber',name:'琥珀金',en:'Amber',color:'#a9660c',fill:'linear-gradient(105deg,#b96510 0%,#f59e0b 36%,#ffd76a 65%,#e98c18 100%)',glow:'#fff4c990'},
+  {id:'blue',name:'蓝色',en:'Blue',color:'#2767d9',fill:'linear-gradient(105deg,#1645bc 0%,#397ff5 36%,#79bdff 65%,#2775e8 100%)',glow:'#dceeff90'},
+  {id:'cyan',name:'青色',en:'Cyan',color:'#087f91',fill:'linear-gradient(105deg,#086b88 0%,#0da8b5 36%,#73e5dc 65%,#099caf 100%)',glow:'#d9fffa90'},
+  {id:'green',name:'绿色',en:'Green',color:'#23834b',fill:'linear-gradient(105deg,#166941 0%,#2ba869 36%,#8cdb95 65%,#269851 100%)',glow:'#e1ffe590'},
+];
+const GEAR_PARTICLES = [
+  {id:'stars',name:'星点',en:'Stars',icon:'✦'},
+  {id:'glow',name:'浮光',en:'Glow',icon:'●'},
+  {id:'meteors',name:'流星',en:'Meteors',icon:'╱'},
+  {id:'hearts',name:'爱心',en:'Hearts',icon:'♥'},
+  {id:'bubbles',name:'气泡',en:'Bubbles',icon:'○'},
+  {id:'ripples',name:'光波',en:'Ripples',icon:'◎'},
+];
+const normalizeGearTheme = value => GEAR_THEMES.some(t=>t.id===value)?value:'red';
+const normalizeGearParticles = value => GEAR_PARTICLES.some(p=>p.id===value)?value:'stars';
+
+const UI_MATERIALS = [
+  {id:'matte',name:'哑光',en:'Matte',icon:'◼'},
+  {id:'glass',name:'磨砂玻璃',en:'Glass',icon:'◈'},
+  {id:'silk',name:'柔光',en:'Silk',icon:'◒'},
+  {id:'metal',name:'拉丝金属',en:'Metal',icon:'▤'},
+];
+const UI_MODES = [{id:'auto',name:'跟随 Coo',en:'Follow Coo',icon:'◐'},{id:'light',name:'浅色',en:'Light',icon:'☼'},{id:'dark',name:'深色',en:'Dark',icon:'☾'}];
+const UI_CORNERS = [{id:'standard',name:'标准',en:'Standard',icon:'▢'},{id:'soft',name:'柔和',en:'Soft',icon:'●'},{id:'crisp',name:'利落',en:'Crisp',icon:'▪'}];
+const UI_GLOWS = [{id:'off',name:'关闭',en:'Off',icon:'○'},{id:'subtle',name:'轻柔',en:'Subtle',icon:'◉'},{id:'vivid',name:'鲜明',en:'Vivid',icon:'✺'}];
+const UI_STYLES = [{id:'classic',name:'默认',en:'Default',icon:'◻'},{id:'custom',name:'自定义',en:'Custom',icon:'✧'}];
+const UI_BUTTON_FILLS = [{id:'solid',name:'纯色',en:'Solid',icon:'■'},{id:'gradient',name:'渐变',en:'Gradient',icon:'◩'}];
+function normalizeAppearance(cfg = {}) {
+  const choice=(list,value,fallback)=>list.some(item=>item.id===value)?value:fallback;
+  return {gearTheme:normalizeGearTheme(cfg.gearTheme),particleEffect:normalizeGearParticles(cfg.particleEffect),
+    uiMaterial:choice(UI_MATERIALS,cfg.uiMaterial,'matte'),uiMode:choice(UI_MODES,cfg.uiMode,'auto'),
+    uiCorners:choice(UI_CORNERS,cfg.uiCorners,'standard'),uiGlow:choice(UI_GLOWS,cfg.uiGlow,'subtle'),uiStyle:choice(UI_STYLES,cfg.uiStyle,'custom'),uiButtonFill:choice(UI_BUTTON_FILLS,cfg.uiButtonFill,'gradient')};
+}
+
+﻿export const WARDROBE_SLOTS = [
   {slot:'outfit',id:'lookoutfit',name:'装扮',en:'Outfit'},
   {slot:'parts',id:'lookparts',name:'部件',en:'Parts'},
   {slot:'accessories',id:'lookaccessories',name:'配饰',en:'Accessories'},
 ];
 
 // Preserve legacy axis/option IDs so existing picks survive the next save.
+// 内置三栏固定在最前；其余分组（自定义）按原顺序追加在后面。
 function fixedWardrobeGroups(groups=[]) {
-  if(!Array.isArray(groups)||groups.length>3)throw Error('最多支持装扮、部件、配饰三个栏位；旧分组超出上限时保留原包');
-  const assigned=new Map(),pending=[];
+  if(!Array.isArray(groups))throw Error('装扮分组无效');
+  const assigned=new Map(),waiting=[],custom=[];
   for(const group of groups){
     if(!group||typeof group!=='object'||!Array.isArray(group.options))throw Error('装扮分组无效');
     const slot=group.slot?WARDROBE_SLOTS.find(s=>s.slot===group.slot):WARDROBE_SLOTS.find(s=>s.name===group.name||s.en===group.name);
-    if(group.slot&&!slot||slot&&assigned.has(slot.slot))throw Error('装扮栏位重复或无效');
-    if(slot)assigned.set(slot.slot,group);else pending.push(group);
+    if(group.slot&&!slot)throw Error('装扮栏位无效');
+    if(slot){if(assigned.has(slot.slot))throw Error('装扮栏位重复');assigned.set(slot.slot,group);}
+    else if(group.custom)custom.push(group);else waiting.push(group);
   }
-  for(const slot of WARDROBE_SLOTS)if(!assigned.has(slot.slot)&&pending.length)assigned.set(slot.slot,pending.shift());
-  const used=new Set(groups.map(g=>g.id));
-  return WARDROBE_SLOTS.map(slot=>{
-    const group=assigned.get(slot.slot);let id=group?.id||slot.id;
-    if(!group&&used.has(id)){let n=1;while(used.has(id=slot.id+n))n++;}used.add(id);
-    return {id,slot:slot.slot,name:slot.name,options:(group?.options||[]).map(o=>({...o}))};
-  });
-}
+  // 老包可能没有 slot 字段：按顺序补进空着的内置栏。
+  for(const slot of WARDROBE_SLOTS)if(!assigned.has(slot.slot)&&waiting.length)assigned.set(slot.slot,waiting.shift());
 
-// The official figure-frame protocol, with a scoped temporary resource URL.
-async function mountBindingPreview(ctx,frame,data,alive,onStatus) {
-  const win=frame.ownerDocument.defaultView;
-  let ready=false,closed=false,clock,previousSize='';
-  const send=message=>{if(!closed)frame.contentWindow?.postMessage(message,'*');};
-  const bounds=()=>{const W=Math.max(100,frame.clientWidth),H=Math.max(100,frame.clientHeight);return {W,H,floorY:H-12,S:Math.min(W/300,(H-32)/256)};};
-  const tick=dtMs=>{
-    if(closed||!alive()||!ready)return;
-    const size=bounds(),key=JSON.stringify(size);if(key!==previousSize){previousSize=key;send({t:'set',state:{bounds:size}});}
-    send({t:'tick',dt:Math.min(.05,Math.max(0,dtMs)/1000)||.016});
-  };
-  const dispose=()=>{if(closed)return;closed=true;clock?.dispose?.();clearTimeout(timer);win.removeEventListener('message',listener);frame.src='about:blank';};
-  const fail=message=>{dispose();if(alive())onStatus('error',message);};
-  const timer=setTimeout(()=>fail('模型预览加载超时，请重试'),20000);
-  const listener=event=>{
-    if(event.source!==frame.contentWindow||closed)return;
-    const m=event.data||{};
-    if(m.t==='loaded')send({t:'init',entry:data.preview.entry,base:data.preview.base,export:'createFigureBody',scheme:'',start:{x:bounds().W/2,facing:1},bounds:bounds(),language:ctx.language||'zh',theme:'light'});
-    else if(m.t==='ready'&&!ready){ready=true;clearTimeout(timer);send({t:'set',state:{roam:'off'}});clock=ctx.frame(tick);onStatus('ready','');}
-    else if(m.t==='error')fail(m.message||'模型预览失败');
-    else if(m.t==='preview-info')frame.dataset.previewInfo=JSON.stringify(m);
-  };
-  win.addEventListener('message',listener);
-  frame.setAttribute('sandbox','allow-scripts');frame.src=data.preview.url;
-  return dispose;
+  const used=new Set();
+  const unique=base=>{let id=base,n=1;while(used.has(id))id=`${base}${n++}`;used.add(id);return id;};
+
+  const out=[];
+  for(const slot of WARDROBE_SLOTS){
+    const group=assigned.get(slot.slot);
+    const id=unique(group?.id||slot.id);
+    out.push({id,slot:slot.slot,name:slot.name,options:(group?.options||[]).map(o=>({...o}))});
+  }
+  for(const group of custom){
+    if(!group.options.length&&!String(group.name||'').trim())continue;
+    const id=unique(String(group.id||'').trim()||`custom${out.length+1}`);
+    out.push({
+      id,
+      custom: true,
+      name:String(group.name||id),
+      ...(group.en?{en:String(group.en)}:{}),
+      options:group.options.map(o=>({...o})),
+    });
+  }
+  return out;
 }
 
 // A host overlay outside showModal() is inert. Keep discard confirmation in the same top layer.
@@ -85,25 +114,30 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   const close=el('button','l2d-btn quiet l2d-modal-close','×');close.setAttribute('aria-label',t('关闭动作与装扮','Close editor'));head.append(heading,close);
   const layout=el('div','l2d-bind-layout'),left=el('nav','l2d-bind-targets'),stage=el('section','l2d-bind-stage'),right=el('section','l2d-bind-resources');
   left.setAttribute('aria-label',t('绑定目标','Binding targets'));right.setAttribute('aria-label',t('原生资源','Native resources'));
-  const frame=el('iframe','l2d-bind-frame');frame.title=t('模型实时预览','Live model preview');frame.setAttribute('sandbox','allow-scripts');
-  const hint=el('p','l2d-bind-status',t('准备模型…','Preparing model…'));hint.setAttribute('role','status');
-  const toolbar=el('div','l2d-bind-toolbar'),raw=el('button','l2d-btn sm',t('组合效果','Combined')),replay=el('button','l2d-btn sm',t('重播','Replay')),reset=el('button','l2d-btn sm',t('复位','Reset'));
+  const gallery=el('div','l2d-bind-gallery');gallery.setAttribute('aria-label',t('模型效果对照','Model comparison'));gallery.setAttribute('aria-live','polite');
+  const hint=el('p','l2d-bind-status',t('准备预览…','Preparing preview…'));hint.setAttribute('role','status');
+  const toolbar=el('div','l2d-bind-toolbar'),raw=el('button','l2d-btn sm',t('组合效果','Combined')),replay=el('button','l2d-btn sm',t('重新取样','Resample')),reset=el('button','l2d-btn sm',t('复位','Reset'));
   const retry=el('button','l2d-btn sm',t('重试预览','Retry preview'));retry.hidden=true;
+  const resolutionLabel=el('label','l2d-bind-quality',t('预览精度','Preview size')),resolution=el('select','l2d-input');resolution.setAttribute('aria-label',t('预览精度','Preview resolution'));
+  for(const size of [256,512,1024]){const option=el('option',null,size+' px');option.value=String(size);resolution.append(option);}resolution.value='512';resolutionLabel.append(resolution);
   const leftShell=el('div','l2d-bind-left'),pages=el('div','l2d-bind-pages');pages.setAttribute('role','tablist');pages.setAttribute('aria-label',t('编辑页面','Editor pages'));
   leftShell.append(pages,left);
-  toolbar.append(raw,replay,reset,retry);stage.append(frame,hint,toolbar);layout.append(leftShell,stage,right);
+  toolbar.append(raw,replay,reset,resolutionLabel,retry);stage.append(gallery,hint,toolbar);layout.append(leftShell,stage,right);
   const footer=el('div','l2d-bind-footer'),summary=el('span','l2d-bind-summary',t('未绑定的项目使用通用配方','Unbound targets use generic recipes'));
+  const footInfo=el('div','l2d-bind-footinfo');
+  const newGroup=el('button','l2d-bind-newgroup',t('＋ 新建分组','＋ New group'));newGroup.type='button';
+  footInfo.append(summary,newGroup);
   const cancel=el('button','l2d-btn',t('取消','Cancel')),save=el('button','l2d-btn primary',t('保存绑定','Save bindings'));save.disabled=true;
   const restoreAll=el('button','l2d-btn quiet sm',t('全部恢复通用','Reset all to generic'));restoreAll.disabled=true;
-  footer.append(summary,restoreAll,cancel,save);card.append(head,layout,footer);modal.append(card);ctx.root.append(modal);modal.showModal();
-  let closed=false,saving=false,dirty=false,data,bindings=[],word='happy',resource=null,rawMode=false,ready=false,cleanup=()=>{},serial=0,discardPrompt=null,leaseTimer,sessionValid=true,previewError='';
+  footer.append(footInfo,restoreAll,cancel,save);card.append(head,layout,footer);modal.append(card);ctx.root.append(modal);modal.showModal();
+  let closed=false,saving=false,dirty=false,data,bindings=[],word='happy',resource=null,rawMode=false,ready=false,serial=0,previewTimer,sampleSet=0,discardPrompt=null,leaseTimer,sessionValid=true,previewError='';
   let page='actions',groups=[],picks={},groupId=null,optionId='default';const pageState={actions:{resource:null,filter:'all',search:''},wardrobe:{resource:null,filter:'all',search:''}};
   const uid=prefix=>prefix+(win.crypto?.randomUUID?.().replaceAll('-','')||Math.random().toString(16).slice(2)).slice(0,12);
   const signature=items=>JSON.stringify(items.map(({word,resource,release})=>({word,resource,...(release?{release}:{})})).sort((a,b)=>a.word.localeCompare(b.word)));
-  const syncControls=()=>{layout.inert=saving;pages.inert=saving;save.disabled=saving||!ready||!sessionValid||!!data?.buildId&&!dirty&&!data.wardrobeNeedsSave;close.disabled=cancel.disabled=saving;restoreAll.disabled=saving||!ready||(page==='actions'?!bindings.length:!groups.length);restoreAll.textContent=page==='actions'?t('全部恢复通用','Reset all to generic'):t('恢复默认外观','Default appearance');raw.hidden=page==='wardrobe';raw.disabled=replay.disabled=reset.disabled=!ready||saving;retry.disabled=saving||!sessionValid;};
+  const syncControls=()=>{layout.inert=saving;pages.inert=saving;save.disabled=saving||!ready||!sessionValid||!!data?.buildId&&!dirty&&!data.wardrobeNeedsSave;close.disabled=cancel.disabled=saving;restoreAll.disabled=saving||!ready||(page==='actions'?!bindings.length:!groups.length);restoreAll.textContent=page==='actions'?t('全部恢复通用','Reset all to generic'):t('恢复默认外观','Default appearance');newGroup.hidden=page!=='wardrobe';newGroup.disabled=saving||!ready;raw.hidden=page==='wardrobe';resolution.disabled=raw.disabled=replay.disabled=reset.disabled=!data||saving;retry.disabled=saving||!sessionValid;};
   const changed=()=>{dirty=signature(bindings)!==signature(data.bindings||[])||JSON.stringify(groups)!==JSON.stringify(data.wardrobe||[]);syncControls();};
   const alive=()=>!closed&&!ctx.signal?.aborted;
-  const release=()=>{if(closed)return;closed=true;win.clearInterval(leaseTimer);discardPrompt?.dispose();leave?.dispose?.();ctx.signal?.removeEventListener('abort',release);cleanup();modal.close();modal.remove();onClosed?.();const token=data?.token||requestedToken;if(token&&!ctx.signal?.aborted)ctx.invoke('manualClose',[token]).catch(()=>{});previous?.focus?.();};
+  const release=()=>{if(closed)return;closed=true;win.clearInterval(leaseTimer);discardPrompt?.dispose();leave?.dispose?.();ctx.signal?.removeEventListener('abort',release);serial++;win.clearTimeout(previewTimer);gallery.replaceChildren();modal.close();modal.remove();onClosed?.();const token=data?.token||requestedToken;if(token&&!ctx.signal?.aborted)ctx.invoke('manualClose',[token]).catch(()=>{});previous?.focus?.();};
   const requestClose=async()=>{
     if(closed||saving||discardPrompt)return;
     if(dirty){discardPrompt=bindingDiscardPrompt(modal,zh);const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive())return;}
@@ -112,14 +146,37 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   close.onclick=cancel.onclick=requestClose;modal.addEventListener('cancel',e=>{e.preventDefault();void requestClose();});modal.addEventListener('click',e=>{if(e.target===modal)void requestClose();});
   const leave=ctx.guardLeave?.(()=>alive()&&(dirty||saving)?t('动作绑定尚未保存，确定离开？','Bindings are not saved. Leave?'):null);
   ctx.signal?.addEventListener('abort',release,{once:true});
-  const send=type=>{if(ready)frame.contentWindow.postMessage({t:type==='play'?'preview-play':'preview-stop',resource:resource?.id,word,bindings,raw:rawMode},'*');};
-  const sendWardrobe=(candidate=false)=>{
-    if(!ready)return;const preview=structuredClone(groups),selected={...picks},g=preview.find(g=>g.id===groupId);
-    if(candidate&&page==='wardrobe'&&resource&&!resource.wardrobeError&&g&&!wardrobeConflict(resource,g.id)){g.options=g.options.slice(0,15);g.options.push({id:'preview',name:resource.title,resource:resource.id});selected[g.id]='preview';}
-    frame.contentWindow.postMessage({t:'preview-wardrobe',groups:preview,picks:selected},'*');
+  const refreshSelection=()=>{
+    const inputs=[...binding.querySelectorAll('input,select')].map(input=>({aria:input.getAttribute('aria-label'),value:input.value,checked:input.checked,focused:input===doc.activeElement}));
+    paintSelection();for(const saved of inputs){const input=[...binding.querySelectorAll('input,select')].find(i=>i.getAttribute('aria-label')===saved.aria);if(input){input.value=saved.value;input.checked=saved.checked;input.dispatchEvent(new win.Event(input.tagName==='SELECT'?'change':'input'));if(saved.focused)input.focus();}}
   };
-  const play=()=>{if(!ready||saving)return;sendWardrobe(true);if(page==='actions')send('play');else frame.contentWindow.postMessage({t:'preview-play',word:'neutral',bindings:[],raw:false},'*');if(!previewError)hint.textContent=page==='actions'?(resource?`${label(word)} · ${resource.title}`:t('通用表现','Generic behavior')):(resource?`${resource.title}${resource.kind==='motion'?t(' · 动作末帧',' · final frame'):''}`:t('当前装扮','Current appearance'));};
-  raw.onclick=()=>{rawMode=!rawMode;raw.textContent=rawMode?t('原生效果','Native only'):t('组合效果','Combined');raw.setAttribute('aria-pressed',String(rawMode));play();};replay.onclick=play;reset.onclick=()=>{if(page==='wardrobe'){picks={};resource=null;optionId='default';paintTargets();paintResources();sendWardrobe();}send('stop');hint.textContent=t('已复位','Reset');};
+  const loadPreview=(candidate=false,groundOverride)=>{
+    if(!data||saving||!sessionValid||!alive())return;
+    const preview=structuredClone(groups),selected={...picks},g=preview.find(g=>g.id===groupId);
+    if(candidate&&page==='wardrobe'&&resource&&!resource.wardrobeError&&g&&!wardrobeConflict(resource,g.id)){
+      const ground=groundOverride??g.options.find(o=>o.id===optionId)?.ground;
+      g.options=g.options.slice(0,15);g.options.push({id:'preview',name:resource.title,resource:resource.id,...(ground?{ground:true}:{})});selected[g.id]='preview';
+    }
+    const request={page,word,resource:page==='actions'?resource?.id:null,raw:rawMode,bindings:structuredClone(bindings),groups:preview,picks:selected,sampleSet,previewSize:Number(resolution.value)};
+    const generation=++serial;win.clearTimeout(previewTimer);ready=false;previewError='';retry.hidden=true;gallery.setAttribute('aria-busy','true');gallery.classList.add('is-pending');hint.textContent=t('正在生成对照图…','Generating comparison…');syncControls();refreshSelection();
+    previewTimer=win.setTimeout(async()=>{
+      try{
+        const result=await ctx.invoke('manualPreview',[data.token,request]);if(!alive()||generation!==serial)return;
+        if(!Array.isArray(result.frames)||!result.frames.length||result.frames.length>3)throw Error(t('预览图片不完整','Incomplete preview'));
+        const labels={default:t('默认','Default'),generic:t('通用表现','Generic'),appearance:t('当前装扮','Current appearance'),native:t('原生效果','Native'),combined:t('组合效果','Combined')};
+        const figures=result.frames.map(item=>{if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(item.png||''))throw Error(t('预览图片无效','Invalid preview image'));const figure=el('figure','l2d-bind-shot'),image=el('img'),caption=el('figcaption',null,(labels[item.kind]||'')+(item.resource&&item.time?' · '+item.time.toFixed(2)+'s':''));image.src=item.png;image.alt=caption.textContent;image.width=image.height=request.previewSize;figure.append(image,caption);return figure;});
+        gallery.replaceChildren(...figures);gallery.dataset.count=String(figures.length);gallery.dataset.previewInfo=JSON.stringify({quality:result.quality,frames:result.frames.map(({png,...frame})=>frame)});ready=true;
+        hint.textContent=page==='actions'?(resource?label(word)+' · '+resource.title:t('通用表现','Generic behavior')):t('静态外观对照','Appearance comparison');
+      }catch(error){if(!alive()||generation!==serial)return;ready=false;previewError=t('预览失败：','Preview failed: ')+String(error.message||error);hint.textContent=previewError;retry.hidden=false;}
+      finally{if(alive()&&generation===serial){gallery.setAttribute('aria-busy','false');gallery.classList.remove('is-pending');syncControls();refreshSelection();}}
+    },160);
+  };
+  const sendWardrobe=(candidate=false)=>loadPreview(candidate);
+  const play=()=>loadPreview(true);
+  raw.onclick=()=>{rawMode=!rawMode;raw.textContent=rawMode?t('原生效果','Native only'):t('组合效果','Combined');raw.setAttribute('aria-pressed',String(rawMode));play();};
+  replay.onclick=()=>{sampleSet=(sampleSet+1)%3;play();};
+  resolution.onchange=play;
+  reset.onclick=()=>{picks={};resource=null;optionId='default';paintTargets();paintResources();loadPreview();};
   let filter='all';const search=el('input','l2d-input');search.placeholder=t('搜索原生资源','Search native resources');search.setAttribute('aria-label',search.placeholder);
   const tabs=el('div','l2d-bind-tabs'),list=el('div','l2d-bind-list'),binding=el('div','l2d-bind-selection');
   right.append(search,tabs,list,binding);
@@ -154,15 +211,36 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     for(const r of resources){const b=el('button','l2d-bind-resource'+(r.id===resource?.id?' selected':''));b.append(el('span',null,r.title),el('small',null,page==='wardrobe'?(r.kind==='expression'?t('外观状态','Appearance state'):t('动作末帧 · 持久','Final frame · held')):r.classification==='appearance'?t('其他 · 仅预览','Other · preview only'):r.kind==='expression'?t('表情','Expression'):t(`动作 · ${r.seconds.toFixed(1)} 秒`,`Motion · ${r.seconds.toFixed(1)} s`)));b.onclick=()=>{resource=r;paintResources();play();};list.append(b);}
     if(!resources.length)list.append(el('p','l2d-bind-empty',t('没有匹配的资源','No matching resources')));paintSelection();
   };
-  function paintSummary(){const used=groups.filter(g=>g.options.length).length;summary.textContent=t(`${bindings.length} 项绑定 · 外观 ${used}/3 栏 · 保存后从卡片安装`,`${bindings.length} bindings · ${used}/3 appearance slots · save then install`);}
+  function paintSummary(){const used=groups.filter(g=>g.options.length).length;const total=groups.length||3;summary.textContent=t(`${bindings.length} 项绑定 · 外观 ${used}/${total} 栏 · 保存后从卡片安装`,`${bindings.length} bindings · ${used}/${total} appearance slots · save then install`);}
   function wardrobeConflict(r,id){
     const ids=[...bindings.flatMap(b=>[b.resource,b.release].filter(Boolean)),...groups.filter(g=>g.id!==id).flatMap(g=>g.options.map(o=>o.resource))];
     const used=new Set(ids.flatMap(id=>data.resources.find(r=>r.id===id)?.channels||[]));return (r?.channels||[]).some(c=>used.has(c));
   }
   function paintWardrobeTargets(){
     for(const g of groups){
-      const title=zh?g.name:WARDROBE_SLOTS.find(s=>s.slot===g.slot).en;
-      const header=el('button','l2d-bind-group'+(g.id===groupId?' selected':''),title);header.onclick=()=>{groupId=g.id;optionId=picks[g.id]||'default';resource=data.resources.find(r=>r.id===g.options.find(o=>o.id===optionId)?.resource)||null;paintTargets();paintResources();sendWardrobe();};left.append(header);
+      const title=zh?(g.name||''):(g.en||g.name||WARDROBE_SLOTS.find(s=>s.slot===g.slot)?.en||'');
+      const row=el('div','l2d-bind-grow');
+      const header=el('button','l2d-bind-group'+(g.id===groupId?' selected':''),title);header.onclick=()=>{groupId=g.id;optionId=picks[g.id]||'default';resource=data.resources.find(r=>r.id===g.options.find(o=>o.id===optionId)?.resource)||null;paintTargets();paintResources();sendWardrobe();};
+      row.append(header);
+      if(g.custom){
+        const del=el('button','l2d-bind-groupdel','×');del.type='button';del.title=t('删除分组','Delete group');del.setAttribute('aria-label',t('删除分组 '+g.name,'Delete group '+g.name));
+        del.onclick=async event=>{
+          event.stopPropagation();
+          if(saving||!ready||discardPrompt)return;
+          discardPrompt=bindingDiscardPrompt(modal,zh,{
+            title:t('删除分组？','Delete group?'),
+            body:t(`「${g.name}」以及它的所有选项都会被移除。`,`“${g.name}” and all its options will be removed.`),
+            cancel:t('保留','Keep'),accept:t('删除','Delete'),
+          });
+          const accepted=await discardPrompt.result;discardPrompt=null;
+          if(!accepted||!alive())return;
+          groups=groups.filter(x=>x.id!==g.id);delete picks[g.id];
+          if(groupId===g.id){groupId=groups[0]?.id||null;optionId='default';resource=null;}
+          changed();paintTargets();paintResources();sendWardrobe();
+        };
+        row.append(del);
+      }
+      left.append(row);
       for(const o of [{id:'default',name:t('默认','Default')},...g.options]){
         const chosen=(picks[g.id]||'default')===o.id;
         const b=el('button','l2d-bind-target'+(chosen?' selected':''),o.name);b.setAttribute('aria-label',title+'：'+o.name);b.setAttribute('aria-pressed',String(chosen));
@@ -174,12 +252,15 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   function paintWardrobeSelection(){
     binding.replaceChildren();const g=groups.find(g=>g.id===groupId);paintSummary();
     if(!g){binding.append(el('p',null,t('在左侧选择装扮、部件或配饰','Choose Outfit, Parts or Accessories on the left')));return;}
-    binding.append(el('p',null,t(g.name+' · 每次选一个原生按钮',(WARDROBE_SLOTS.find(s=>s.slot===g.slot)?.en||'')+' · one native resource at a time')));
+    binding.append(el('p',null,t(g.name+' · 每次选一个原生按钮',(g.en||g.name||WARDROBE_SLOTS.find(s=>s.slot===g.slot)?.en||'')+' · one native resource at a time')));
     const current=g.options.find(o=>o.id===optionId),name=el('input','l2d-input');name.value=current?.name||resource?.title||'';name.maxLength=60;name.placeholder=t('选项名称，例如戴上','Option name, e.g. wear');name.setAttribute('aria-label',t('装扮选项名称','Wardrobe option name'));binding.append(name);
     const conflict=resource&&wardrobeConflict(resource,g.id);if(conflict)binding.append(el('p','l2d-bind-warning',t('与动作或其他装扮组共用参数，请调整绑定。','Shares controls with actions or another wardrobe group.')));
     const add=el('button','l2d-btn primary',current?t('保存选项','Update option'):t('添加选项','Add option'));
+    const groundLabel=el('label','l2d-bind-ground'),ground=el('input','l2d-switch');ground.type='checkbox';ground.setAttribute('role','switch');ground.setAttribute('aria-label',t('切换后贴地','Ground after switching'));ground.checked=current?.ground===true;ground.disabled=saving||!ready||!resource||!!conflict;
+    groundLabel.title=t('改变体型时启用；保持大小，仅在切换后测量并贴地。','For shape changes: keep scale, measure and ground on switching.');groundLabel.append(ground,el('span',null,t('切换后贴地','Ground on switch')));
     const canAdd=()=>!saving&&ready&&resource&&!resource.wardrobeError&&!conflict&&!!name.value.trim()&&(!!current||g.options.length<16);add.disabled=!canAdd();name.oninput=()=>{add.disabled=!canAdd();};
-    add.onclick=()=>{if(!canAdd()||discardPrompt)return;const o={id:current?.id||uid('v'),name:name.value.trim(),resource:resource.id};if(current)g.options=g.options.map(p=>p.id===o.id?o:p);else g.options.push(o);optionId=o.id;picks[g.id]=o.id;changed();paintTargets();paintResources();sendWardrobe();};binding.append(add);
+    ground.onchange=()=>{if(ground.disabled)return;if(current){if(ground.checked)current.ground=true;else delete current.ground;changed();sendWardrobe();}else if(resource){const preview=structuredClone(groups),group=preview.find(p=>p.id===g.id);group.options=group.options.slice(0,15);group.options.push({id:'preview',name:resource.title,resource:resource.id,...(ground.checked?{ground:true}:{})});loadPreview(true,ground.checked);}};
+    add.onclick=()=>{if(!canAdd()||discardPrompt)return;const o={id:current?.id||uid('v'),name:name.value.trim(),resource:resource.id,...(ground.checked?{ground:true}:{})};if(current)g.options=g.options.map(p=>p.id===o.id?o:p);else g.options.push(o);optionId=o.id;picks[g.id]=o.id;changed();paintTargets();paintResources();sendWardrobe();};const actions=el('div','l2d-bind-option-actions');actions.append(add,groundLabel);binding.append(actions);
     if(current){const remove=el('button','l2d-btn quiet',t('移除选项','Remove option'));remove.disabled=saving||!ready;remove.onclick=()=>{if(saving||!ready)return;g.options=g.options.filter(o=>o.id!==current.id);picks[g.id]='default';optionId='default';resource=null;changed();paintTargets();paintResources();sendWardrobe();};binding.append(remove);}
     binding.append(el('p','l2d-bind-note',t('三栏各选一个，最多同时生效三个按钮。保存并安装后可在 Coo 装扮页切换。','Pick one per slot, up to three together. Save and install to switch them in Coo.')));
   }
@@ -197,7 +278,34 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     if(saving||!ready||discardPrompt||!bindings.length)return;
     discardPrompt=bindingDiscardPrompt(modal,zh,{title:t('全部恢复通用？','Reset all bindings?'),body:t('清空当前绑定，保留原生资源。点击保存后生效。','Clear all bindings and keep native resources. Save to apply.'),cancel:t('保留绑定','Keep bindings'),accept:t('全部恢复','Reset all')});
     const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive())return;
-    bindings=[];resource=null;rawMode=false;raw.textContent=t('组合效果','Combined');raw.setAttribute('aria-pressed','false');send('stop');changed();paintTargets();paintResources();play();
+    bindings=[];resource=null;rawMode=false;raw.textContent=t('组合效果','Combined');raw.setAttribute('aria-pressed','false');changed();paintTargets();paintResources();play();
+  };
+  const askGroup=()=>new Promise(resolve=>{
+    const dlg=el('dialog','l2d-modal l2d-group-modal');
+    const box=el('div','l2d-group-box');
+    box.append(el('div','l2d-modal-title',t('新建分组','New group')));
+    const zhName=el('input','l2d-input');zhName.placeholder=t('中文名，例如 发型','Chinese name, e.g. Hair');zhName.maxLength=24;
+    const enName=el('input','l2d-input');enName.placeholder=t('英文名（可选）','English name (optional)');enName.maxLength=24;
+    zhName.setAttribute('aria-label',t('分组中文名','Group name'));enName.setAttribute('aria-label',t('分组英文名','Group English name'));
+    const actions=el('div','l2d-group-actions');
+    const cancelBtn=el('button','l2d-btn',t('取消','Cancel')),okBtn=el('button','l2d-btn primary',t('创建','Create'));
+    actions.append(cancelBtn,okBtn);
+    box.append(zhName,enName,actions);dlg.append(box);ctx.root.append(dlg);
+    const done=value=>{try{dlg.close();}catch{}dlg.remove();resolve(value);};
+    cancelBtn.onclick=()=>done(null);
+    dlg.addEventListener('cancel',e=>{e.preventDefault();done(null);});
+    okBtn.onclick=()=>{const name=zhName.value.trim();if(!name){zhName.focus();return;}done({name,en:enName.value.trim()});};
+    zhName.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();okBtn.click();}});
+    enName.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();okBtn.click();}});
+    dlg.showModal();zhName.focus();
+  });
+  newGroup.onclick=async()=>{
+    if(page!=='wardrobe'||!ready||saving||discardPrompt)return;
+    const value=await askGroup();
+    if(!value||!alive())return;
+    const group={id:uid('g'),custom:true,name:value.name,...(value.en?{en:value.en}:{}),options:[]};
+    groups.push(group);groupId=group.id;optionId=null;resource=null;
+    changed();paintTargets();paintResources();sendWardrobe();
   };
   save.onclick=async()=>{if(saving||!ready||!sessionValid||discardPrompt||data.buildId&&!dirty&&!data.wardrobeNeedsSave)return;saving=true;syncControls();paintSelection();hint.textContent=t('保存并打包…','Saving & packing…');
     try{
@@ -207,22 +315,18 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     catch(error){hint.textContent=String(error.message||error);if(/编辑已过期|形象包已变化|原打包产物已移除/.test(hint.textContent)){sessionValid=false;previewError=hint.textContent;}ctx.ui.toast(hint.textContent,'bad');}
     finally{saving=false;if(alive()){syncControls();paintSelection();}}
   };
-  const mountPreview=async()=>{
-    cleanup();ready=false;previewError='';retry.hidden=true;hint.textContent=t('准备模型…','Preparing model…');syncControls();paintSelection();const generation=++serial;
-    cleanup=await mountBindingPreview(ctx,frame,data,alive,(type,message)=>{if(!alive()||generation!==serial)return;if(type==='ready'){ready=true;syncControls();paintTargets();paintSelection();play();}else if(type==='error'){ready=false;previewError=t('预览失败：','Preview failed: ')+message;hint.textContent=previewError;retry.hidden=false;syncControls();paintSelection();}});
-    if(!alive())cleanup();
-  };
-  retry.onclick=()=>{if(!saving&&sessionValid)void mountPreview();};
+  retry.onclick=play;
   syncControls();
   try{
     data=await ctx.invoke(method,requestedToken?[...args,requestedToken]:args);
+    resolution.value=String([256,512,1024].includes(data.previewSize)?data.previewSize:512);
     if(data.token!==requestedToken)ctx.notifyOnUnmount?.('manualClose',[data.token]);
     if(!alive()){if(!ctx.signal?.aborted)ctx.invoke('manualClose',[data.token]).catch(()=>{});return {get closed(){return closed;},dispose:release};}
-    bindings=structuredClone(data.bindings||[]);groups=fixedWardrobeGroups(data.wardrobe||[]);data.wardrobe=structuredClone(groups);changed();heading.querySelector('.l2d-modal-sub').textContent=data.title;paintTargets();paintResources();
+    bindings=structuredClone(data.bindings||[]);groups=fixedWardrobeGroups(data.wardrobe||[]).map((g,i)=>({...g,...(i>=3?{custom:true}:{})}));data.wardrobe=structuredClone(groups);changed();heading.querySelector('.l2d-modal-sub').textContent=data.title;paintTargets();paintResources();
     if(data.truncated||data.warnings?.length)right.prepend(el('p','l2d-bind-empty',t('部分资源未能读取，列表可能不完整','Some resources could not be read; the list may be incomplete')));
     if(data.truncated)hint.textContent=t('资源扫描不完整，请核对模型内容','Resource scan is incomplete; check the model');
     leaseTimer=win.setInterval(()=>{if(alive())ctx.invoke('manualKeepAlive',[data.token]).catch(error=>{if(alive()&&/编辑已过期|编辑已取消/.test(String(error.message||error))){sessionValid=false;previewError=String(error.message||error);hint.textContent=previewError;syncControls();}});},60000);
-    await mountPreview();
+    loadPreview();
   }catch(error){if(alive())hint.textContent=String(error.message||error);}
   return {get closed(){return closed;},dispose(){leave?.dispose?.();release();}};
 }
@@ -239,8 +343,27 @@ const NOTICE_TEXT = {
   en: 'Generated figure packs contain Live2D Cubism Core. Use these packs locally; do not upload, share or redistribute them. Models, textures and third-party components remain subject to their respective licenses.',
 };
 
-// Both the primary configuration page and its quick popup use this form.
-function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDisposed = () => ctx.signal?.aborted } = {}) {
+// Theme only extension-owned roots. Restore inherited host values on unmount.
+function applyAppearance(root, cfg) {
+  const preferences=normalizeAppearance(cfg),classic=preferences.uiStyle==='classic';
+  const appearance=classic?{...preferences,gearTheme:'purple',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'off',uiButtonFill:'solid'}:preferences;
+  const theme=GEAR_THEMES.find(t=>t.id===appearance.gearTheme);
+  root.classList.add('l2d-themed');
+  for(const [key,value] of Object.entries(appearance)) root.dataset[key]=value;
+  root.style.setProperty('--appearance-accent',theme.color);
+  root.style.setProperty('--gear-max-color',classic?theme.color:'var(--appearance-effective, '+theme.color+')');
+  root.style.setProperty('--gear-max-fill',theme.fill);
+  root.style.setProperty('--gear-spark-glow',theme.glow);
+}
+function ownAppearance(root) {
+  const keys=Object.keys(normalizeAppearance()),props=['--appearance-accent','--gear-max-color','--gear-max-fill','--gear-spark-glow'];
+  const data=keys.map(k=>root.dataset[k]),styles=props.map(k=>[root.style.getPropertyValue(k),root.style.getPropertyPriority(k)]),hadClass=root.classList.contains('l2d-themed');
+  let restored=false;
+  return ()=>{if(restored)return;restored=true;keys.forEach((k,i)=>{if(data[i]===undefined)delete root.dataset[k];else root.dataset[k]=data[i];});props.forEach((k,i)=>{if(styles[i][0])root.style.setProperty(k,...styles[i]);else root.style.removeProperty(k);});if(!hadClass)root.classList.remove('l2d-themed');};
+}
+
+// Primary configuration and the quick popup share saving and dependency handling.
+function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNotice, onSaved, onAppearance, isDisposed = () => ctx.signal?.aborted } = {}) {
   const doc = ctx.root.ownerDocument;
   const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
   const t = (a, b) => zh ? a : b;
@@ -255,6 +378,23 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
   const dirty = {};
   const controls = [];
   const fields = new Map();
+  const appearance=normalizeAppearance(cfg);
+  const paintAppearance=()=>{
+    applyAppearance(body,appearance);onAppearance?.(appearance);
+    if(appearanceOnly)for(const input of controls){if(input.type==='radio'&&input.name!=='l2d-uiStyle'){input.disabled=appearance.uiStyle==='classic';input.closest('.l2d-setting-row').classList.toggle('inactive',input.disabled);}}
+  };
+  paintAppearance();
+  function appearanceField(key,title,hint,choices){
+    const row=el('div','l2d-setting-row l2d-appearance-row'),label=el('span','l2d-setting-label');label.append(el('span',null,title),el('small',null,hint));
+    const group=el('div',key==='gearTheme'?'l2d-theme-options':'l2d-particle-options');group.style.setProperty('--appearance-options',String(choices.length));group.setAttribute('role','radiogroup');group.setAttribute('aria-label',title);
+    for(const choice of choices){
+      const option=el('label','l2d-appearance-option'),input=el('input','l2d-appearance-radio');input.type='radio';input.name='l2d-'+key;input.value=choice.id;input.checked=appearance[key]===choice.id;input.setAttribute('aria-label',zh?choice.name:choice.en);
+      const icon=el('span',key==='gearTheme'?'l2d-theme-swatch':'l2d-particle-icon',key==='gearTheme'?null:choice.icon);icon.setAttribute('aria-hidden','true');if(choice.fill){icon.style.background=choice.fill;option.style.setProperty('--choice-color',choice.color);}
+      option.append(input,icon,el('span',null,zh?choice.name:choice.en));group.append(option);controls.push(input);
+      input.addEventListener('change',()=>{if(input.disabled||!input.checked)return;appearance[key]=choice.id;paintAppearance();dirty['worlds.figure.'+key]=choice.id;});
+    }
+    row.append(label,group);body.append(row);
+  }
   function field(key, title, hint, type, choices) {
     const row = el('label', 'l2d-setting-row');
     const label = el('span', 'l2d-setting-label');
@@ -279,7 +419,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
       input = el('input', 'l2d-gear-input');
       input.type = 'range'; input.min = '0'; input.max = String(choices.length - 1); input.step = '1';
       const initial = choices.findIndex(([v]) => v === cfg[key]);
-      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : key === 'adaptationMode' ? 'none' : 'auto')) : initial);
+      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'previewSize' ? '512' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : key === 'adaptationMode' ? 'none' : 'auto')) : initial);
       readValue = () => choices[Number(input.value)][0];
       paint = () => {
         const index = Number(input.value), title = choices[index][1];
@@ -301,6 +441,27 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
     fields.set(key,{input,paint,readValue,choices});
     controls.push(input); row.append(label, control || input); body.append(row); return input;
   }
+  let depend=()=>{};
+  if(appearanceOnly){
+    const preview=el('section','l2d-appearance-preview');preview.setAttribute('aria-label',t('外观实时预览','Live appearance preview'));
+    const intro=el('div','l2d-preview-intro');intro.append(el('strong',null,t('即刻看见你的风格','Your style, live')),el('small',null,t('滚动时保持悬浮，修改后自动保存','Stays visible while scrolling. Changes save automatically.')));
+    const bar=el('div','l2d-gear is-max l2d-preview-bar');bar.setAttribute('role','img');bar.setAttribute('aria-label',t('满档光效预览','Maximum effect preview'));
+    const track=el('span','l2d-gear-track'),fill=el('span','l2d-gear-fill'),sparks=el('span','l2d-gear-sparks');sparks.setAttribute('aria-hidden','true');
+    for(let i=0;i<10;i++){const spark=el('i');spark.style.cssText=`--spark-x:${8+i*8.4}%;--spark-y:${6+i*7%18}px;--spark-delay:${-i*.37}s;--spark-duration:${1.8+i%3*.4}s`;sparks.append(spark);}fill.append(sparks);track.append(fill,el('span','l2d-preview-thumb'));bar.append(track);
+    const samples=el('div','l2d-preview-samples'),sample=el('div','l2d-card l2d-preview-card');sample.append(el('strong',null,t('模型卡片','Model card')),el('small',null,t('材质与层次预览','Material and depth')));
+    const button=el('button','l2d-btn primary',t('主要按钮','Primary button'));button.type='button';button.disabled=true;
+    const input=el('input','l2d-input');input.value=t('输入框预览','Input preview');input.readOnly=true;input.setAttribute('aria-label',input.value);
+    samples.append(sample,input,button);preview.append(intro,bar,samples);body.append(preview);
+    appearanceField('uiStyle',t('外观方案','Appearance preset'),t('默认恢复改红色之前的完整样式；保留自定义选择','Default restores the original blue and purple style; custom choices are kept'),UI_STYLES);
+    appearanceField('gearTheme',t('主题配色','Theme colour'),t('按钮、选中状态与满档光效统一换色','Colours buttons, selections and maximum effects'),GEAR_THEMES);
+    appearanceField('uiButtonFill',t('按钮填色','Button fill'),t('主要按钮使用纯色或渐变','Solid or gradient fill for primary buttons'),UI_BUTTON_FILLS);
+    appearanceField('uiMaterial',t('界面材质','Material'),t('应用于卡片、面板和弹窗','Applies to cards, panels and dialogs'),UI_MATERIALS);
+    appearanceField('uiMode',t('明暗风格','Brightness'),t('只改变本扩展的界面','Applies only to this extension'),UI_MODES);
+    appearanceField('uiCorners',t('边角风格','Corners'),t('保持控件大小与布局','Keeps control sizes and layout'),UI_CORNERS);
+    appearanceField('uiGlow',t('光效强度','Glow'),t('调整按钮与面板的光晕','Adjusts button and panel glow'),UI_GLOWS);
+    appearanceField('particleEffect',t('粒子效果','Particle effect'),t('六种动态效果；悬浮预览随调整更新','Six effects; the floating preview updates as you adjust'),GEAR_PARTICLES);
+    paintAppearance();
+  } else {
   field('cover', t('生成封面', 'Generate cover'), t('同时自动调整模型取景', 'Also fits the model framing'), 'checkbox');
   const quality = field('quality',t('画质','Quality'),t('画布随显示大小调整；原图不设软件精度上限。已有形象需重新打包安装。','Canvas follows display size; Original has no software cap. Repack existing figures to apply.'),'gear',[['economy',t('流畅','Smooth')],['balanced',t('标准','Standard')],['high',t('高清','HD')],['original',t('原图','Original')]]);
   const texture = field('texture', t('贴图精度', 'Texture resolution'), t('原图档可调整；较小的贴图占用更少显存', 'Adjustable in Original mode; smaller textures use less VRAM'), 'gear', ['512','1024','2048','4096','original'].map(value=>[value,value==='original'?t('原精度','Original'):value+' px']));
@@ -322,6 +483,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
     texture.addEventListener(event,()=>{if(quality.value==='3'){customTexture=fields.get('texture').readValue();syncQuality();}});
   }
   syncQuality();
+  field('previewSize',t('预览精度','Preview resolution'),t('仅影响动作与装扮对照图；默认 512','Only affects action and wardrobe comparison images; default 512'),'gear',['256','512','1024'].map(v=>[v,v+' px']));
   field('clean', t('清理', 'Clean'), '', 'checkbox');
   field('autoDelete', t('安装后删除打包产物', 'Delete pack after installation'), t('仅在安装成功后执行，保留原始素材', 'Only after a successful install; source files are kept'), 'checkbox');
   const folder = field('figuresDir', t('安装目录', 'Install folder'), t('通常无需修改', 'Usually no change needed'), 'text');
@@ -347,7 +509,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
   const automatic = field('assistAuto',t('自动安装','Automatic installation'),t('满足安装条件后自动执行；需要确认时暂停','Install when requirements are met; pause for confirmation when needed'),'checkbox');
   const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
   roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
-  const depend = () => {
+  depend = () => {
     syncQuality();
     for (const input of [gear,automatic,roots,depth]) {
       input.disabled = mode.value !== '2' || input === depth && gear.value !== '2';
@@ -355,6 +517,7 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
     }
   };
   mode.addEventListener('change',depend); mode.addEventListener('input',depend); gear.addEventListener('change',depend); gear.addEventListener('input',depend); depend();
+  }
   const actions = el('div', 'l2d-dialog-actions');
   if (onNotice) {
     const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
@@ -403,32 +566,46 @@ function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDispose
 }
 
 const configuration = {
-  // Local Coo configuration renderer hook; ordinary hosts retain the schema view.
-  panelId: 'workbench',
   async mount(ctx) {
     const [cfg, state] = await Promise.all([ctx.invoke('settings', []), ctx.invoke('state', [])]);
     if (ctx.signal?.aborted) return;
+    const restoreAppearance=ownAppearance(ctx.root);applyAppearance(ctx.root,cfg);
     const doc = ctx.root.ownerDocument;
     const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
     const shell = doc.createElement('section'); shell.className = 'l2d-config-page';
     const header = doc.createElement('header'); header.className = 'l2d-config-header';
-    const title = doc.createElement('h2'); title.textContent = zh ? '配置' : 'Configuration';
+    const title = doc.createElement('h2'); title.textContent = zh ? '模型设置' : 'Model settings';
     const version = doc.createElement('span'); version.className = 'l2d-version-corner'; version.textContent = 'v' + state.version;
     header.append(title, version);
     const form = settingsForm(ctx, cfg, {autosave:true});
     shell.append(header, form); ctx.root.append(shell);
-    return {dispose() { shell.remove(); }};
+    return {dispose() { shell.remove();restoreAppearance(); }};
   },
 };
 
 export default {
-  configuration,
   panels: {
+    settings: configuration,
+    appearance: {
+      async mount(ctx){
+        const [cfg,state]=await Promise.all([ctx.invoke('settings',[]),ctx.invoke('state',[])]);
+        if(ctx.signal?.aborted)return;
+        const restoreAppearance=ownAppearance(ctx.root),doc=ctx.root.ownerDocument,zh=String(ctx.language||'zh').startsWith('zh');
+        const shell=doc.createElement('section');shell.className='l2d-config-page l2d-appearance-page';
+        const header=doc.createElement('header');header.className='l2d-config-header';
+        const title=doc.createElement('h2');title.textContent=zh?'外观':'Appearance';
+        const version=doc.createElement('span');version.className='l2d-version-corner';version.textContent='v'+state.version;header.append(title,version);
+        const form=settingsForm(ctx,cfg,{autosave:true,appearanceOnly:true,onAppearance:value=>applyAppearance(ctx.root,value)});
+        shell.append(header,form);ctx.root.append(shell);
+        return {dispose(){shell.remove();restoreAppearance();}};
+      },
+    },
     workbench: {
       mount(ctx) {
         const ui = ctx.ui;
         const doc = ctx.root.ownerDocument;
         const win = doc.defaultView;
+        const restoreAppearance=ownAppearance(ctx.root);
         const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
         const t = (a, b) => (zh ? a : b);
         const el = (tag, cls, text) => {
@@ -454,9 +631,11 @@ export default {
         let assistPolling = false;
         let assistState = {enabled:false,plans:[]};
         const ownedOverlays = new Set();
+        let currentAppearance=normalizeAppearance();
         function showDialog(title, body) {
           overlay?.dispose?.();
           ownedOverlays.delete(overlay);
+          if(body?.nodeType===1)applyAppearance(body,currentAppearance);
           overlay = ui.drawer(title, body);
           if (overlay) ownedOverlays.add(overlay);
           return overlay;
@@ -1564,8 +1743,10 @@ export default {
 
         // Host calls the returned disposer when switching panels.
         setBusy(true, t('读取…', 'Loading…'));
-        Promise.all([loadCore(), ctx.invoke('state', [])]).then(async ([, initial]) => {
+        Promise.all([loadCore(), ctx.invoke('state', []),ctx.invoke('settings',[])]).then(async ([, initial,cfg]) => {
           if (disposed) return;
+          currentAppearance=normalizeAppearance(cfg);
+          applyAppearance(ctx.root,cfg);
           notice = initial.notice;
           version = initial.version;
 
@@ -1593,6 +1774,7 @@ export default {
           shell.remove();
           cancelOwnedImport();
           ctx.root.removeAttribute('aria-busy');
+          restoreAppearance();
         } };
       },
     },

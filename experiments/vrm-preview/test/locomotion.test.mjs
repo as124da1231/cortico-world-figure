@@ -30,7 +30,7 @@ test('authored locomotion turns, travels, settles and retains its landing in bot
       for (const bone of actor.bones.values()) assert.ok(bone.quaternion.toArray().every(Number.isFinite));
       maxError = Math.max(maxError, state.grounding.maxError);
     }
-    assert.ok(['left', 'start', 'walk', 'stop', 'idle'].every(phase => phases.has(phase)));
+    assert.ok(['left', 'walk', 'idle'].every(phase => phases.has(phase)));
     assert.equal(actor.locomotion.active, false);
     assert.ok(actor.vrm.scene.position.distanceTo(start) > .6, 'actor still walks in place');
     assert.ok(Math.abs(actor.locomotion.yaw) < .01, 'actor should turn back to the viewer');

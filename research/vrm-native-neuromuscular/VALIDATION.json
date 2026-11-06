@@ -1,0 +1,30 @@
+{
+  "validated_on": "2026-11-03",
+  "checks": {
+    "json_schema_fields": true,
+    "source_count": 72,
+    "unique_source_ids": 72,
+    "unique_primary_urls": 72,
+    "topic_count": 12,
+    "priority_P0": 38,
+    "markdown_files": 7,
+    "checked_local_links": 11,
+    "local_links_and_anchors_valid": true
+  },
+  "topic_counts": {
+    "VRM 标准与实现": 9,
+    "神经运动控制原理": 7,
+    "解剖模型与肌肉力学": 6,
+    "仿真与研究工具": 8,
+    "人工身体与协同设计": 5,
+    "全身肌肉控制": 8,
+    "控制降维与模型降阶": 6,
+    "接触与任务控制": 3,
+    "物理角色基线": 5,
+    "浏览器与实时部署": 5,
+    "数据模型与评估": 6,
+    "直接相关与表现边界": 4
+  },
+  "errors": [],
+  "scope": "Local index and document consistency only. No claim of live URL availability, framework execution, benchmark reproduction or legal clearance."
+}

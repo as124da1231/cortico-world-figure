@@ -43,11 +43,11 @@ async function mount(t, opts = {}) {
       if (method === 'noticeAccept') { ack = true; return { acknowledged: true, revision: 1 }; }
       if (method === 'list') return { dir: '', figuresDir: 'E:/test/figures', builds: opts.builds ?? [], installed: null, automation: opts.automation ?? {enabled:false,plans:[]} };
       if (method === 'detail') return { nameZh: '名字', aboutZh: '简介' };
-      if (method === 'settings') return { cover: true, clean: true, texture: 'original', quality: opts.quality ?? 'original', autoDelete: false, figuresDir: '' };
+      if (method === 'settings') return { cover: true, clean: true, texture: 'original', quality: opts.quality ?? 'original', gearTheme:opts.gearTheme,particleEffect:opts.particleEffect,autoDelete: false, figuresDir: '',...opts.appearanceValues };
       return { builds: opts.builds ?? [] };
     },
   };
-  const handle = await (opts.configuration ? panel.configuration : panel.panels.workbench).mount(ctx);
+  const handle = await (opts.appearance ? panel.panels.appearance : opts.configuration ? panel.configuration : panel.panels.workbench).mount(ctx);
   t.after(() => { handle.dispose(); dom.window.close(); });
   await tick();
   const button = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent === label);
@@ -77,6 +77,44 @@ test('auto-save serializes rapid edits and keeps the latest selection', async t 
   release();await tick();assert.equal(configCalls.length,2);
   assert.equal(configCalls[1].values['worlds.figure.texture'],'4096');
   release();await tick();assert.equal(guards[0](),null);
+});
+test('six themes and three particles preview independently and auto-save only the chosen preference',async t=>{
+ const {root,configCalls}=await mount(t,{appearance:true});const themes=root.querySelector('[role=radiogroup][aria-label="主题配色"]'),particles=root.querySelector('[role=radiogroup][aria-label="粒子效果"]');
+ assert.equal(themes.querySelectorAll('input').length,6);assert.equal(particles.querySelectorAll('input').length,3);assert.equal(themes.querySelector(':checked').value,'red');assert.equal(particles.querySelector(':checked').value,'stars');assert.equal(configCalls.length,0);
+ themes.querySelector('[value=cyan]').click();await tick();assert.equal(root.querySelector('form').dataset.gearTheme,'cyan');assert.equal(root.querySelector('form').dataset.particleEffect,'stars');
+ particles.querySelector('[value=meteors]').click();await tick();assert.deepEqual(configCalls.map(c=>c.values),[{'worlds.figure.gearTheme':'cyan'},{'worlds.figure.particleEffect':'meteors'}]);
+});
+test('appearance preferences persist and reopen while configuration and its quick popup stay focused',async t=>{
+ const cfg={cover:true,quality:'original',texture:'original'};const opts={appearance:true,invoke:method=>method==='settings'?{...cfg}:undefined,setConfig:async(_group,patch)=>{for(const[key,value]of Object.entries(patch))cfg[key.replace('worlds.figure.','')]=value;}};
+ const e=await mount(t,opts);e.root.querySelector('[name=l2d-uiMaterial][value=glass]').click();await tick();e.root.querySelector('[name=l2d-gearTheme][value=green]').click();await tick();e.root.querySelector('[name=l2d-particleEffect][value=glow]').click();await tick();
+ assert.deepEqual(e.configCalls.map(c=>c.values),[{'worlds.figure.uiMaterial':'glass'},{'worlds.figure.gearTheme':'green'},{'worlds.figure.particleEffect':'glow'}]);
+ const reopened=await mount(t,opts);assert.equal(reopened.root.querySelector('[value=glass]').checked,true);assert.equal(reopened.root.querySelector('[value=green]').checked,true);assert.equal(reopened.root.querySelector('[value=glow]').checked,true);
+ const quick=await mount(t,{...opts,appearance:false,ack:true});quick.button('设置').click();await tick();assert.equal(quick.root.querySelector('[role=radiogroup]'),null);assert.equal(quick.root.querySelector('form').dataset.gearTheme,'green');assert.equal(quick.root.dataset.uiMaterial,'glass');
+});
+test('unknown appearance values fall back visually without writing a replacement configuration',async t=>{
+ const e=await mount(t,{appearance:true,gearTheme:'bad',particleEffect:'bad',appearanceValues:{uiMode:'bad',uiCorners:'bad',uiMaterial:'bad',uiGlow:'bad'}});assert.equal(e.root.querySelector('form').dataset.gearTheme,'red');assert.equal(e.root.querySelector('form').dataset.particleEffect,'stars');assert.equal(e.root.dataset.uiMaterial,'matte');assert.equal(e.root.dataset.uiMode,'auto');assert.equal(e.configCalls.length,0);
+});
+
+test('appearance preview stays at maximum and saves serialized changes with retry and leave protection',async t=>{
+ let fail=true;const e=await mount(t,{appearance:true,setConfig:async()=>{if(fail)throw Error('offline');}});
+ assert.ok(e.root.querySelector('.l2d-preview-bar.is-max .l2d-gear-sparks'));assert.equal(e.root.querySelector('.l2d-preview-bar input'),null);assert.equal(e.root.querySelectorAll('.l2d-gear-input').length,0);
+ e.root.querySelector('[name=l2d-uiMode][value=dark]').click();await tick();assert.equal(e.root.dataset.uiMode,'dark');assert.match(e.guards[0](),/尚未保存/);fail=false;e.button('重试保存').click();await tick();assert.equal(e.guards[0](),null);
+ assert.deepEqual(e.configCalls[1].values,{'worlds.figure.uiMode':'dark'});e.handle.dispose();assert.equal(e.root.classList.contains('l2d-themed'),false);assert.equal(e.root.dataset.uiMode,undefined);assert.equal(e.root.style.getPropertyValue('--gear-max-fill'),'');
+});
+
+test('default preset restores pre-red styling while retaining every custom preference',async t=>{
+ const cfg={gearTheme:'cyan',particleEffect:'meteors',uiMaterial:'metal',uiMode:'dark',uiCorners:'crisp',uiGlow:'vivid',uiButtonFill:'gradient'};
+ const e=await mount(t,{appearance:true,appearanceValues:cfg});e.root.querySelector('[name=l2d-uiStyle][value=classic]').click();await tick();
+ assert.equal(e.root.dataset.gearTheme,'purple');assert.equal(e.root.dataset.particleEffect,'stars');assert.equal(e.root.dataset.uiMode,'auto');assert.equal(e.root.dataset.uiGlow,'off');assert.equal(e.root.querySelector('[value=metal]').disabled,true);
+ assert.deepEqual(e.configCalls[0].values,{'worlds.figure.uiStyle':'classic'});assert.equal(e.root.querySelector('[name=l2d-gearTheme][value=cyan]').checked,true);
+ e.root.querySelector('[name=l2d-uiStyle][value=custom]').click();await tick();for(const[key,value]of Object.entries(cfg))assert.equal(e.root.dataset[key],value);assert.equal(e.root.querySelector('[value=metal]').disabled,false);
+ assert.deepEqual(e.configCalls[1].values,{'worlds.figure.uiStyle':'custom'});
+});
+
+test('button fill is an independent saved preference',async t=>{
+ const e=await mount(t,{appearance:true});e.root.querySelector('[name=l2d-uiButtonFill][value=solid]').click();await tick();
+ assert.equal(e.root.dataset.uiButtonFill,'solid');assert.equal(e.root.dataset.gearTheme,'red');assert.deepEqual(e.configCalls[0].values,{'worlds.figure.uiButtonFill':'solid'});
+ const reopened=await mount(t,{appearance:true,appearanceValues:{uiButtonFill:'solid'}});assert.equal(reopened.root.querySelector('[name=l2d-uiButtonFill][value=solid]').checked,true);
 });
 
 test('failed primary auto-save retains dirty values and retries without reverting controls',async t=>{

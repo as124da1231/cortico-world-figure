@@ -19,9 +19,17 @@ const files = new Map([
   ['/style.css', [join(root, 'style.css'), 'text/css; charset=utf-8']],
   ['/app.js', [join(root, '.local/app.js'), 'text/javascript; charset=utf-8']],
   ['/licenses', [join(root, '.local/THIRD_PARTY_LICENSES.txt'), 'text/plain; charset=utf-8']],
+  ['/lab', [join(root, '.local/lab.html'), 'text/html; charset=utf-8']],
+  ['/lab.js', [join(root, '.local/lab.js'), 'text/javascript; charset=utf-8']],
+  ['/lab.css', [join(root, 'lab.css'), 'text/css; charset=utf-8']],
   ['/sample.vrm', [sample, 'model/gltf-binary']],
   ['/demo-speech.wav', [join(root, '.local/demo-speech.wav'), 'audio/wav']],
-  ...animationRoutes.map(url => [url, [url.startsWith('/animations/quaternius/') ? join(root, 'assets', url.slice(1)) : join(root, 'assets/animations/overte', url.slice('/animations/'.length)), 'model/gltf-binary']]),
+  ...animationRoutes.map(url => [url, [
+    url.startsWith('/animations/quaternius/') ? join(root, 'assets', url.slice(1))
+      : url.startsWith('/animations/mixamo/') ? join(root, 'assets', url.slice(1))
+        : join(root, 'assets/animations/overte', url.slice('/animations/'.length)),
+    'model/gltf-binary',
+  ]]),
 ]);
 const server = createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');

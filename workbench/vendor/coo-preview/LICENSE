@@ -1,20 +1,17 @@
-Coo 魔术人偶工坊 / Coo Marionette Atelier
-Copyright (C) 2026 as124da1231
+Coopanion is licensed under the GNU Affero General Public License, version 3 or (at
+your option) any later version, whose text follows, with the additional permission
+below. The permission covers every part of this repository, its packages included.
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published
-by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Additional permission under GNU AGPL version 3 section 7
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
+If you modify this Program, or any covered work, by linking or combining it with the
+Steamworks API redistributable libraries of Valve Corporation's Steamworks SDK
+(steam_api, steam_api64, libsteam_api), or a modified version of those libraries,
+containing parts covered by the terms of the Steamworks SDK Access Agreement, the
+licensors of this Program grant you additional permission to convey the resulting work.
 
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
+--------------------------------------------------------------------------------------
 
---------------------------------------------------------------------------------
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 

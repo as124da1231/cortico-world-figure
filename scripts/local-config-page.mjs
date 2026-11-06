@@ -32,12 +32,28 @@ export async function mountConfigurationOverride(host, pageId, groupIds, generat
 
 const originalHash = '39821b5d647ff08452e90ac90aa292d1ca0ec21743fe1b698b7603064ca50c8b';
 const marker = '/* figure-local-configuration-v1 */';
+const appearanceMarker = '/* figure-local-appearance-order-v1 */';
+// Coo 0.2.17 places all custom panels before its config tab. Keep this
+// application-only adaptation narrow; never touch other providers' ordering.
+export function orderFigureTabs(page,tabs) {
+  if(page?.id!=='world:figure')return tabs;
+  const appearance=tabs.find(tab=>tab.value==='appearance');
+  if(!appearance||!tabs.some(tab=>tab.value==='~config'))return tabs;
+  const ordered=tabs.filter(tab=>tab!==appearance);
+  ordered.splice(ordered.findIndex(tab=>tab.value==='~config')+1,0,appearance);
+  return ordered;
+}
 export function patchLocalHost(source) {
-  if (source.includes(marker)) return source;
-  if (createHash('sha256').update(source).digest('hex') !== originalHash) throw Error('Unknown Coo console build; refusing to overwrite it.');
-  const anchor = 'async showConfig(t,n,o){let{slot:i}=this.ensurePanes(),a=new Ro(this.deps.onError);this.mounted={pageId:t,panelId:rd,lifecycle:a};';
-  if (source.split(anchor).length !== 2) throw Error('Configuration entry point is not unique.');
-  return source.replace(anchor, anchor + marker + `if(await (${mountConfigurationOverride.toString()})(this,t,n,o,i,a))return;`);
+  if (!source.includes(marker)) {
+    if (createHash('sha256').update(source).digest('hex') !== originalHash) throw Error('Unknown Coo console build; refusing to overwrite it.');
+    const anchor = 'async showConfig(t,n,o){let{slot:i}=this.ensurePanes(),a=new Ro(this.deps.onError);this.mounted={pageId:t,panelId:rd,lifecycle:a};';
+    if (source.split(anchor).length !== 2) throw Error('Configuration entry point is not unique.');
+    source=source.replace(anchor, anchor + marker + `if(await (${mountConfigurationOverride.toString()})(this,t,n,o,i,a))return;`);
+  }
+  if(source.includes(appearanceMarker))return source;
+  const start='tabsOf(t){let n=Tr(t.prompts);return[',end='...this.toolsTabOf(t)?[{value:dp,label:Ct.toolsTab}]:[]]}toolsTabOf(t)';
+  if(source.split(start).length!==2||source.split(end).length!==2)throw Error('Unknown Coo tab entry point; refusing to overwrite it.');
+  return source.replace(start,'tabsOf(t){let n=Tr(t.prompts);return '+appearanceMarker+`(${orderFigureTabs.toString()})(t,[`).replace(end,'...this.toolsTabOf(t)?[{value:dp,label:Ct.toolsTab}]:[]])}toolsTabOf(t)');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

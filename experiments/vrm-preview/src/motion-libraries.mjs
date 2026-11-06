@@ -5,6 +5,13 @@ export const overteAssets = {
   'turn-left': '/animations/world-turn-left.vrma', 'turn-right': '/animations/world-turn-right.vrma',
 };
 const quaternius = name => `/animations/quaternius/${name}.vrma`;
+export const mixamoAssets = {
+  wave: '/animations/mixamo/wave.vrma',
+  nod: '/animations/mixamo/nod.vrma',
+  shake: '/animations/mixamo/shake.vrma',
+  bow: '/animations/mixamo/bow.vrma',
+  clap: '/animations/mixamo/clap.vrma',
+};
 export const libraryPreviews = [
   { id: 'preview-idle', name: '自然站立', note: '舒展的站姿', file: 'idle', loop: true, feet: false },
   { id: 'preview-talking', name: '交谈手势', note: '手臂与身体配合', file: 'talking', loop: true, feet: false },
@@ -24,6 +31,7 @@ export const motionLibraries = [
     note: '成品站姿、交谈与步态；起停和转身共用 Overte。',
     assets: { ...overteAssets, balanced: quaternius('idle'), 'rest-left': quaternius('idle'), 'rest-right': quaternius('idle'), talking: quaternius('talking'), 'walk-cycle': quaternius('walk'), ...Object.fromEntries(libraryPreviews.map(entry => [entry.id, quaternius(entry.file)])) } },
   { id: 'overte', name: 'Overte · 柔和', source: 'Overte / Hanami VRMA', note: '保留上一轮的慢走、重心变化和交谈。', assets: overteAssets },
+  { id: 'mixamo', name: 'Mixamo · 动捕', source: 'Mixamo (Adobe) / 本地烘焙', note: '只保留已下载并转换成 VRMA 的片段。', assets: mixamoAssets },
 ];
 export const animationRoutes = [...new Set(motionLibraries.flatMap(library => Object.values(library.assets)))];
 export const overtePreviews = [

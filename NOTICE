@@ -1,5 +1,5 @@
 Coo 魔术人偶工坊 / Coo Marionette Atelier
-Copyright (C) 2026 as124da1231
+Copyright (C) 2026 lian0721
 
 本包以 GNU Affero General Public License v3.0 or later 发布，完整文本见 LICENSE。
 打包产物（figure pack）不复制 body.js / rig.js：包里的 figure.js 只调用宿主传入的

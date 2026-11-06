@@ -1,24 +1,43 @@
-export const WARDROBE_SLOTS = [
+﻿export const WARDROBE_SLOTS = [
   {slot:'outfit',id:'lookoutfit',name:'装扮',en:'Outfit'},
   {slot:'parts',id:'lookparts',name:'部件',en:'Parts'},
   {slot:'accessories',id:'lookaccessories',name:'配饰',en:'Accessories'},
 ];
 
 // Preserve legacy axis/option IDs so existing picks survive the next save.
+// 内置三栏固定在最前；其余分组（自定义）按原顺序追加在后面。
 export function fixedWardrobeGroups(groups=[]) {
-  if(!Array.isArray(groups)||groups.length>3)throw Error('最多支持装扮、部件、配饰三个栏位；旧分组超出上限时保留原包');
-  const assigned=new Map(),pending=[];
+  if(!Array.isArray(groups))throw Error('装扮分组无效');
+  const assigned=new Map(),waiting=[],custom=[];
   for(const group of groups){
     if(!group||typeof group!=='object'||!Array.isArray(group.options))throw Error('装扮分组无效');
     const slot=group.slot?WARDROBE_SLOTS.find(s=>s.slot===group.slot):WARDROBE_SLOTS.find(s=>s.name===group.name||s.en===group.name);
-    if(group.slot&&!slot||slot&&assigned.has(slot.slot))throw Error('装扮栏位重复或无效');
-    if(slot)assigned.set(slot.slot,group);else pending.push(group);
+    if(group.slot&&!slot)throw Error('装扮栏位无效');
+    if(slot){if(assigned.has(slot.slot))throw Error('装扮栏位重复');assigned.set(slot.slot,group);}
+    else if(group.custom)custom.push(group);else waiting.push(group);
   }
-  for(const slot of WARDROBE_SLOTS)if(!assigned.has(slot.slot)&&pending.length)assigned.set(slot.slot,pending.shift());
-  const used=new Set(groups.map(g=>g.id));
-  return WARDROBE_SLOTS.map(slot=>{
-    const group=assigned.get(slot.slot);let id=group?.id||slot.id;
-    if(!group&&used.has(id)){let n=1;while(used.has(id=slot.id+n))n++;}used.add(id);
-    return {id,slot:slot.slot,name:slot.name,options:(group?.options||[]).map(o=>({...o}))};
-  });
+  // 老包可能没有 slot 字段：按顺序补进空着的内置栏。
+  for(const slot of WARDROBE_SLOTS)if(!assigned.has(slot.slot)&&waiting.length)assigned.set(slot.slot,waiting.shift());
+
+  const used=new Set();
+  const unique=base=>{let id=base,n=1;while(used.has(id))id=`${base}${n++}`;used.add(id);return id;};
+
+  const out=[];
+  for(const slot of WARDROBE_SLOTS){
+    const group=assigned.get(slot.slot);
+    const id=unique(group?.id||slot.id);
+    out.push({id,slot:slot.slot,name:slot.name,options:(group?.options||[]).map(o=>({...o}))});
+  }
+  for(const group of custom){
+    if(!group.options.length&&!String(group.name||'').trim())continue;
+    const id=unique(String(group.id||'').trim()||`custom${out.length+1}`);
+    out.push({
+      id,
+      custom: true,
+      name:String(group.name||id),
+      ...(group.en?{en:String(group.en)}:{}),
+      options:group.options.map(o=>({...o})),
+    });
+  }
+  return out;
 }

@@ -29,7 +29,9 @@ import {ManualSessions,LIBRARY,writeNativePack} from './manual.ts';
 import {findModels,inspectNative,nativeConfig} from '../workbench/tools/native-catalog.mjs';
 import {packFingerprint} from './pack-fingerprint.ts';
 import { qualityPolicy } from '../workbench/pack/backends/render-quality.js';
+import {previewSize} from './manual-preview.ts';
 import {wardrobeConfig} from '../workbench/pack/backends/wardrobe.js';
+import {GEAR_THEMES,GEAR_PARTICLES,UI_MATERIALS,UI_MODES,UI_CORNERS,UI_GLOWS,UI_STYLES,UI_BUTTON_FILLS,normalizeAppearance} from './gear-appearance.mjs';
 import {
   CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
   coreState, ensureCore,
@@ -53,6 +55,15 @@ export interface Live2dSection {
   /** 贴图最长边：2048 / 1024 / 512 / 4096，original = 原精度不缩放。 */
   texture?: string;
   quality?: string;
+  previewSize?: string;
+  gearTheme?: string;
+  particleEffect?: string;
+  uiMaterial?: string;
+  uiMode?: string;
+  uiCorners?: string;
+  uiGlow?: string;
+  uiStyle?: string;
+  uiButtonFill?: string;
   clean?: boolean;
   adaptationMode?: string;
   assistMotions?: boolean;
@@ -227,7 +238,8 @@ export class Live2dWorld implements World {
         id: 'workbench',
         title: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
         description: zh ? '拖入、粘贴或选择文件夹 / ZIP，一键打包' : 'Drop, paste or choose a folder / ZIP, then pack',
-      }],
+      }, {id:'settings',title:zh?'模型设置':'Model settings',description:zh?'画质、适配与安装':'Quality, adaptation and installation'},
+      {id:'appearance',title:zh?'外观':'Appearance',description:zh?'配色、材质与光效':'Colour, materials and light'}],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
       stream: (panel, socket) => {
         if (panel !== 'workbench') return;
@@ -241,7 +253,7 @@ export class Live2dWorld implements World {
   }
 
   private async invoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState', 'manualAsset', 'manualClose', 'manualKeepAlive'].includes(method);
+    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState', 'manualPreview', 'manualClose', 'manualKeepAlive'].includes(method);
     if (this.stopping) throw new Error('扩展正在停止');
     if (readOnly) return this.dispatch(panel, method, args);
     if (panel === 'workbench' && method === 'assistApprove') {
@@ -260,7 +272,7 @@ export class Live2dWorld implements World {
   }
 
   private async dispatch(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    if (panel !== 'workbench') throw new Error(`未知面板：${panel}`);
+    if (panel !== 'workbench' && !(['appearance','settings'].includes(panel) && ['settings','state'].includes(method))) throw new Error(`未知面板：${panel}`);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();
 
     if (method === 'state') {
@@ -268,11 +280,11 @@ export class Live2dWorld implements World {
     }
     if (method === 'settings') {
       const cfg = this.opts.getConfig();
-      return { cover: cfg.cover !== false, texture: cfg.texture || 'original', quality: qualityPolicy(cfg).mode, clean: Boolean(cfg.clean),
+      return { cover: cfg.cover !== false, texture: cfg.texture || 'original', quality: qualityPolicy(cfg).mode, previewSize:String(previewSize(cfg.previewSize)), ...normalizeAppearance(cfg),clean: Boolean(cfg.clean),
         autoDelete: Boolean(cfg.autoDelete), figuresDir: cfg.figuresDir || '',
         adaptationMode: adaptationMode(cfg), assistMotions: aiEnabled(cfg), assistGear: automationMode(cfg).gear, assistDepth: automationMode(cfg).configuredDepth, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
     }
-    if (method === 'manualAsset') return this.manual.asset(String(args[0]),String(args[1]),Number(args[2]||0));
+    if (method === 'manualPreview') return this.manual.preview(String(args[0]),args[1]);
     if (method === 'manualClose') { await this.manual.close(String(args[0])); return {ok:true}; }
     if (method === 'manualKeepAlive') { this.manual.get(String(args[0])); return {ok:true}; }
     if (method === 'manualOpen' || method === 'manualOpenBuild') return this.openManual(method,args);
@@ -681,7 +693,7 @@ export class Live2dWorld implements World {
       const rec=this.state.builds?.find(b=>b.id===String(args[0]));
       if(!rec?.manualAvailable)throw Error('请重新导入模型以编辑原生动作');
       const library=JSON.parse(await readFile(join(rec.packDir,LIBRARY),'utf8'));
-      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id,requestedToken,library.wardrobe||[]);
+      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id,requestedToken,library.wardrobe||[],this.opts.getConfig().previewSize);
     }
     const token=String(args[0]),dir=String(args[1]);
     const paths=await this.importer.preserveForAutomation(token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
@@ -693,9 +705,9 @@ export class Live2dWorld implements World {
     if(!core.ok)throw Error('请先获取 Live2D 核心组件');
     const scratch=join(this.workRoot(),'manual-input-'+randomUUID());
     try{
-      const render={mode:'economy',textureLimit:512,canvasLimit:512,strict:false};
+      const render={mode:'economy',textureLimit:1024,canvasLimit:1024,strict:false};
       const pack=await buildPack(WORKBENCH_DIR,source,scratch,{corePath:core.file,modelFile:file,render,maxTexture:render.textureLimit,native:nativeConfig(catalog,[],{includeAll:true})});
-      const result=await this.manual.open(pack,catalog,[],model,undefined,requestedToken);
+      const result=await this.manual.open(pack,catalog,[],model,undefined,requestedToken,[],this.opts.getConfig().previewSize);
       this.manual.get(result.token).ownedRoot=scratch;return result;
     }catch(e){await rm(scratch,{recursive:true,force:true});throw e;}
   }
@@ -1025,6 +1037,15 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
           'x-hot': true,
         },
         'worlds.figure.quality': {type:'string',enum:['economy','balanced','high','original'],title:zh?'画质':'Quality',description:zh?'流畅／标准／高清／原图；原图不设软件精度上限，仅受设备能力限制':'Smooth / Standard / HD / Original; Original has no software resolution cap, subject to device limits','x-hot':true},
+        'worlds.figure.previewSize': {type:'string',enum:['256','512','1024'],title:zh?'预览精度':'Preview resolution',description:zh?'仅用于人工对照图，默认 512；正式打包画质独立':'Manual comparison images only; defaults to 512, independent of pack quality','x-hot':true},
+        'worlds.figure.gearTheme': {type:'string',enum:GEAR_THEMES.map(t=>t.id),title:zh?'主题配色':'Theme colour','x-hot':true},
+        'worlds.figure.particleEffect': {type:'string',enum:GEAR_PARTICLES.map(p=>p.id),title:zh?'粒子效果':'Particle effect','x-hot':true},
+        ...Object.fromEntries([
+          ['uiMaterial',UI_MATERIALS,zh?'界面材质':'Material'],['uiMode',UI_MODES,zh?'明暗风格':'Brightness'],
+          ['uiCorners',UI_CORNERS,zh?'边角风格':'Corners'],['uiGlow',UI_GLOWS,zh?'光效强度':'Glow'],
+          ['uiStyle',UI_STYLES,zh?'外观方案':'Appearance preset'],
+          ['uiButtonFill',UI_BUTTON_FILLS,zh?'按钮填色':'Button fill'],
+        ].map(([key,choices,title])=>['worlds.figure.'+key,{type:'string',enum:(choices as typeof UI_MATERIALS).map(c=>c.id),title,'x-hot':true}])),
         'worlds.figure.texture': {
           type: 'string',
           title: zh ? '贴图精度' : 'Texture size',

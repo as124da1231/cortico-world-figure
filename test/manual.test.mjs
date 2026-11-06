@@ -44,7 +44,7 @@ test('preview sessions expose only allowlisted chunks, detect changed packs and 
  assert.equal((await fetch(result.preview.url,{headers:{origin:'https://example.com'}})).status,403);
  assert.equal((await fetch(result.preview.url.replace(result.token,'00000000-0000-0000-0000-000000000000'))).status,404);
  const base=new URL('.',result.preview.url);assert.equal((await fetch(new URL('pack/native-library.json',base))).status,404);assert.equal((await fetch(result.preview.url,{method:'POST'})).status,405);
- const profile=await(await fetch(new URL('pack/models/sample/profile.js',base))).text();assert.match(profile,/textureLimit:512,canvasLimit:512/);assert.doesNotMatch(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/textureLimit:512/);
+ const profile=await(await fetch(new URL('pack/models/sample/profile.js',base))).text();assert.match(profile,/textureLimit:256,canvasLimit:256/);assert.doesNotMatch(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/textureLimit:256/);
  const bytes=await sessions.asset(result.token,'pack/figure.json',0);assert(Buffer.from(bytes.b64,'base64').length>0);
  await writeFile(join(pack,'changed.txt'),'changed');await assert.rejects(sessions.validate(result.token,binding),/变化/);
  await sessions.close(result.token);assert.equal(sessions.sessions.size,0);assert.equal((await readdir(join(root,'manual-preview'))).length,0);await assert.rejects(fetch(result.preview.url));

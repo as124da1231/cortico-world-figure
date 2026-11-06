@@ -62,6 +62,7 @@ export class AvatarPerformance {
       this.gestures.set(id, action);
     }
     this.locomotion = new Locomotion(vrm, height, this.mixer, animations, this.forward);
+    this.animations = animations; this.assetEntries = new Map(); this.assetPool = null;
     this.previews = new Map(); this.preview = null; this.pendingPreview = null; this.previewReleaseUntil = 0;
     for (const entry of previewsFor(this.library.id)) {
       const animation = animations.get(entry.id); if (!animation) continue;
@@ -146,7 +147,7 @@ export class AvatarPerformance {
     action.clampWhenFinished = true; action.fadeIn(.28).play();
     this.gesture = { id, action, source, loop };
   }
-  walk(target) {
+  walk(target, { pace = 1 } = {}) {
     if (!this.locomotion.available) return false;
     this.stopPreview(); this.pendingPreview = null;
     this.pendingGesture = null;
@@ -154,8 +155,8 @@ export class AvatarPerformance {
     // Full-body gestures yield the lower body; upper-body waves can coexist.
     if (this.gesture?.id === 'bow') this.playGesture('idle');
     const base = this.locomotion.basePosition;
-    const destination = target || base.clone().add(new THREE.Vector3(this.vrm.scene.position.x - base.x > .05 ? -this.height * .65 : this.height * .65, 0, this.height * .12));
-    return this.locomotion.walkTo(destination);
+    const destination = target || base.clone().add(new THREE.Vector3(this.vrm.scene.position.x - base.x > .05 ? -this.height * .78 : this.height * .78, 0, this.height * .1));
+    return this.locomotion.walkTo(destination, { pace });
   }
   playPreview(id, { loop } = {}) {
     const entry = this.previews.get(id); if (!entry) return false;
@@ -166,6 +167,29 @@ export class AvatarPerformance {
     action.stopFading().reset().setEffectiveWeight(0).setLoop(repeat ? THREE.LoopRepeat : THREE.LoopOnce, repeat ? Infinity : 1);
     action.clampWhenFinished = true; action.play();
     this.preview = { ...entry, at: this.time, loop: repeat, weight: 0 }; return true;
+  }
+  /**
+   * 动作绑定面板用：按资源键播放任意 VRMA，不受当前动作库限制。
+   * 池子由工作台注入（两套素材的并集），打包时这些键会被写进 profile。
+   */
+  attachAssetPool(pool) { this.assetPool = pool instanceof Map ? pool : null; }
+  playAsset(key, { loop = false, pool = null, chain = null } = {}) {
+    const source = pool instanceof Map ? pool : (this.assetPool || this.animations);
+    const animation = source?.get(key); if (!animation) return false;
+    if (this.locomotion.active) { try { this.locomotion.stop(); } catch { /* 预览优先 */ } }
+    this.playGesture('idle'); this.stopPreview(); this.captureBridge();
+    let entry = this.assetEntries.get(key);
+    if (!entry) {
+      const clip = createVRMAnimationClip(animation, this.vrm); clip.name = `asset-${key}`;
+      entry = { id: key, loop: false, feet: false, action: this.mixer.clipAction(clip) };
+      this.assetEntries.set(key, entry);
+    }
+    const action = entry.action; this.retiring = this.retiring.filter(item => item.action !== action);
+    action.stopFading().reset().setEffectiveWeight(0).setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
+    action.clampWhenFinished = true; action.play();
+    this.preview = { ...entry, at: this.time, loop, weight: 0, chain };
+    this.previewPool = source;
+    return true;
   }
   stopPreview() {
     this.pendingPreview = null;
@@ -328,7 +352,10 @@ export class AvatarPerformance {
       this.gesture.action.stop(); this.gesture = null;
     }
     if (this.preview && !this.preview.loop && this.time - this.preview.at >= this.preview.action.getClip().duration) {
+      const chain = this.preview.chain, pool = this.previewPool;
       this.preview.action.stop(); if (this.preview.feet) this.previewReleaseUntil = this.time + .15; this.preview = null;
+      // 坐下这类两段式动作：前一段播完自动接循环段。
+      if (chain) this.playAsset(chain, { loop: true, pool });
     }
     const hips = this.bones.get('hips');
     this.vrm.scene.updateMatrixWorld(true);

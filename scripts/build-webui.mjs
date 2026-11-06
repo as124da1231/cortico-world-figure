@@ -12,7 +12,7 @@ const keep = new Set();
 
 for (const [extension, field] of [['js', 'webUiClient'], ['css', 'webUiStyle']]) {
   const content=await readFile(join(source, extension === 'js' ? 'client.js' : 'styles.css'),'utf8');
-  const shared=extension==='js'?(await readFile(join(root,'workbench','pack','backends','wardrobe-slots.js'),'utf8')).replace(/^export /gm,'')+'\n'+await readFile(join(source,'manual.js'),'utf8')+'\n':'';
+  const shared=extension==='js'?(await readFile(join(root,'src','gear-appearance.mjs'),'utf8')).replace(/^export /gm,'')+'\n'+(await readFile(join(root,'workbench','pack','backends','wardrobe-slots.js'),'utf8')).replace(/^export /gm,'')+'\n'+await readFile(join(source,'manual.js'),'utf8')+'\n':'';
   const bytes = Buffer.from((shared+content).replace(/\r\n/g, '\n'));
   await writeFile(join(dist, `webui.${extension}`), bytes);
   const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12);

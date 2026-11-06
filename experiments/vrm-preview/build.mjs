@@ -41,6 +41,15 @@ export async function buildApp() {
     licenses.push(`Quaternius Universal Animation Library Standard — ${file}\n${await readFile(join(root, 'assets/animations/quaternius', file), 'utf8')}`);
   }
   await writeFile(join(root, '.local/THIRD_PARTY_LICENSES.txt'), licenses.join('\n\n'), 'utf8');
+  await build({
+    entryPoints: [join(root, 'src/lab/hand-view.js')], outfile: join(root, '.local/lab.js'),
+    nodePaths: [dependencies], bundle: true, format: 'esm', platform: 'browser',
+    target: 'chrome120', minify: true, legalComments: 'eof', logLevel: 'warning',
+  });
+  let lab = await readFile(join(root, 'lab.html'), 'utf8');
+  const labDigest = createHash('sha256').update(await readFile(join(root, '.local/lab.js'))).digest('hex').slice(0, 12);
+  lab = lab.replace('"./lab.js"', `"./lab.js?v=${labDigest}"`);
+  await writeFile(join(root, '.local/lab.html'), lab, 'utf8');
   let html = await readFile(join(root, 'index.html'), 'utf8');
   for (const file of ['app.js', 'style.css', 'file-entry.js']) {
     const bytes = await readFile(join(root, file === 'app.js' ? '.local/app.js' : file));

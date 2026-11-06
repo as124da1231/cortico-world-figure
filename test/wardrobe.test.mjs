@@ -9,14 +9,14 @@ test('wardrobe validates independent axes and rejects conflicting groups, action
  assert.throws(()=>wardrobeConfig(catalog,[...groups,{id:'lookother',name:'冲突',options:[{id:'on',name:'同参数',resource:'on'}]}]),/共用参数/);
  assert.throws(()=>wardrobeConfig(catalog,groups,[{word:'happy',resource:'on'}]),/共用参数/);
  assert.throws(()=>wardrobeConfig(catalog,[{...groups[0],options:[{id:'bad-id',name:'错误',resource:'on'}]}]),/选项无效/);
- assert.throws(()=>wardrobeConfig(catalog,[{...groups[0],id:'model'}]),/分组无效/);
+ assert.throws(()=>wardrobeConfig(catalog,[{...groups[0],id:'bad-id'}]),/分组无效/);
  const modelOnly={id:'model-only',kind:'motion',raw:{Curves:[{Id:'Opacity',Target:'Model',Segments:[0,1]}]}};
  assert.equal(wardrobeConfig({resources:[...catalog.resources,modelOnly]},groups,[{word:'wave',resource:'model-only'}]).groups.length,3);
  assert.throws(()=>wardrobeConfig(catalog,groups,[{word:'wave',resource:'emotion',release:'hat'}]),/共用参数/);
 });
-test('three fixed slots preserve legacy IDs and options; a fourth slot is rejected without dropping it',()=>{
+test('three fixed slots keep legacy IDs; extra groups are appended as custom slots',()=>{
  const old=[{...groups[0],name:'装扮'},groups[1]],fixed=fixedWardrobeGroups(old);assert.deepEqual(fixed.map(g=>g.name),['装扮','部件','配饰']);assert.equal(fixed[0].id,'lookglasses');assert.deepEqual(fixed[1].options,old[1].options);assert.deepEqual(fixedWardrobeGroups(fixed),fixed);
- assert.throws(()=>fixedWardrobeGroups([...old,{id:'looka',name:'第三',options:[]},{id:'lookb',name:'第四',options:[]}]),/三个栏位/);assert.equal(old[1].name,'帽子');
+  const out=fixedWardrobeGroups([...old,{id:'looka',custom:true,name:'发型',en:'Hair',options:[]}]);assert.equal(out.length,4);assert.equal(out[3].name,'发型');assert.equal(out[3].en,'Hair');assert.deepEqual(fixedWardrobeGroups(out),out);assert.equal(old[1].name,'帽子');
  assert.throws(()=>wardrobeConfig(catalog,[{...old[0],options:[{id:'bad',name:'多个',resource:['on','hat']}]}]),/选项无效/);
 });
 test('one native resource in each fixed slot produces three simultaneous held states',()=>{
@@ -37,4 +37,13 @@ test('add/multiply use model defaults without accumulation; motion options hold 
  const wardrobe=createWardrobe(model,new Map([['Glasses',0]]),new Map([['Arm',0]]),{parts:{Arm:.25}});
  wardrobe.configure(wardrobeConfig({resources:[expression('add','Glasses',.3,'Add')]},[{id:'lookg',name:'眼镜',options:[{id:'on',name:'戴',resource:'add'}]}]));wardrobe.select({lookg:'on'});for(let i=0;i<5;i++)wardrobe.apply();assert.equal(values[0],.5);
  wardrobe.configure(wardrobeConfig({resources:[motion]},[{id:'lookg',name:'状态',options:[{id:'on',name:'末帧',resource:'pose'}]}]));wardrobe.select({lookg:'on'});wardrobe.apply();assert.equal(parts[0],0);assert.equal(values[0],.6);wardrobe.select({});wardrobe.apply();assert.equal(parts[0],.25);assert.equal(values[0],.2);
+});
+
+test('custom group ids pass validation and keep their options',()=>{
+  const custom={id:'g1a2b3c4d5e6f',custom:true,name:'发型',en:'Hair',options:[{id:'on',name:'马尾',resource:'emotion'}]};
+  const out=wardrobeConfig(catalog,[...groups,custom]);
+  assert.equal(out.groups.length,4);
+  assert.equal(out.groups[3].id,'g1a2b3c4d5e6f');
+  assert.equal(out.groups[3].options[0].resource,'emotion');
+  assert.deepEqual(fixedWardrobeGroups([...groups,custom]).map(g=>g.name),['装扮','部件','配饰','发型']);
 });
