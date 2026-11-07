@@ -7,7 +7,7 @@ import {FigureAutomation,FIGURE_TOOL_DECLS} from '../src/automation.mjs';
 import {findModels,inspectNative,nativeConfig,validateBindings,curveSummary} from '../workbench/tools/native-catalog.mjs';
 import {compileCurve,createNativeActions,applyNativeValues} from '../workbench/pack/backends/native-actions.js';
 import {LIVE2D} from '../src/index.ts';
-import {makeCtx} from './_ctx.mjs';
+import {makeCtx,fixtureManifest} from './_ctx.mjs';
 import {PackImporter} from '../src/import.ts';
 import {installPack} from '../src/pipeline.ts';
 import {packFingerprint} from '../src/pack-fingerprint.ts';
@@ -185,7 +185,7 @@ test('a stalled submission can retry after cooldown and concurrent retries still
 
 test('ready-pack approval rejects changed runtime files and copied contents before replacing an installation',async t=>{
  const f=await automation(t),source=join(f.root,'ready');await mkdir(source);
- await json(join(source,'figure.json'),{id:'ready',entry:'figure.js'});await writeFile(join(source,'figure.js'),'old');
+ await json(join(source,'figure.json'),fixtureManifest({id:'ready'}));await writeFile(join(source,'figure.js'),'old');
  const model=(await f.auto.find(source)).models[0],plan=await f.auto.prepare(model.id,[]);await f.auto.approve(plan.id);
  const expected=await packFingerprint(source),target=await installPack(source,join(f.root,'installed'));
  await writeFile(join(source,'figure.js'),'new');
@@ -208,6 +208,29 @@ test('legacy figure plans migrate into the figure namespace without overwriting 
  await rm(resumed.file());await writeFile(legacy,JSON.stringify({version:1,plans:[{id:'other-app',model:{id:'unrelated'}}]}));
  const unrelated=new FigureAutomation(f.auto.options);await unrelated.start();t.after(()=>unrelated.stop());
  assert.equal(unrelated.pending().length,0);assert.equal(JSON.parse(await readFile(legacy,'utf8')).plans[0].id,'other-app');
+});
+
+test('disabling automatic installation during source validation requires approval',async t=>{
+ const f=await automation(t);f.cfg.assistAuto=true;
+ const plan=await f.auto.prepare(f.model.id,f.bindings);
+ const catalog=await f.auto.catalog(f.model.id);
+ let release,entered;
+ const pending=new Promise(resolve=>release=resolve);
+ const validating=new Promise(resolve=>entered=resolve);
+ f.auto.catalog=async()=>{entered();await pending;return catalog;};
+ const install=f.auto.install(plan.id);
+ await validating;f.cfg.assistAuto=false;release();
+ await assert.rejects(install,/真实同意/);
+ assert.equal(f.executions.length,0);
+});
+
+test('self-returning arm motion is bindable without a separate reset clip',async t=>{
+ const f=await fixture(t);
+ await json(join(f.dir,'Animation','wave.motion3.json'),{Meta:{Duration:1},Curves:[{Target:'Parameter',Id:'ParamArmR',Segments:[0,0,0,.5,1,0,1,0]}]});
+ const catalog=await inspectNative(f.model);
+ const resource=catalog.resources.find(r=>r.file.endsWith('/wave.motion3.json'));
+ assert.equal(resource.classification,'gesture');
+ assert.equal(validateBindings(catalog,[{word:'wave',resource:resource.id}]).length,1);
 });
 
 test('bounded generic discovery finds Chinese Animation/Exp3 and keeps unique stable resource IDs',async t=>{
@@ -256,7 +279,7 @@ test('verified proposal answers install once and replay the receipt without rein
 
 test('an installed pack stays successful when state persistence or Coo notification fails',async t=>{
  const f=await fixture(t),source=join(f.root,'ready');await mkdir(source);
- await json(join(source,'figure.json'),{id:'ready',entry:'figure.js',name:{zh:'现成形象'}});await writeFile(join(source,'figure.js'),'export default {};');
+ await json(join(source,'figure.json'),fixtureManifest({id:'ready',name:{zh:'现成形象'},export:'default'}));await writeFile(join(source,'figure.js'),'export default {};');
  const cfg={enabled:true,assistMotions:true,assistGear:'text',figuresDir:join(f.root,'installed')};
  const world=LIVE2D.create(makeCtx(f.root,cfg));await world.start({pushEvent:async()=>{throw Error('Coo event unavailable');}});t.after(()=>world.stop());
  const invoke=(method,args=[])=>world.webUi('zh').invoke('workbench',method,args);

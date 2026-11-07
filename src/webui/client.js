@@ -479,6 +479,10 @@ export default {
         const chooseFolder = el('button', 'l2d-btn', t('选择文件夹', 'Choose folder'));
         const chooseZip = el('button', 'l2d-btn', t('选择 ZIP', 'Choose ZIP'));
         const pack = el('button', 'l2d-btn primary', t('一键打包', 'Pack models'));
+        const installNow = el('button', 'l2d-btn primary', t('一键安装', 'Install now'));
+        const skipCover = el('button', 'l2d-btn sm', t('跳过封面', 'Skip cover'));
+        skipCover.type = 'button';
+        skipCover.hidden = true;
         const folderInput = doc.createElement('input');
         folderInput.type = 'file';
         folderInput.webkitdirectory = true;
@@ -489,11 +493,21 @@ export default {
         zipInput.accept = '.zip,application/zip';
         zipInput.hidden = true;
         toolbar.prepend(chooseFolder, chooseZip);
-        actions.append(pack);
+        actions.append(pack, installNow, skipCover);
         bar.append(dropZone, folderInput, zipInput);
         operation.append(bar,operationBottom);
         let staged = null;
-        const completed = new Set();
+        let currentCover = null;
+        const completed = new Map();
+        const installedSources = new Set();
+        function paintImportButtons(count) {
+          const direct = !assistState.enabled && assistState.adaptationMode !== 'manual';
+          pack.classList.toggle('primary', !direct);
+          pack.disabled = state.busy || !count || completed.size === count;
+          installNow.hidden = !direct;
+          installNow.disabled = state.busy || !count || installedSources.size === count;
+          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error && !r.canRetry)) pack.disabled = true;
+        }
         function paintSource() {
           const models = staged?.models ?? [];
           const packs = staged?.packs ?? [];
@@ -502,12 +516,11 @@ export default {
           sourceTitle.textContent = count ? names.slice(0, 3).join('、') + (count > 3 ? t(` 等 ${count} 项`, ` and ${count - 3} more`) : '') : t('拖入模型或 ZIP', 'Drop a model folder or ZIP');
           sourceTitle.title = names.join('\n');
           sourceHint.textContent = count
-            ? (assistState.enabled ? t(`已识别 ${count} 项 · 导入后自动交给 Coo，进展见下方`, `${count} recognized · sent to Coo automatically; see progress below`) : completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install') : t(`已识别 ${count} 项，可以开始打包`, `${count} recognized; ready to pack`))
+            ? (assistState.enabled ? t(`已识别 ${count} 项 · 导入后自动交给 Coo，进展见下方`, `${count} recognized · sent to Coo automatically; see progress below`) : installedSources.size === count ? t('已安装，可在 Coo 装扮中选择', 'Installed; choose in Coo Dress up') : completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install') : t(`已识别 ${count} 项，可以开始打包`, `${count} recognized; ready to pack`))
             : t('点击此区域后，按 Ctrl+V 粘贴文件或目录路径', 'Click here, then press Ctrl+V to paste files or a local path');
           dropZone.classList.toggle('ready', count > 0);
           dropZone.setAttribute('aria-disabled', String(state.busy));
-          pack.disabled = state.busy || !count || completed.size === count;
-          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error && !r.canRetry)) pack.disabled = true;
+          paintImportButtons(count);
           if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && r.canRetry)) pack.textContent = t('重新提交分析','Retry analysis');
         }
         paintSource();
@@ -746,8 +759,7 @@ export default {
           for (const b of [pack, chooseFolder, chooseZip, clearAll, settingsButton]) b.disabled = on;
           dropZone.setAttribute('aria-disabled', String(on));
           const count = (staged?.models?.length || 0) + (staged?.packs?.length || 0);
-          pack.disabled = on || !count || completed.size === count;
-          if (assistState.enabled && (assistState.submissions || []).some(r => r.token === staged?.token && !r.error && !r.canRetry)) pack.disabled = true;
+          paintImportButtons(count);
           for (const b of grid.querySelectorAll('button')) b.disabled = on;
           for (const input of modal?.querySelectorAll('button, input, textarea, select') ?? []) input.disabled = on;
           status.classList.toggle('busy', on);
@@ -848,6 +860,7 @@ export default {
               try {
                 const r = await ctx.invoke('remove', [b.id]);
                 state.builds = r.builds ?? [];
+                forgetRemovedPacks();
                 paint();
                 log.append(t('已删除 ', 'Deleted ') + b.id, 'dim');
                 ui.toast(t('已删除', 'Deleted'), 'ok');
@@ -880,6 +893,24 @@ export default {
           paint();
         }
 
+        function forgetRemovedPacks() {
+          const buildIds = new Set(state.builds.map(build => build.id));
+          for (const [key, buildId] of completed) {
+            if (!installedSources.has(key) && !buildIds.has(buildId)) completed.delete(key);
+          }
+        }
+
+        async function installBuild(id) {
+          const args = [state.dir, id ?? null];
+          const result = await ctx.invoke('install', args);
+          if (!result.replacementRequired || disposed) return result;
+          const confirmed = await ui.confirm({
+            title: t('替换同 ID 的形象？', 'Replace the figure with the same ID?'),
+            body: t('目标目录已有另一份形象包。确认后将先备份原包，再安装这份。', 'A different pack has the same ID. The current pack will be backed up before replacement.'),
+          });
+          return confirmed && !disposed ? ctx.invoke('install', [...args, true]) : null;
+        }
+
         async function run(kind, id) {
           if (state.busy) return;
           if (kind !== 'scan' && !ensureNotice()) return;
@@ -893,9 +924,8 @@ export default {
           setBusy(true, label + '…', undefined, kind);
           log.append(`→ ${label}`, 'dim');
           try {
-            const args = kind === 'install' && id ? [state.dir, id] : [state.dir];
-            const r = await ctx.invoke(kind, args);
-            if (disposed) return;
+            const r = kind === 'install' ? await installBuild(id) : await ctx.invoke(kind, [state.dir]);
+            if (disposed || !r) return;
             for (const line of r.log ?? []) log.append(line, 'dim');
             log.append(`✓ ${label} · ${((performance.now() - startedAt) / 1000).toFixed(1)}s`, 'plain');
             ui.toast(`${label} ✓`, 'ok');
@@ -916,7 +946,7 @@ export default {
         async function openBindings(method,args,onSaved) {
           if(state.busy || bindingOpening || bindingEditor || !ensureNotice())return;
           bindingOpening=true;
-          try{bindingEditor=await openBindingEditor(ctx,method,args,async()=>{onSaved?.();await refresh();},()=>{bindingEditor=null;});}
+          try{bindingEditor=await openBindingEditor(ctx,method,args,async result=>{onSaved?.(result);await refresh();},()=>{bindingEditor=null;});}
           catch(error){ui.toast(text(error),'bad');}
           finally{bindingOpening=false;if(bindingEditor?.closed)bindingEditor=null;}
         }
@@ -982,8 +1012,8 @@ export default {
             wrap.appendChild(input);
             card.appendChild(wrap);
           };
-          addField('name', t('名字', 'Name'), false, d.nameZh || d.nameEn || '');
-          addField('about', t('一句话', 'About'), true, d.aboutZh || d.aboutEn || '');
+          addField('name', t('名字', 'Name'), false, (zh ? d.nameZh || d.nameEn : d.nameEn || d.nameZh) || '');
+          addField('about', t('一句话', 'About'), true, (zh ? d.aboutZh ?? d.aboutEn : d.aboutEn ?? d.aboutZh) || '');
 
           const gainWrap = el('div', 'l2d-field');
           const gainTop = el('div', 'l2d-label-row');
@@ -1021,6 +1051,8 @@ export default {
           card.appendChild(styleWrap);
           const initialEdit = () => JSON.stringify([fields.name.value, fields.about.value, gain.value, style.value]);
           const initialValues = initialEdit();
+          const initialName = fields.name.value;
+          const initialAbout = fields.about.value;
           editDirty = () => initialEdit() !== initialValues;
 
           card.appendChild(el('div', 'l2d-hint', t(
@@ -1049,18 +1081,19 @@ export default {
             try {
               const name = fields.name.value.trim();
               const about = fields.about.value.trim();
-              await ctx.invoke('edit', [b.id, {
-                nameZh: name, nameEn: name,
-                aboutZh: about, aboutEn: about,
+              const patch = {
+                ...(fields.name.value !== initialName ? { [zh ? 'nameZh' : 'nameEn']: name } : {}),
+                ...(fields.about.value !== initialAbout ? { [zh ? 'aboutZh' : 'aboutEn']: about } : {}),
                 ...(d.tunable === false ? {} : {bodyGain:Number(gain.value),style:style.value}),
-              }]);
+              };
+              if (Object.keys(patch).length) await ctx.invoke('edit', [b.id, patch]);
               // 先就地更新卡片，再拉一次完整列表
               if (cardEl && name) {
                 const titleEl = cardEl.querySelector('.title');
                 if (titleEl) titleEl.textContent = name;
               }
-              b.nameZh = name;
-              b.nameEn = name;
+              if (patch.nameZh !== undefined) b.nameZh = name;
+              if (patch.nameEn !== undefined) b.nameEn = name;
               setBusy(false);
               closeEdit();
               ui.toast(t('已保存', 'Saved'), 'ok');
@@ -1137,14 +1170,14 @@ export default {
         const importView = {
           loading(label) { sourceTitle.textContent = label; sourceHint.textContent = ''; },
           note(title, detail, bad) {
-            staged = null; completed.clear(); paintSource();
+            staged = null; completed.clear(); installedSources.clear(); paintSource();
             sourceHint.textContent = [title, detail].filter(Boolean).join('：');
             dropZone.classList.toggle('bad', Boolean(bad));
           },
           result(result) {
             if (disposed) { cancelOwnedImport(result.token); return; }
             activeImportToken = result.token;
-            staged = result; completed.clear(); dropZone.classList.remove('bad');
+            staged = result; completed.clear(); installedSources.clear(); dropZone.classList.remove('bad');
             showAdaptation(null); paintSource();
             if (!(result.models?.length || result.packs?.length)) {
               sourceHint.textContent = result.problems?.map(p => p.reason).join('；') || t('未找到 .model3.json 或 figure.json', 'No .model3.json or figure.json found');
@@ -1153,7 +1186,7 @@ export default {
         };
 
         function clearSource() {
-          staged = null; completed.clear(); showAdaptation(null); paintSource();
+          staged = null; completed.clear(); installedSources.clear(); showAdaptation(null); paintSource();
           dropZone.classList.remove('bad');
         }
 
@@ -1244,7 +1277,21 @@ export default {
           return stageFolder(files, importView);
         }
 
-        async function buildSources() {
+        skipCover.addEventListener('click', async () => {
+          const cover = currentCover;
+          if (!cover || disposed || skipCover.disabled) return;
+          skipCover.disabled = true;
+          try {
+            await ctx.invoke('skipImportCover', [cover.token, cover.dir]);
+            if (!disposed && currentCover === cover) skipCover.textContent = t('已跳过封面', 'Cover skipped');
+          } catch (error) {
+            if (disposed || currentCover !== cover) return;
+            skipCover.disabled = false;
+            ui.toast(t('暂时无法跳过封面。', 'Could not skip the cover. ') + text(error), 'bad');
+          }
+        });
+
+        async function buildSources(installAfterBuild = false) {
           if (state.busy || !staged || !ensureNotice()) return;
           if (assistState.enabled) {
             setBusy(true,t('交给 Coo 分析…','Asking Coo to analyze…'),undefined,'import');
@@ -1254,7 +1301,7 @@ export default {
           }
           if (assistState.adaptationMode === 'manual' && staged.models?.length) {
             const next=staged.models.find(item=>!completed.has('importBuild:'+item.dir));
-            if(next) { await openBindings('manualOpen',[staged.token,next.dir],()=>{completed.add('importBuild:'+next.dir);}); return; }
+            if(next) { await openBindings('manualOpen',[staged.token,next.dir],result=>{completed.set('importBuild:'+next.dir,result.buildId);}); return; }
           }
           if (staged.models?.length && !coreReady()) { ui.toast(t('先获取 Live2D 核心组件', 'Fetch the Live2D core first'), 'bad'); return; }
           const pending = [
@@ -1262,18 +1309,38 @@ export default {
             ...(staged.packs ?? []).map(item => ({ ...item, method: 'importKeep' })),
           ];
           const token = staged.token;
-          setBusy(true, t('打包…', 'Packing…'), undefined, 'build');
+          setBusy(true, installAfterBuild ? t('打包并安装…', 'Packing and installing…') : t('打包…', 'Packing…'), undefined, 'build');
           let failed = 0;
+          let deferred = 0;
           for (const item of pending) {
             if (disposed) break;
             const key = item.method + ':' + item.dir;
-            if (completed.has(key)) continue;
+            if (installAfterBuild ? installedSources.has(key) : completed.has(key)) continue;
             try {
-              const result = await ctx.invoke(item.method, [token, item.dir, false]);
-              completed.add(key);
-              for (const line of result.log ?? []) log.append(line, 'dim');
-              if (result.adaptation) showAdaptation(result.adaptation);
-              if (result.warn) log.append('! ' + result.warn, 'warn');
+              if (!completed.has(key)) {
+                if (item.method === 'importBuild') {
+                  currentCover = { token, dir: item.dir };
+                  skipCover.textContent = t('跳过封面', 'Skip cover');
+                  skipCover.disabled = false;
+                  skipCover.hidden = false;
+                }
+                let result;
+                try { result = await ctx.invoke(item.method, [token, item.dir, false]); }
+                finally { currentCover = null; skipCover.hidden = true; }
+                completed.set(key, result.buildId);
+                for (const line of result.log ?? []) log.append(line, 'dim');
+                if (result.adaptation) showAdaptation(result.adaptation);
+                if (result.warn) log.append('! ' + result.warn, 'warn');
+              }
+              if (installAfterBuild && !disposed) {
+                const buildId = completed.get(key);
+                if (!buildId) throw Error(t('找不到这份打包记录', 'Pack record not found'));
+                const result = await installBuild(buildId);
+                if (!result) { deferred++; continue; }
+                installedSources.add(key);
+                for (const line of result.log ?? []) log.append(line, 'dim');
+                if (result.warn) log.append('! ' + result.warn, 'warn');
+              }
             } catch (e) {
               failed++; log.append(`! ${item.title || item.id || item.dir} · ${text(e)}`, 'bad');
             }
@@ -1284,9 +1351,12 @@ export default {
           if (disposed) { cancelOwnedImport(token); return; }
           sourceHint.textContent = failed
             ? t(`${failed} 项失败；再次点击只重试未完成项，详情见日志`, `${failed} failed; click again to retry unfinished items; see the log`)
+            : deferred ? t(`${deferred} 项已打包，等待确认替换`, `${deferred} packed; awaiting replacement approval`)
+            : installAfterBuild ? t('已安装，可在 Coo 装扮中选择', 'Installed; choose in Coo Dress up')
             : t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install');
           dropZone.classList.toggle('bad', failed > 0);
-          ui.toast(failed ? t('部分打包失败', 'Some items failed') : t('打包完成', 'Packing complete'), failed ? 'bad' : 'ok');
+          const done = installAfterBuild ? t('安装完成', 'Installation complete') : t('打包完成', 'Packing complete');
+          if (failed || !deferred) ui.toast(failed ? t('部分操作失败，见日志', 'Some items failed; see log') : done, failed ? 'bad' : 'ok');
         }
 
         function accessibleModal(node, title) {
@@ -1317,7 +1387,8 @@ export default {
           catch (e) { importView.note(t('导入失败', 'Import failed'), text(e), true); }
           finally { zipInput.value = ''; }
         });
-        pack.addEventListener('click', buildSources);
+        pack.addEventListener('click', () => buildSources());
+        installNow.addEventListener('click', () => buildSources(true));
         dropZone.addEventListener('click', () => dropZone.focus({ preventScroll: true }));
         dropZone.addEventListener('paste', async (event) => {
           event.preventDefault();
@@ -1381,6 +1452,7 @@ export default {
           try {
             const r = await ctx.invoke('clearAll', []);
             state.builds = r.builds ?? [];
+            forgetRemovedPacks();
             paint();
             log.append(t('清空旧打包 · 删除 ', 'Cleared ') + r.removed + t(' 份', ' packs'), 'dim');
             ui.toast(t('已清空', 'Cleared'), 'ok');

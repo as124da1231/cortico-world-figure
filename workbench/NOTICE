@@ -30,8 +30,9 @@ Copyright (C) 2026 as124da1231
    打包时会复制进用户生成的形象包；不得把该生成包当作可公开上传的扩展安装包。
    这些文件不受本项目 AGPL 或 Steamworks 附加许可的重新许可。
 
-5. fflate 与 Cortico
+5. fflate、pngjs 与 Cortico
    fflate 0.8.3 为 MIT 运行依赖，原文见 ../licenses/fflate-MIT.txt。
+   pngjs 7.0.0 为 MIT 运行依赖，原文见 ../licenses/pngjs-MIT.txt。
    Cortico 为 MIT 框架开发依赖，原文见 ../licenses/Cortico-MIT.txt。
    依赖安装包各自保留版权和许可证；不因为与 Coo 使用相同接口而改为 AGPL。
 

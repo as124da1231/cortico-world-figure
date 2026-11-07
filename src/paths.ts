@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { realpath } from 'node:fs/promises';
 
 /** Keep imported paths portable, including on Windows (devices, ADS and aliases). */
 export function childPath(root: string, path: string): string {
@@ -17,9 +18,24 @@ export function childPath(root: string, path: string): string {
 }
 
 export function packId(value: unknown): string {
-  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,79}$/i.test(value)) {
-    throw new Error('figure.json 的 id 必须是 1–80 位字母、数字、下划线或连字符');
+  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value) || value === 'coo') {
+    throw new Error('figure.json 的 id 必须是 1–32 位小写字母、数字或连字符，不能使用内置 id coo');
   }
   childPath('.', value);
   return value;
+}
+
+export function containsPath(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel);
+}
+
+/** Resolve existing ancestors too when the destination has yet to be created. */
+export async function canonicalPath(path: string): Promise<string> {
+  const absolute = resolve(path);
+  try { return await realpath(absolute); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || absolute === dirname(absolute)) throw error;
+    return join(await canonicalPath(dirname(absolute)), basename(absolute));
+  }
 }

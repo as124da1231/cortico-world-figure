@@ -6,10 +6,10 @@ import {tmpdir} from 'node:os';
 import {clipboardPaths} from '../src/clipboard.ts';
 import {PackImporter} from '../src/import.ts';
 import {LIVE2D} from '../src/index.ts';
-import {makeCtx,prepareWorld} from './_ctx.mjs';
+import {makeCtx,prepareWorld,fixtureManifest} from './_ctx.mjs';
 
 async function fixture(t){const root=await mkdtemp(join(tmpdir(),'figure-local-'));t.after(()=>rm(root,{recursive:true,force:true}));return root;}
-async function sourcePack(root){await mkdir(root,{recursive:true});await writeFile(join(root,'figure.json'),JSON.stringify({id:'sample',name:{zh:'名字'},about:{zh:'原简介'}}));await writeFile(join(root,'keep.txt'),'original');return root;}
+async function sourcePack(root){await mkdir(root,{recursive:true});await writeFile(join(root,'figure.json'),JSON.stringify(fixtureManifest({about:{zh:'原简介'}})));await writeFile(join(root,'figure.js'),'export function createFigureBody(){}');await writeFile(join(root,'keep.txt'),'original');return root;}
 
 test('clipboard parsing accepts only local absolute paths and ignores unrelated text',()=>{
   assert.deepEqual(clipboardPaths('"G:\\模型\\夜兰"\r\nG:\\模型\\夜兰\r\nfile:///C:/models/role%20one\r\nhttps://example.com\r\nnot a path'),['G:\\模型\\夜兰','C:\\models\\role one']);
@@ -80,10 +80,11 @@ test('failed installation leaves the draft and original source intact even with 
 
 test('chunked files must be contiguous and complete before an import can be recognized',async t=>{
   const importer=new PackImporter();t.after(()=>importer.cancel());
-  const token=await importer.beginUpload(),bytes=Buffer.from(JSON.stringify({id:'chunked'}));
+  const token=await importer.beginUpload(),bytes=Buffer.from(JSON.stringify(fixtureManifest({id:'chunked'})));
   await importer.appendChunk(token,{path:'figure.json',bytes:bytes.subarray(0,5)},0,bytes.length);
   assert.match((await importer.finishUpload(token,false,new Map())).error,/完整/);
   await importer.appendChunk(token,{path:'figure.json',bytes:bytes.subarray(5)},5,bytes.length);
+  await importer.appendUpload(token,[{path:'figure.js',bytes:Buffer.from('export function createFigureBody(){}')}]);
   const result=await importer.finishUpload(token,false,new Map());assert.equal(result.packs[0].id,'chunked');
 });
 

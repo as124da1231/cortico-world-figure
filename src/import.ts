@@ -1,5 +1,6 @@
-import { childPath, packId } from './paths.ts';
+import { childPath } from './paths.ts';
 import { installPack } from './pipeline.ts';
+import { readPackManifest } from './pack-manifest.ts';
 /**
  * 导入现成的形象包：一个 zip，或者一个（拖入 / 选中的）文件夹。
  *
@@ -346,15 +347,14 @@ export class PackImporter {
       };
 
       for (const {dir,full} of await candidates('pack')) {
-        let manifest: Record<string, unknown>;
+        let manifest;
         try {
-          manifest = JSON.parse(await readFile(join(full, 'figure.json'), 'utf8'));
+          manifest = await readPackManifest(full);
         } catch (err) {
           problems.push({ dir, reason: `figure.json 读不了：${(err as Error).message}` });
           continue;
         }
-        let id: string;
-        try { id = packId(manifest.id); } catch (e) { problems.push({ dir, reason: (e as Error).message }); continue; }
+        const { id } = manifest;
         if (packs.some((p) => p.id.toLowerCase() === id.toLowerCase())) { problems.push({ dir, reason: `同一个包里有两个 ${id}` }); continue; }
         const name = (manifest.name ?? {}) as { zh?: unknown; en?: unknown };
         packs.push({
@@ -429,12 +429,10 @@ export class PackImporter {
       if (!staged.packs.has(dir)) return { error: '挑中的目录不在待装清单中' };
       const full = this.resolve(token,dir);
       if(!full)return {error:'挑中的目录已失效'};
-      let id = '';
       try {
-        const m = JSON.parse(await readFile(join(full, 'figure.json'), 'utf8'));
-        id = packId(m.id);
-      } catch { /* 目录里已经没有 figure.json */ }
-      if (id) chosen.push({ dir, id });
+        const { id } = await readPackManifest(full);
+        chosen.push({ dir, id });
+      } catch (error) { return { error: (error as Error).message }; }
     }
     if (!chosen.length) return { error: '挑中的包已经不在临时目录里了' };
 

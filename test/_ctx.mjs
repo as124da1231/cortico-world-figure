@@ -3,6 +3,11 @@ import { join } from 'node:path';
 /** 测试共用的模型目录：由环境变量提供，没有就跳过。 */
 export const MODEL = (process.env.L2D_MODEL || '').trim();
 
+export const fixtureManifest = (fields = {}) => ({
+  id:'sample', manifest:2, api:2, entry:'figure.js', export:'createFigureBody',
+  name:{zh:'名字'}, about:{zh:'旧简介'}, vocab:[], ...fields,
+});
+
 export function needModel() {
   if (!MODEL) {
     console.log('skip: 设置 L2D_MODEL 指向一个含 .model3.json 的目录后重跑');

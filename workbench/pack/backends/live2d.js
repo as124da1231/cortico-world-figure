@@ -63,17 +63,19 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
  * 头在框顶、气泡在头顶、泪在脸上部、z 在右上、心在左下——不同模型头身比例不同，
  * 所以这是兜底，不是标准答案；工作台里可以逐个改。
  */
-function deriveAnchors([x0, y0, x1, y1]) {
-  const w = x1 - x0;
+function deriveAnchors([x0, y0, x1, y1], silhouette) {
+  const w = silhouette?.headWidth || x1 - x0;
   const h = y1 - y0;
   const cx = (x0 + x1) / 2;
+  const headX = silhouette?.headX ?? cx;
+  const headY = silhouette?.headY ?? y0;
   return {
-    gaze: [cx, y0 + h * 0.2],
-    tear: [cx + w * 0.16, y0 + h * 0.24],
-    tears: [[cx - w * 0.12, y0 + h * 0.26], [cx + w * 0.16, y0 + h * 0.24]],
-    z: [x1 - w * 0.1, y0 + h * 0.06],
-    hearts: [cx - w * 0.28, y1 - h * 0.34, Math.min(w, h) * 0.36],
-    bubble: [cx, y0 - 4],
+    gaze: [headX, headY + h * 0.2],
+    tear: [headX + w * 0.16, headY + h * 0.24],
+    tears: [[headX - w * 0.12, headY + h * 0.26], [headX + w * 0.16, headY + h * 0.24]],
+    z: [headX + w * 0.4, headY + h * 0.06],
+    hearts: [headX - w * 0.28, headX + w * 0.28, headY + Math.min(w, h) * 0.36],
+    bubble: [headX, headY - 4],
   };
 }
 
@@ -105,7 +107,13 @@ export async function createLive2DBody(base, opts, entry, kit) {
   fo.setAttribute('y', '0');
   fo.setAttribute('width', String(BOX));
   fo.setAttribute('height', String(BOX));
-  fo.appendChild(canvas);
+  const scene = profile.bongo ? doc.createElementNS(XHTML, 'div') : null;
+  if (scene) {
+    scene.style.cssText = 'position:relative;width:100%;height:100%;overflow:hidden';
+    canvas.style.position = 'absolute';
+    scene.appendChild(canvas);
+  }
+  fo.appendChild(scene ?? canvas);
 
   const gl = canvas.getContext('webgl', {
     alpha: true, premultipliedAlpha: true, antialias: true,
@@ -147,6 +155,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
   const model = new (class extends CubismUserModel {})();
   model.loadModel(mocBuf, true);
   if (!model._model) throw new Error('moc3 解析失败');
+  const bongo = profile.bongo ? await import('./bongo.js') : null;
+  const bongoArt = bongo?.createBongoArtwork(scene, canvas, profile.bongo,
+    (path) => resolveAsset(`models/${entry.id}/${path}`), model._model, model._modelMatrix);
 
   // ---------- 取景：按规则装进 clip 空间 ----------
   // 必须在 applyFit 之前初始化（applyFit 由工作台实时调用）
@@ -160,6 +171,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     ...(profile.fit ?? {}),
   };
   applyFit();
+  bongoArt?.start();
 
   const nativePhysicsOutputs = new Set();
   if (entry.physics) {
@@ -184,16 +196,21 @@ export async function createLive2DBody(base, opts, entry, kit) {
   renderNotice.setAttribute('role','status'); renderNotice.hidden = true;
   renderNotice.style.cssText = 'position:absolute;bottom:0;left:0;right:0;padding:4px;text-align:center;font:11px/1.5 sans-serif;color:#805500;background:#fff4d9ee;pointer-events:none';
   host.root.appendChild(renderNotice);
-  const renderWarnings = new Set(); let renderFailure = '';
+  const renderWarnings = new Set(); let renderFailure = '', disposed = false;
+  const contextLostMessage = '图形上下文已丢失，请减小显示尺寸或降低画质后重新加载。';
   const showRenderNotice = (message, fatal = false) => {
-    if (fatal) renderFailure = message;
+    if (disposed || renderFailure) return;
+    if (fatal) {
+      if (gl.isContextLost()) message = contextLostMessage;
+      renderFailure = message;
+    }
     if (!renderWarnings.has(message)) console.warn('[l2d]',message);
     renderWarnings.add(message); renderNotice.hidden = false;
     renderNotice.textContent = (fatal ? '渲染受限：' : '') + message;
     renderNotice.title = [...renderWarnings].join('\n');
   };
   if (renderConfig.warning) showRenderNotice(renderConfig.warning);
-  canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();showRenderNotice('图形上下文已丢失，请减小显示尺寸或降低画质后重新加载。',true);});
+  canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();showRenderNotice(contextLostMessage,true);});
 
   // 着色器内联
   const shader = CubismShaderManager_WebGL.getInstance().getShader(gl);
@@ -219,15 +236,17 @@ export async function createLive2DBody(base, opts, entry, kit) {
     cx.imageSmoothingEnabled = true;
     cx.imageSmoothingQuality = 'high';
     cx.drawImage(img, 0, 0, nw, nh);
-    showRenderNotice(`按所选画质上传贴图 ${nw}×${nh}（文件 ${w}×${h}）。`);
     return { src: c, w: nw, h: nh };
   };
 
   let texturesReady = false;
   const uploadedTextures = [];
+  // The body is already ready from Coo's perspective while textures load.
+  const textureDeadline = setTimeout(() => showRenderNotice('贴图加载超时，请重试。',true),30000);
   (async () => {
     for (let i = 0; i < entry.textures.length; i++) {
       const img = await opts.loadImage(new URL(`models/${entry.id}/${entry.textures[i]}`, base));
+      if (disposed || renderFailure) return;
       const { src, w, h } = shrinkForUpload(img);
       const tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -253,7 +272,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     }
     model.setInitialized(true);
     texturesReady = true;
-  })().catch((e) => { showRenderNotice('贴图加载失败：'+e.message,true); console.error('贴图加载失败', e); });
+  })().catch(e => showRenderNotice('贴图加载失败：'+e.message,true)).finally(() => clearTimeout(textureDeadline));
 
   // ---------- 动作 ----------
   // 每条动作都必须 setEffectIds：CubismMotion 每帧读 _eyeBlinkParameterIds /
@@ -353,11 +372,15 @@ export async function createLive2DBody(base, opts, entry, kit) {
     paramIndex.set(model._model.getParameterId(i).getString(), i);
   }
 
+  const bongoInput = bongo?.createBongoInput(profile.bongo, model._model, paramIndex, host);
+  const bongoBreath = bongo ? paramIndex.get('ParamBreath') : undefined;
+
   /** 每个 role 只保留模型里真实存在的目标参数。 */
   const roles = new Map();
   for (const [name, r] of Object.entries(profile.roles ?? {})) {
     const items = [];
     for (const target of r.targets ?? []) {
+      if (bongoBreath !== undefined && name === 'breath' && target === 'ParamBreath') continue;
       const index = paramIndex.get(target);
       if (index === undefined) continue;
       items.push({
@@ -615,8 +638,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
     const y = anchor === 'bottom' ? (-1 + py + h / 2)
       : anchor === 'top' ? (1 - py - h / 2)
         : 0;
-    model._modelMatrix.setY(y + oy);
-    if (typeof model._modelMatrix.setX === 'function') model._modelMatrix.setX(ox);
+    const bounds = bongo && bongo.bongoCanvas(model._model);
+    const centerX = bounds ? (bounds.x + bounds.width / 2) * model._modelMatrix.getScaleX() : 0;
+    const centerY = bounds ? (bounds.y - bounds.height / 2) * model._modelMatrix.getScaleY() : 0;
+    model._modelMatrix.setY(y + oy - centerY);
+    if (typeof model._modelMatrix.setX === 'function') model._modelMatrix.setX(ox - centerX);
+    bongoArt?.clip();
   }
 
   // ---------- 绘制 ----------
@@ -731,9 +758,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
     const ctx = out.getContext('2d');
     const image = ctx.createImageData(w, h);
     const d = image.data;
-    for (let y = 0; y < h; y++) {
+    const [left, top, right, bottom] = bongoArt?.pixels(w, h) ?? [0, 0, w, h];
+    for (let y = top; y < bottom; y++) {
       const sy = h - 1 - y;
-      for (let x = 0; x < w; x++) {
+      for (let x = left; x < right; x++) {
         const i = (sy * w + x) * 4;
         const o = (y * w + x) * 4;
         const a = src[i + 3];
@@ -749,6 +777,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
       }
     }
     ctx.putImageData(image, 0, 0);
+    if (bongoArt?.hasBackground) {
+      const layer = doc.createElement('canvas');
+      layer.width = w; layer.height = h;
+      layer.getContext('2d').putImageData(image, 0, 0);
+      bongoArt.composite(ctx, layer, w, h);
+    }
     if (size === w) return out.toDataURL('image/png');
     const small = doc.createElement('canvas');
     small.width = size;
@@ -766,21 +800,41 @@ export async function createLive2DBody(base, opts, entry, kit) {
   // profile.extent / profile.anchors 仍然可以覆盖（工作台校准后写死）。
   const DEFAULT_EXTENT = [20, 8, 236, 256];
   let extent = profile.extent ?? null;
-  let wardrobeBaseline=null,wardrobeLayoutDirty=false;
+  let wardrobeBaseline = null, wardrobeLayoutDirty = false, wardrobeAdjusted = false;
+  let silhouette = null;
+  let bodyMode = 'idle';
   const fitCopy=()=>({...fitState,offset:[...(fitState.offset||[0,0])],padding:[...(fitState.padding||[0,0])]});
-  function changeWardrobe(update){const before=wardrobe.layoutKey(),active=wardrobe.grounding();update();if(before!==wardrobe.layoutKey()&&(active||wardrobe.grounding()))wardrobeLayoutDirty=true;}
-  function settleWardrobe(){
-    if(!wardrobeLayoutDirty||!wardrobeBaseline)return;
-    const previousFit=fitCopy();try{
-      fitState={...wardrobeBaseline.fit,offset:[...wardrobeBaseline.fit.offset]};applyFit();
-      let measured=measureNeutralExtent();if(!measured)throw Error('外观轮廓不可见');
-      if(wardrobe.grounding()){
-        fitState.offset=[fitState.offset[0],fitState.offset[1]+(measured[3]-wardrobeBaseline.feet)/128];applyFit();
-        measured=measureNeutralExtent();if(!measured)throw Error('外观贴地失败');
+  const hasWardrobePick = () => Object.values(wardrobe.state()).some(value => value && value !== 'default');
+  function changeWardrobe(update) {
+    const before = wardrobe.layoutKey();
+    update();
+    if (before !== wardrobe.layoutKey()) wardrobeLayoutDirty = true;
+  }
+  function settleWardrobe() {
+    if (!wardrobeLayoutDirty || !wardrobeBaseline) return;
+    const previousFit = fitCopy();
+    const previousGeometry = { hitBands, silhouette };
+    try {
+      fitState = { ...wardrobeBaseline.fit, offset: [...wardrobeBaseline.fit.offset] };
+      applyFit();
+      let measured = measureNeutralExtent();
+      if (!measured) throw Error('外观轮廓不可见');
+      if (wardrobe.grounding()) {
+        fitState.offset[1] += (measured[3] - wardrobeBaseline.extent[3]) / 128;
+        applyFit();
+        measured = measureNeutralExtent();
+        if (!measured) throw Error('外观贴地失败');
       }
-      extent=measured;publishInfo();
-    }catch(error){fitState=previousFit;applyFit();console.warn('[l2d] 外观贴地跳过',error);}
-    wardrobeLayoutDirty=false;
+      wardrobeAdjusted = hasWardrobePick();
+      extent = wardrobeAdjusted ? measured : profile.extent ?? measured;
+      publishInfo();
+    } catch (error) {
+      fitState = previousFit;
+      ({ hitBands, silhouette } = previousGeometry);
+      applyFit();
+      console.warn('[l2d] 外观轮廓测量失败', error);
+    }
+    wardrobeLayoutDirty = false;
   }
   /** 命中圈按高度带取可见 alpha 的中心；整张 bbox 会被尾巴/胡须带偏。 */
   let hitBands = null;
@@ -793,8 +847,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
     let x0 = w, y0 = h, x1 = -1, y1 = -1;
     const rowMin = new Int32Array(h).fill(w);
     const rowMax = new Int32Array(h).fill(-1);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
+    const [left, top, right, bottom] = bongoArt?.pixels(w, h) ?? [0, 0, w, h];
+    for (let y = h - bottom; y < h - top; y++) {
+      for (let x = left; x < right; x++) {
         if (buf[(y * w + x) * 4 + 3] > 8) {
           if (x < x0) x0 = x;
           if (x > x1) x1 = x;
@@ -815,27 +870,88 @@ export async function createLive2DBody(base, opts, entry, kit) {
       Math.min(lw * .52, lh * .26),
       Math.min(lw * .48, lh * .22),
     ];
-    hitBands = [0.14, 0.47, 0.80].map((k, i) => {
-      const cy = ly0 + lh * k;
+    const rowBand = (cy) => {
       const yc = Math.round(h - 1 - cy / unit);
       const half = Math.max(2, Math.round(lh * .045 / unit));
+      return [Math.max(y0, yc - half), Math.min(y1, yc + half)];
+    };
+    const centerAt = (cy, near) => {
+      const [first, last] = rowBand(cy);
       let min = w, max = -1;
-      for (let yy = Math.max(0, yc - half); yy <= Math.min(h - 1, yc + half); yy++) {
-        if (rowMax[yy] < 0) continue;
-        if (rowMin[yy] < min) min = rowMin[yy];
-        if (rowMax[yy] > max) max = rowMax[yy];
+      for (let yy = first; yy <= last; yy++) {
+        let left = rowMin[yy], right = rowMax[yy];
+        if (near?.center !== undefined) {
+          const half = Math.max(12, near.width * .75);
+          left = Math.max(left, Math.floor((near.center - half) / unit));
+          right = Math.min(right, Math.ceil((near.center + half) / unit));
+          while (left <= right && buf[(yy * w + left) * 4 + 3] <= 8) left++;
+          while (right >= left && buf[(yy * w + right) * 4 + 3] <= 8) right--;
+        }
+        if (left > right) continue;
+        if (left < min) min = left;
+        if (right > max) max = right;
       }
-      const cx = max >= 0 ? (min + max + 1) / 2 * unit : (lx0 + lx1) / 2;
-      return [cx, cy, Math.max(1, radii[i])];
+      return max >= 0 ? (min + max + 1) / 2 * unit : near?.center ?? (lx0 + lx1) / 2;
+    };
+    // Use the strongest continuous shape in each sampled row so a detached tail or accessory
+    // does not pull the center away from the head or body.
+    const dominantAt = (fraction) => {
+      const centers = [], widths = [];
+      const [first, last] = rowBand(ly0 + lh * fraction);
+      for (let y = first; y <= last; y++) {
+        let start = -1, bestStart = 0, bestWidth = 0;
+        for (let x = rowMin[y]; x <= rowMax[y] + 1; x++) {
+          if (x <= rowMax[y] && buf[(y * w + x) * 4 + 3] > 8) {
+            if (start < 0) start = x;
+          } else if (start >= 0) {
+            if (x - start > bestWidth) { bestStart = start; bestWidth = x - start; }
+            start = -1;
+          }
+        }
+        if (bestWidth) {
+          centers.push((bestStart + bestWidth / 2) * unit);
+          widths.push(bestWidth * unit);
+        }
+      }
+      const median = (values) => values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
+      return { center: median(centers), width: median(widths) ?? 0 };
+    };
+    const head = dominantAt(.16), trunk = dominantAt(.50), lower = dominantAt(.76);
+    const headX = head.center ?? centerAt(ly0 + lh * .16);
+    let headY = ly0;
+    const halfHead = Math.max(2, Math.ceil(head.width * .42 / unit));
+    const headColumn = Math.floor(headX / unit);
+    const headRow = Math.max(y0, Math.round(y1 - (lh * .16) / unit));
+    const visibleThreshold = Math.max(1, Math.ceil(head.width * .08 / unit));
+    for (let y = y1; y >= headRow; y--) {
+      let pixels = 0;
+      for (let x = Math.max(x0, headColumn - halfHead); x <= Math.min(x1, headColumn + halfHead); x++) {
+        if (buf[(y * w + x) * 4 + 3] > 8) pixels++;
+      }
+      if (pixels >= visibleThreshold) {
+        headY = (h - 1 - y) * unit;
+        break;
+      }
+    }
+    silhouette = {
+      headX, headY, headWidth: head.width,
+      footX: centerAt(ly0 + lh * .92, trunk.center === undefined ? lower : trunk),
+      width: Math.max(trunk.width, lower.width) || lw,
+    };
+    hitBands = [0.14, 0.47, 0.80].map((k, i) => {
+      const cy = ly0 + lh * k;
+      return [centerAt(cy), cy, Math.max(1, radii[i])];
     });
     // 三段的水平中心统一用躯干：头/腿的单段 span 会被尾巴、胡须带偏
-    const bodyCx = hitBands[1]?.[0] ?? (lx0 + lx1) / 2;
+    const bodyCx = trunk.center ?? hitBands[1]?.[0] ?? (lx0 + lx1) / 2;
     for (const b of hitBands) b[0] = bodyCx;
+    // Keep the desktop art above the floor while retaining body hit circles.
+    const art = bongoArt?.hasBackground ? bongoArt.sceneBounds() : null;
     return [
-      Math.round(lx0),
+      Math.round(art ? Math.min(lx0, art[0] * BOX) : lx0),
       Math.round(ly0),
-      Math.round(lx1),
-      Math.round(ly1),
+      Math.round(art ? Math.max(lx1, art[2] * BOX) : lx1),
+      Math.round(art ? Math.max(ly1, art[3] * BOX) : ly1),
     ];
   }
 
@@ -875,7 +991,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
   let extentFrames = 0;
   const currentExtent = () => extent ?? DEFAULT_EXTENT;
-  const currentHits = () => profile.hits ?? hitBands ?? (() => {
+  const currentHits = () => (!wardrobeAdjusted ? profile.hits : null) ?? hitBands ?? (() => {
     const [x0, y0, x1, y1] = currentExtent();
     const w = x1 - x0;
     const h = y1 - y0;
@@ -888,7 +1004,11 @@ export async function createLive2DBody(base, opts, entry, kit) {
       [cx, y0 + h * .80, r(Math.min(w * .48, h * .22))],
     ];
   })();
-  const currentAnchors = () => profile.anchors ?? deriveAnchors(currentExtent());
+  const currentAnchors = () => {
+    const measured = deriveAnchors(currentExtent(), silhouette);
+    if (!profile.anchors) return measured;
+    return wardrobeAdjusted ? { ...profile.anchors, bubble: measured.bubble } : profile.anchors;
+  };
 
   const publishInfo = () => {
     globalThis.__l2dInfo = {
@@ -968,6 +1088,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
      */
     __cover() {
       if (!texturesReady) return null;
+      if (bongoArt) {
+        if (!renderNeutralPose()) return null;
+        return { png: canvasPng(512), png128: canvasPng(128) };
+      }
       const oldFit = {
         ...fitState,
         offset: [...(fitState.offset ?? [0, 0])],
@@ -975,6 +1099,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       };
       const oldExtent = extent;
       const oldHits = hitBands;
+      const oldSilhouette = silhouette;
       try {
         // 封面从固定的基准取景出发，不继承上一次的 zoom / offset；否则两次构建会差几像素。
         fitState = { mode: 'contain', anchor: 'bottom', padding: [0.04, 0.02], offset: [0, 0], zoom: 1, autoFit: false };
@@ -993,6 +1118,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
         applyFit();
         extent = oldExtent;
         hitBands = oldHits;
+        silhouette = oldSilhouette;
         publishInfo();
         render();
       }
@@ -1000,8 +1126,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
     draw(petG, face, frame) {
       if (fo.parentNode !== petG) petG.appendChild(fo);
+      bodyMode = frame.mode;
       if (!texturesReady || renderFailure) return;
-      if(extent&&!wardrobeBaseline)wardrobeBaseline={fit:fitCopy(),feet:extent[3]};
       settleWardrobe();
 
       if (opts.preview && previewState) frame = {...frame,face:previewState.word,gesture:null,talk:0,look:[0,0]};
@@ -1020,11 +1146,14 @@ export async function createLive2DBody(base, opts, entry, kit) {
       }
       wardrobe.apply();
       model._model.saveParameters();            // ← 必须在 physics 之前
+      // Save the authored pose first so the automatic contribution never accumulates.
+      if (bongoBreath !== undefined) model._model.addParameterValueByIndex(bongoBreath, bongo.bongoBreathContribution(frame.t ?? 0));
       try { model._physics?.evaluate(model._model, dt); } catch { /* 物理失败不致命 */ }
       if (nativeValues.length) applyNativeValues(nativeValues.filter(v => nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex);
       try { model._pose?.updateParameters(model._model, dt); } catch { /* 姿势失败不致命 */ }
       applyCleanParams();
       wardrobe.apply();
+      if (bongoInput) bongoArt.draw(bongoInput.apply(dt));
       model._model.update();
       render();
 
@@ -1038,18 +1167,22 @@ export async function createLive2DBody(base, opts, entry, kit) {
       };
 
       // 贴图就绪后的第 3 帧量一次可见范围（等姿势稳定，别量到眨眼/动作的瞬间）
-      if (!extent && extentFrames < 30 && ++extentFrames >= 3) {
+      if (!wardrobeBaseline && extentFrames < 30 && ++extentFrames >= 3) {
         let m = null;
-        const selected=wardrobe.state(),grounded=wardrobe.grounding();
+        const selected = wardrobe.state();
+        const changed = hasWardrobePick();
         try {
-          if(grounded)wardrobe.select({});
-          m = fitState.autoFit !== false ? autoFitExtent() : measureNeutralExtent();
+          if (changed) wardrobe.select({});
+          m = !extent && fitState.autoFit !== false ? autoFitExtent() : measureNeutralExtent();
         } catch (e) {
           console.warn('[l2d] 量取景失败', e);
-        }finally{if(grounded)wardrobe.select(selected);}
+        } finally {
+          if (changed) wardrobe.select(selected);
+        }
         if (m) {
-          extent = m;
-          wardrobeBaseline={fit:fitCopy(),feet:m[3]};if(grounded)wardrobeLayoutDirty=true;
+          extent = profile.extent ?? m;
+          wardrobeBaseline = { fit: fitCopy(), extent: m };
+          if (changed) wardrobeLayoutDirty = true;
           publishInfo();
           console.info('[l2d] extent', JSON.stringify(m));
           console.info('[l2d] fit', JSON.stringify(fitState));
@@ -1060,6 +1193,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
     },
 
     dispose() {
+      disposed = true;
+      clearTimeout(textureDeadline);
       renderNotice?.remove();
       fo.remove();
       try { performance?.dispose(); } catch { /* 忽略 */ }
@@ -1084,16 +1219,44 @@ export async function createLive2DBody(base, opts, entry, kit) {
   globalThis.__l2dFit = figure.__fit;
   globalThis.__l2dRemesure = figure.__remeasure;
   globalThis.__l2dAutoFit = () => {
-    const m = autoFitExtent();
+    const m = bongoArt ? measureNeutralExtent() : autoFitExtent();
     if (m) { extent = m; publishInfo(); }
     return m;
   };
   globalThis.__l2dCover = figure.__cover;
   globalThis.__l2dRenderQuality = qualityInfo;
-  if(opts.preview)globalThis.__l2dPreviewReady=()=>texturesReady&&!!extent&&!renderFailure;
+  globalThis.__l2dPreviewReady=()=>texturesReady&&!!extent&&!renderFailure;
   globalThis.__l2dExpr = figure.__expr;
 
-  const body = kit.createBody(host, { figure, words, css: 'foreignObject{pointer-events:none}' });
+  const bodyHost = bongoInput ? { ...host, start: { ...host.start, facing: 1 } } : host;
+  const body = kit.createBody(bodyHost, { figure, words, css: 'foreignObject{pointer-events:none}' });
+  const shadow = host.root.querySelector('svg.kit > ellipse.shadow');
+  const step = body.step.bind(body);
+  body.step = (dt) => {
+    if (!renderFailure) {
+      if (texturesReady) settleWardrobe();
+      step(dt);
+    }
+    if (renderFailure) {
+      // Coo switches to its built-in figure when a running body reports an error.
+      if (!opts.preview) throw Error(renderFailure);
+      return;
+    }
+    if (!shadow || !silhouette || bongoArt?.hasBackground) return;
+    const rx = Number(shadow.getAttribute('rx'));
+    const ry = Number(shadow.getAttribute('ry'));
+    // Keep the kit's ground line and lift fade while matching the new silhouette.
+    const widthScale = clamp(silhouette.width / 164, .16, 1.4);
+    shadow.setAttribute('rx', String(rx * widthScale));
+    shadow.setAttribute('ry', String(1 + (ry - 1) * widthScale));
+    if (bodyMode !== 'air' && bodyMode !== 'drag') {
+      const scaleX = fo.parentNode?.getCTM?.()?.a;
+      if (Number.isFinite(scaleX)) {
+        const cx = Number(shadow.getAttribute('cx'));
+        shadow.setAttribute('cx', String(cx + scaleX * (silhouette.footX - BOX / 2)));
+      }
+    }
+  };
   body.setScheme=async id=>{changeWardrobe(()=>wardrobe.scheme(id));if(texturesReady)settleWardrobe();};
   globalThis.__l2dWardrobe=()=>wardrobe.state();
   if(opts.preview)globalThis.__l2dWardrobeValues=()=>wardrobe.inspect();
@@ -1144,16 +1307,20 @@ export async function createLive2DBody(base, opts, entry, kit) {
     const png=globalThis.__l2dNativeSample(sample.resource||'__neutral__',sample.time,sample.word,false,previewPixels||512);
     return {png,fit:fitCopy(),picks:wardrobe.state(),values:wardrobe.inspect()};
   };
-  const motionKind = profile.motion?.kind === 'stand' ? 'stand' : 'roam';
+  const motionKind = bongoInput || profile.motion?.kind === 'stand' ? 'stand' : 'roam';
   if (SIMPLE && motionKind === 'stand') {
     // 站定：无论 Coo / 预览传什么 roam，都强制 off；正面立绘也不镜像。
     const setBase = body.set.bind(body);
     body.set = (s) => setBase({ ...(s || {}), roam: 'off' });
     try { setBase({ roam: 'off' }); } catch { /* ignore */ }
-    if (profile.facing !== 'mirror') {
+    if (bongoInput || profile.facing !== 'mirror') {
       const placeBase = body.place.bind(body);
       body.place = (x, facing, y) => placeBase(x, 1, y);
       try { placeBase(body.layout?.().x ?? 0, 1); } catch { /* ignore */ }
+      if (bongoInput) {
+        bongo.connectBongoBody(body, bongoInput, words, word => native?.trigger(word) ?? false);
+        return body;
+      }
       const stepBase = body.step.bind(body);
       body.step = (dt) => {
         try {

@@ -23,7 +23,7 @@ export const automationMode=cfg=>({enabled:enabled(cfg),adaptationMode:adaptatio
 
 /** The host owns AI calls and speech. This class supplies bounded data and verified execution. */
 export class FigureAutomation{
- constructor(options){this.options=options;this.models=new Map();this.catalogs=new Map();this.observations=new Map();this.plans=new Map();this.notifying=new Set();this.requests=new Map();this.queue=Promise.resolve();this.stopped=false;}
+ constructor(options){this.options=options;this.models=new Map();this.observations=new Map();this.plans=new Map();this.notifying=new Set();this.requests=new Map();this.queue=Promise.resolve();this.stopped=false;}
  get cfg(){return this.options.getConfig();}
  get host(){return this.options.getHost();}
  async start(){
@@ -73,8 +73,7 @@ export class FigureAutomation{
  }
  async catalog(id,signal){
   const model=this.models.get(id);if(!model)throw Error('模型记录已过期，请重新识别');
-  const c=model.kind==='pack'?{model,fingerprint:await packFingerprint(model.dir,signal),resources:[],warnings:[]}:await inspectNative(model,{signal});
-  this.catalogs.set(id,c);return c;
+  return model.kind==='pack'?{model,fingerprint:await packFingerprint(model.dir,signal),resources:[],warnings:[]}:await inspectNative(model,{signal});
  }
  observation(c){
   let value=this.observations.get(c.model.id);
@@ -136,11 +135,12 @@ export class FigureAutomation{
   this.check();const c=await this.catalog(id,signal);let selected=validateBindings(c,bindings||[]);const skipped=[];
   if(this.cfg.assistAuto===true)selected=selected.filter(b=>{const r=c.resources.find(r=>r.id===b.resource);if(b.confidence<.7||r.classification==='appearance'){skipped.push(b.word);return false;}return true;});
   const planId=randomUUID(),code=planId.slice(0,8),title=c.model.title.slice(0,16),labels=selected.slice(0,3).map(b=>b.word).join('、')||'通用动作';
-  const question=`方案 ${code}：${title}，适配 ${labels}，安装${wear?'并换上':''}？`;
+  const question=`方案 ${code}：${title}，适配 ${labels}，安装${wear?'并换上':''}？同 ID 形象会先备份再替换。`;
   const summary=selected.map(b=>({word:b.word,source:c.resources.find(r=>r.id===b.resource)?.title,reason:b.reason}));
   const observed=this.observation(c),analysis={fingerprint:c.fingerprint,visual:[...new Set(selected.flatMap(b=>[b.resource,b.release].filter(id=>id&&observed.visual.has(id))))],review:selected.map(bindingKey).filter(key=>observed.review.has(key)),depth:analysisPolicy(this.cfg).depth};
   const reviewWarnings=confirmationReasons(c,selected,this.cfg,analysis);
-  const plan={analysis,reviewWarnings,requiresConfirmation:reviewWarnings.length>0,id:planId,code,created:Date.now(),cursor:this.host?.store?.latestCursor?.()||0,model:c.model,fingerprint:c.fingerprint,bindings:selected,summary,wear,question,approveLabel:'同意安装',options:['同意安装','暂不安装'],status:'pending',skipped};
+  const sourceFingerprint=c.model.kind==='live2d'?await packFingerprint(c.model.dir,signal):undefined;
+  const plan={analysis,reviewWarnings,requiresConfirmation:reviewWarnings.length>0,id:planId,code,created:Date.now(),cursor:this.host?.store?.latestCursor?.()||0,model:c.model,fingerprint:c.fingerprint,sourceFingerprint,bindings:selected,summary,wear,question,approveLabel:'同意安装',options:['同意安装','暂不安装'],status:'pending',skipped};
   this.plans.set(planId,plan);await this.save();
   return this.publicPlan(plan);
  }
@@ -172,9 +172,14 @@ export class FigureAutomation{
   try{
    const c=await this.catalog(p.model.id,signal);if(c.fingerprint!==p.fingerprint)throw Error('模型或动作文件已改变，请重新分析确认');
    validateBindings(c,p.bindings);
-   if(prior!=='approved'&&this.cfg.assistAuto===true&&(p.requiresConfirmation||confirmationReasons(c,p.bindings,this.cfg,p.analysis).length))this.verifyAnswer(p,cursor);
-   signal?.throwIfAborted();this.check();p.status='executing';await this.save();
-   const result=await this.options.execute(p.model,nativeConfig(c,p.bindings),signal,p.fingerprint);
+   const assertApproved=(replacesOtherPack=false)=>{
+    signal?.throwIfAborted();this.check();
+    if(prior!=='approved'&&(replacesOtherPack||this.cfg.assistAuto!==true||p.requiresConfirmation||confirmationReasons(c,p.bindings,this.cfg,p.analysis).length))this.verifyAnswer(p,cursor);
+   };
+   assertApproved();p.status='executing';await this.save();
+   assertApproved();
+   if(p.model.kind==='live2d'&&!p.sourceFingerprint)throw Error('旧方案需要重新分析确认');
+   const result=await this.options.execute(p.model,nativeConfig(c,p.bindings),signal,p.fingerprint,assertApproved,p.sourceFingerprint);
    p.status='done';p.result={...result,wearRequested:p.wear,next:p.wear?'Use the available host wardrobe tool with this figureId, then briefly tell the person what was mapped.':'Tell the person which mappings were applied and which retained generic behavior.'};
    try{await this.save();}catch(error){p.result.warning='已安装，但自动化记录保存失败：'+error.message;}
    return p.result;

@@ -11,7 +11,7 @@
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
-  cp, mkdir, readFile, readdir, rename, rm, writeFile,
+  cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile,
 } from 'node:fs/promises';
 import { dirname, join, basename, relative, resolve, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,9 +19,11 @@ import type {
   World, WorldHost, WorldWebUiDecl, ToolDef, WorldStreamSocket,
 } from 'cortico/core/types.ts';
 import type { ConfigGroup } from 'cortico/core/config-schema.ts';
-import { adaptationSummary, buildPack, dirSize, editPack, installPack, packDetail, scanModel, type ScanSummary } from './pipeline.ts';
+import { adaptationSummary, assertRegularTree, buildPack, dirSize, editPack, installPack, packDetail, scanModel, type ScanSummary } from './pipeline.ts';
+import { canonicalPath, containsPath } from './paths.ts';
+import { readPackManifest } from './pack-manifest.ts';
 import { PackImporter, filesFromBundle, filesFromZip, thumbOf } from './import.ts';
-import { captureCover,captureWardrobeThumbnails } from './cover.ts';
+import { captureCover, captureWardrobeThumbnails, type CoverResult } from './cover.ts';
 import { readClipboardPaths } from './clipboard.ts';
 import { FigureAutomation, automationMode } from './automation.mjs';
 import {adaptationMode,aiEnabled} from './adaptation.mjs';
@@ -74,6 +76,8 @@ export interface Live2dSection {
 }
 
 type Phase = 'idle' | 'loading' | 'done' | 'error';
+type PendingImages = ({ kind: 'manual'; token: string } | { kind: 'import'; token: string; dir: string })
+  & { controller: AbortController };
 
 interface StepState {
   phase: Phase;
@@ -113,6 +117,23 @@ interface Persisted {
 
 const IDLE: StepState = { phase: 'idle', hint: '未执行' };
 
+async function captureOptionalImages(
+  run: (signal?: AbortSignal) => Promise<CoverResult>,
+  signal?: AbortSignal,
+  skipSignal?: AbortSignal,
+): Promise<CoverResult> {
+  signal?.throwIfAborted();
+  const captureSignal = signal && skipSignal ? AbortSignal.any([signal, skipSignal]) : signal ?? skipSignal;
+  try {
+    captureSignal?.throwIfAborted();
+    return await run(captureSignal);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (!skipSignal?.aborted) throw error;
+    return { ok: false, error: '已选择跳过图片' };
+  }
+}
+
 export class Live2dWorld implements World {
   readonly id = 'figure';
   private readonly opts: {
@@ -135,6 +156,7 @@ export class Live2dWorld implements World {
   private host: WorldHost | null = null;
   private automation: FigureAutomation;
   private manual: ManualSessions;
+  private pendingImages?: PendingImages;
 
   constructor(opts: Live2dWorld['opts']) {
     this.opts = opts;
@@ -143,7 +165,7 @@ export class Live2dWorld implements World {
       getConfig: () => this.opts.getConfig(), getHost: () => this.host, dataDir: opts.dataDir,
       recentRoots: () => { const dir = this.state.modelDir || this.opts.getConfig().modelDir; return dir ? [dir] : []; },
       warn: (message: string) => this.say(message),
-      execute: (model: AutomationModel, native: NativeConfig, signal?: AbortSignal, fingerprint?: string) => this.executeAutomation(model, native, signal, fingerprint),
+      execute: (model: AutomationModel, native: NativeConfig, signal?: AbortSignal, fingerprint?: string, beforeSwap?: (replacesOtherPack:boolean) => void, sourceFingerprint?: string) => this.executeAutomation(model, native, signal, fingerprint, beforeSwap, sourceFingerprint),
       evidence: (catalog: {model: AutomationModel}, native: unknown, samples: Array<{id:string;time:number}>, signal?: AbortSignal) => this.actionEvidence(catalog.model, native, samples, signal),
     });
   }
@@ -183,6 +205,7 @@ export class Live2dWorld implements World {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.pendingImages?.controller.abort();
     await this.activeAction?.catch(() => {});
     await this.automation.stop();
     await this.manual.stop();
@@ -253,7 +276,7 @@ export class Live2dWorld implements World {
   }
 
   private async invoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState', 'manualPreview', 'manualClose', 'manualKeepAlive'].includes(method);
+    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState', 'manualPreview', 'manualClose', 'manualKeepAlive', 'manualSkipImages', 'skipImportCover'].includes(method);
     if (this.stopping) throw new Error('扩展正在停止');
     if (readOnly) return this.dispatch(panel, method, args);
     if (panel === 'workbench' && method === 'assistApprove') {
@@ -287,6 +310,18 @@ export class Live2dWorld implements World {
     if (method === 'manualPreview') return this.manual.preview(String(args[0]),args[1]);
     if (method === 'manualClose') { await this.manual.close(String(args[0])); return {ok:true}; }
     if (method === 'manualKeepAlive') { this.manual.get(String(args[0])); return {ok:true}; }
+    if (method === 'manualSkipImages') {
+      const capture = this.pendingImages;
+      if (capture?.kind !== 'manual' || capture.token !== args[0]) throw Error('这次保存已结束');
+      capture.controller.abort();
+      return { skipped: true };
+    }
+    if (method === 'skipImportCover') {
+      const capture = this.pendingImages;
+      if (capture?.kind !== 'import' || capture.token !== args[0] || capture.dir !== args[1]) throw Error('这次封面处理已结束');
+      capture.controller.abort();
+      return { skipped: true };
+    }
     if (method === 'manualOpen' || method === 'manualOpenBuild') return this.openManual(method,args);
     if (method === 'manualSave') return this.saveManual(String(args[0]),args[1] as any[],args[2] as any[]|undefined);
     if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() };
@@ -318,7 +353,7 @@ export class Live2dWorld implements World {
 
     if (method === 'scan') return this.doScan(dir);
     if (method === 'build') return this.doBuild(dir);
-    if (method === 'install') return this.doInstall(dir, args[1] ? String(args[1]) : undefined);
+    if (method === 'install') return this.installWithConfirmation(dir, args[1] ? String(args[1]) : undefined, args[2] === true);
     if (method === 'list') {
       return {
         ...this.snapshot(),
@@ -333,6 +368,7 @@ export class Live2dWorld implements World {
       const list = this.state.builds ?? [];
       const keep = list.slice(0, 1);
       const drop = list.slice(1);
+      for (const b of drop) await this.assertRemovableBuild(b.packDir);
       for (const b of drop) await rm(b.packDir, { recursive: true, force: true });
       this.state.builds = keep;
       if (this.state.build && !keep.some((b) => b.packDir === this.state.build!.packDir)) {
@@ -416,7 +452,7 @@ export class Live2dWorld implements World {
       const token = String(args[0] ?? '');
       const dirs = Array.isArray(args[1]) ? (args[1] as unknown[]).map(String) : [];
       const replace = Array.isArray(args[2]) ? (args[2] as unknown[]).map(String) : [];
-      const figures = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
+      const figures = await this.installDirectory();
       this.steps.install = { phase: 'loading', hint: '导入安装中…' };
       try {
         const r = await this.importer.install(token, dirs, replace, {
@@ -450,10 +486,17 @@ export class Live2dWorld implements World {
       const full = this.importer.resolve(token, dir);
       if (!full || !existsSync(full)) throw new Error('这次导入已经过期，重新选一次');
       const wantInstall = Boolean(args[2]);
-      const built = await this.doBuild(full, { remember: false, modelFile: this.importer.modelFile(token, dir) }) as { log?: string[] };
-      const buildId = this.state.builds?.[0]?.id;
+      const controller = new AbortController();
+      this.pendingImages = { kind: 'import', token, dir, controller };
+      let built;
+      try {
+        built = await this.doBuild(full, { remember: false, modelFile: this.importer.modelFile(token, dir), skipImages: controller.signal });
+      } finally {
+        this.pendingImages = undefined;
+      }
+      const buildId = built.buildId;
       let installed: unknown = null;
-      if (wantInstall && buildId) installed = await this.doInstall(full, buildId);
+      if (wantInstall && buildId) installed = await this.installWithConfirmation(full, buildId, false);
       return { ...built, buildId, installed, state: this.snapshot() };
     }
     if (method === 'importBegin') {
@@ -540,7 +583,7 @@ export class Live2dWorld implements World {
     }
   }
 
-  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; wardrobe?:any[]; modelFile?: string; fingerprint?: string; signal?: AbortSignal } = {}): Promise<unknown> {
+  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; wardrobe?:any[]; modelFile?: string; fingerprint?: string; sourceFingerprint?: string; signal?: AbortSignal; skipImages?: AbortSignal } = {}) {
     opts.signal?.throwIfAborted();
     this.guard(dir);
     this.requireNotice();
@@ -550,34 +593,56 @@ export class Live2dWorld implements World {
     const logs: string[] = [];
     const push = (line: string) => { logs.push(line); this.say(line); };
     const temporary = new Set<string>();
+    let scratch: string | undefined;
     let committed = false;
     try {
       this.steps.build = { phase: 'loading', hint: '打包中…' };
       this.steps.install = { ...IDLE, hint: '打包后需要安装' };
       push(`打包 ${dir}`);
 
+      let source = dir;
+      let snapshotCatalog;
+      if (opts.fingerprint) {
+        const root = await canonicalPath(this.workRoot());
+        if (containsPath(await canonicalPath(dir), root)) throw Error('模型目录不能包含扩展的工作目录');
+        await mkdir(root, {recursive:true});
+        scratch = await mkdtemp(join(root, 'model-input-'));
+        source = join(scratch, basename(dir));
+        await cp(dir, source, {recursive:true, dereference:false});
+        await assertRegularTree(source);
+        if (opts.sourceFingerprint && await packFingerprint(source, opts.signal) !== opts.sourceFingerprint) {
+          throw Error('模型素材已变化，请重新分析确认');
+        }
+        const found = await findModels(opts.modelFile ? join(source, opts.modelFile) : source, {signal:opts.signal});
+        const model = found.models.find((entry:any) => entry.kind === 'live2d');
+        if (!model) throw Error('模型入口已变化，请重新分析确认');
+        snapshotCatalog = await inspectNative(model, {signal:opts.signal});
+        if (snapshotCatalog.fingerprint !== opts.fingerprint) throw Error('模型素材已变化，请重新分析确认');
+      }
       let t0 = Date.now();
       const render = qualityPolicy(this.opts.getConfig());
       const maxTexture = render.textureLimit;
       const clean = this.opts.getConfig().clean === true;
-      let packDir = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { render, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+      let packDir = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
       temporary.add(packDir);
       push(`初版包就绪 · ${Date.now() - t0} ms`);
 
       this.steps.build = { phase: 'loading', hint: '量尺寸 / 拍封面…' };
       t0 = Date.now();
-      const shot = this.opts.getConfig().cover === false
-        ? { ok: false, error: '设置里关闭了封面', fit: null as unknown }
-        : await captureCover(packDir, WORKBENCH_DIR, 60000, [], opts.signal);
+      const coverEnabled = this.opts.getConfig().cover !== false;
+      const shot = coverEnabled
+        ? await captureOptionalImages(signal => captureCover(packDir, WORKBENCH_DIR, 60000, [], signal), opts.signal, opts.skipImages)
+        : { ok: false, error: '设置里关闭了封面', fit: null };
       opts.signal?.throwIfAborted();
+      const coverWarning = coverEnabled && !shot.ok ? `封面未生成：${shot.error || '未知原因'}` : undefined;
       if (shot.ok) push(`封面 + 尺寸 · ${Date.now() - t0} ms`);
-      else push(`! 封面跳过：${shot.error ?? '未知原因'}`);
+      else push(`! ${coverWarning ?? shot.error}`);
 
       // 量出了 fit 就带着它重建一次，把取景写进 profile
       let finalDir = packDir;
       if (shot.fit) {
         t0 = Date.now();
-        const rebuilt = await buildPack(WORKBENCH_DIR, dir, this.workRoot(), { render, fit: shot.fit, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+        const rebuilt = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, fit: shot.fit, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
         temporary.add(rebuilt);
         // 封面跟着走
         const thumb = join(packDir, 'thumb');
@@ -599,11 +664,17 @@ export class Live2dWorld implements World {
       opts.signal?.throwIfAborted();
       const found = await findModels(opts.modelFile ? join(dir,opts.modelFile) : dir);
       const model = found.models.find((m:any)=>m.kind==='live2d');
-      if(model){const catalog=await inspectNative(model);if(opts.fingerprint && catalog.fingerprint!==opts.fingerprint)throw Error('模型素材已变化，请重新打开编辑');await writeFile(join(finalDir,LIBRARY),JSON.stringify({version:1,catalog,bindings:(opts.native as any)?.bindings||[]}));}
-      if(model&&opts.wardrobe)await writeNativePack(finalDir,await inspectNative(model),(opts.native as any)?.bindings||[],false,opts.wardrobe);
-      if(opts.wardrobe)await this.captureWardrobe(finalDir,opts.signal);
+      const catalog=snapshotCatalog ?? (model ? await inspectNative(model, {signal:opts.signal}) : null);
+      if(catalog){
+        if(model) catalog.model=model;
+        const bindings=(opts.native as any)?.bindings||[];
+        await writeFile(join(finalDir,LIBRARY),JSON.stringify({version:1,catalog,bindings}));
+        if(opts.wardrobe)await writeNativePack(finalDir,catalog,bindings,false,opts.wardrobe);
+      }
+      const wardrobeWarning = opts.wardrobe ? await this.captureWardrobe(finalDir, opts.signal, opts.skipImages) : undefined;
+      if (wardrobeWarning) push(`! ${wardrobeWarning}`);
       const bytes = await dirSize(finalDir);
-      const manifest = JSON.parse(await readFile(join(finalDir, 'figure.json'), 'utf8'));
+      const manifest = await readPackManifest(finalDir);
       const words = Array.isArray(manifest.vocab) ? manifest.vocab.length : 0;
       const hint = `${(bytes / 1048576).toFixed(1)} MB · ${words} 词`
         + (shot.ok ? ' · 封面 ✓' : '')
@@ -619,7 +690,7 @@ export class Live2dWorld implements World {
       if (opts.remember !== false) this.state.modelDir = dir;
       const rec: BuildRecord = {
         id: `${manifest.id || 'pack'}-${Date.now()}`,
-        manualAvailable: Boolean(model),
+        manualAvailable: Boolean(catalog),
         packDir: finalDir, bytes, words,
         cover: shot.ok, fit: Boolean(shot.fit), at: Date.now(),
       };
@@ -636,12 +707,14 @@ export class Live2dWorld implements World {
       committed = true;
       push(`打包完成 · ${hint}`);
       const adaptation = report ? adaptationSummary(report) : undefined;
-      return { state: this.snapshot(), log: logs, adaptation, warn: shot.ok ? undefined : `封面跳过：${shot.error ?? ''}` };
+      const warn = [coverWarning, wardrobeWarning].filter(Boolean).join('。') || undefined;
+      return { state: this.snapshot(), buildId: rec.id, log: logs, adaptation, warn };
     } catch (e) {
       this.steps.build = { phase: 'error', hint: errText(e) };
       push(`打包失败 · ${errText(e)}`);
       throw e;
     } finally {
+      if (scratch) await rm(scratch, {recursive:true,force:true}).catch(()=>{});
       if (!committed) for (const target of temporary) {
         const rel = relative(resolve(this.workRoot(), 'builds'), resolve(target));
         if (rel && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel)) await rm(target, {recursive:true,force:true}).catch(()=>{});
@@ -649,7 +722,20 @@ export class Live2dWorld implements World {
     }
   }
 
-  private async doInstall(dir: string, buildId?: string, signal?: AbortSignal): Promise<unknown> {
+  private async installWithConfirmation(dir: string, buildId: string | undefined, confirmed: boolean): Promise<unknown> {
+    const needsConfirmation = new Error('同 ID 形象需要确认替换');
+    try {
+      return await this.doInstall(dir, buildId, undefined, replacesOtherPack => {
+        if (replacesOtherPack && !confirmed) throw needsConfirmation;
+      });
+    } catch (error) {
+      if (error !== needsConfirmation) throw error;
+      this.steps.install = { ...IDLE, hint: needsConfirmation.message };
+      return { replacementRequired: true };
+    }
+  }
+
+  private async doInstall(dir: string, buildId?: string, signal?: AbortSignal, beforeSwap?: (replacesOtherPack:boolean) => void) {
     signal?.throwIfAborted();
     this.requireNotice();
     const chosen = buildId
@@ -658,11 +744,11 @@ export class Live2dWorld implements World {
     if (!chosen || !existsSync(chosen.packDir)) throw new Error('先打包，再安装');
     this.steps.install = { phase: 'loading', hint: '安装中…' };
     try {
-      const figures = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
+      const figures = await this.installDirectory();
       const target = await installPack(chosen.packDir, figures, {
         backupRoot: join(dirname(figures), 'figure-backups'),
         keep: 2,
-        signal,
+        signal, beforeSwap,
       });
       this.steps.install = { phase: 'done', hint: target, at: Date.now() };
       this.state.install = { target, at: Date.now(), buildId };
@@ -712,47 +798,61 @@ export class Live2dWorld implements World {
     }catch(e){await rm(scratch,{recursive:true,force:true});throw e;}
   }
 
-  private async captureWardrobe(pack:string,signal?:AbortSignal) {
-    const shot=await captureWardrobeThumbnails(pack,WORKBENCH_DIR,signal);
-    if(!shot.ok)throw Error('装扮缩略图生成失败：'+(shot.error||'未知原因'));
+  private async captureWardrobe(pack: string, signal?: AbortSignal, skipImages?: AbortSignal) {
+    const shot = await captureOptionalImages(active => captureWardrobeThumbnails(pack, WORKBENCH_DIR, active), signal, skipImages);
+    signal?.throwIfAborted();
+    return shot.ok ? undefined : `装扮缩略图未生成：${shot.error || '未知原因'}`;
   }
 
   private async saveManual(token:string,values:any[],groups?:any[]) {
     const receipt=this.manual.saved(token);if(receipt)return receipt;
-    this.requireNotice();const {session,bindings}=await this.manual.validate(token,values);
+    this.requireNotice();
+    const session = this.manual.get(token);
+    const controller = new AbortController();
+    this.pendingImages = { kind: 'manual', token, controller };
+    session.saving = true;
+    try{
+    const {bindings}=await this.manual.validate(token,values);
     const previous=await readFile(join(session.pack,LIBRARY),'utf8').then(s=>JSON.parse(s).wardrobe||[]).catch(()=>[]);
     const wardrobe=wardrobeConfig(session.catalog,groups??previous,bindings).groups;
-    session.saving=true;
-    try{
+    session.generation++;
+    session.renderAbort?.abort();
+    await session.renderTask?.catch(()=>{});
+    await session.renderer?.close().catch((error: unknown) => this.say(`预览资源释放未完成 · ${errText(error)}`));
     if(session.source){
       const current=await inspectNative(session.source);
       if(current.fingerprint!==session.catalog.fingerprint)throw Error('模型素材已变化，请重新打开编辑');
-      const result=await this.doBuild(session.source.dir,{remember:false,modelFile:session.source.file,native:nativeConfig(current,bindings),wardrobe,fingerprint:current.fingerprint});
+      const result=await this.doBuild(session.source.dir,{remember:false,modelFile:session.source.file,native:nativeConfig(current,bindings),wardrobe,fingerprint:current.fingerprint,skipImages:controller.signal});
       this.manual.complete(token,result);return result;
     }
     const parent=join(this.workRoot(),'builds','manual-'+randomUUID()),target=join(parent,'pack');
     let committed=false;
     try{
       await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
-      for(const file of ['live2d.js','native-actions.js','wardrobe.js','wardrobe-slots.js','render-config.js','render-quality.js','role-values.js','soullink.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
+      for(const file of ['live2d.js','native-actions.js','wardrobe.js','wardrobe-slots.js','render-config.js','render-quality.js','role-values.js','soullink.js','bongo.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
       await writeNativePack(target,session.catalog,bindings,false,wardrobe);
-      await this.captureWardrobe(target);
+      const warn = await this.captureWardrobe(target, undefined, controller.signal);
+      await readPackManifest(target);
       if(await packFingerprint(session.pack)!==session.hash)throw Error('形象包已变化，请重新打开编辑');
       const old=this.state.builds?.find(b=>b.id===session.buildId);if(!old)throw Error('原打包产物已移除');
+      if (old.packDir !== session.pack) throw Error('形象包已变化，请重新打开编辑');
       const rec={...old,packDir:target,bytes:await dirSize(target),words:JSON.parse(await readFile(join(target,'figure.json'),'utf8')).vocab.length,at:Date.now()};
       const previous={build:this.state.build,builds:this.state.builds};
       this.state.builds=(this.state.builds||[]).map(b=>b.id===old.id?rec:b);this.state.build=rec;
       try{await this.save();}catch(e){Object.assign(this.state,previous);throw e;}
       committed=true;
-      const result={state:this.snapshot(),buildId:rec.id};this.manual.complete(token,result);
+      const result={state:this.snapshot(),buildId:rec.id,warn};this.manual.complete(token,result);
       const rel=relative(resolve(this.workRoot(),'builds'),resolve(old.packDir));
       const inside=(root:string,file:string)=>{const path=relative(resolve(root),resolve(file));return !path||path!=='..'&&!path.startsWith('..'+sep)&&!isAbsolute(path);};
       const installed=this.state.install?.target;
-      if(rel&&rel!=='..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel)&&!this.state.builds.some(b=>b.packDir===old.packDir)&&(!installed||!inside(old.packDir,installed)&&!inside(installed,old.packDir)))
-        await rm(old.packDir,{recursive:true,force:true}).catch(e=>this.say(`旧打包副本未能移除 · ${errText(e)}`));
+      if(rel&&rel!=='..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel)&&!this.state.builds.some(b=>b.packDir===old.packDir)&&(!installed||!inside(old.packDir,installed)&&!inside(installed,old.packDir))) {
+        try { await this.assertRemovableBuild(old.packDir); await rm(old.packDir,{recursive:true,force:true}); }
+        catch(e) { this.say(`旧打包副本未能移除 · ${errText(e)}`); }
+      }
       return result;
     }catch(e){if(!committed)await rm(parent,{recursive:true,force:true}).catch(()=>{});throw e;}
     }finally{
+      this.pendingImages = undefined;
       session.saving=false;
       if(this.manual.saved(token)||session.closeRequested)await this.manual.close(token).catch(e=>this.say(`预览资源释放未完成 · ${errText(e)}`));
     }
@@ -797,28 +897,29 @@ export class Live2dWorld implements World {
     });
   }
 
-  private executeAutomation(model: AutomationModel, native: NativeConfig, signal?: AbortSignal, fingerprint?: string) {
+  private executeAutomation(model: AutomationModel, native: NativeConfig, signal?: AbortSignal, fingerprint?: string, beforeSwap?: (replacesOtherPack:boolean) => void, sourceFingerprint?: string) {
     return this.exclusive(async () => {
       this.requireNotice(); signal?.throwIfAborted();
       if (!aiEnabled(this.opts.getConfig())) throw new Error('AI 自动适配已关闭');
       if (model.kind === 'pack') {
-        const figures=await resolveFigures(this.opts.getConfig(),this.opts.dataDir);
-        const target = await installPack(model.dir, figures, {backupRoot:join(dirname(figures),'figure-backups'),keep:2,signal,expectedFingerprint:fingerprint});
+        const figures=await this.installDirectory();
+        const target = await installPack(model.dir, figures, {backupRoot:join(dirname(figures),'figure-backups'),keep:2,signal,expectedFingerprint:fingerprint,beforeSwap});
         const manifest = JSON.parse(await readFile(join(target,'figure.json'),'utf8'));
         this.state.install = {target,at:Date.now()};
         let warning;
         try { await this.save(); } catch (error) { warning = `形象已安装，但安装记录保存失败：${errText(error)}`; this.say(`! ${warning}`); }
         return {figureId:manifest.id,target,installed:true,mappings:[],warning};
       }
-      await this.doBuild(model.dir, {native,modelFile:model.file,remember:false,signal});
+      const built = await this.doBuild(model.dir, {native,modelFile:model.file,remember:false,signal,fingerprint,sourceFingerprint});
       signal?.throwIfAborted();
       if (!aiEnabled(this.opts.getConfig())) throw new Error('AI 自动适配已关闭，打包产物保留，尚未安装');
-      const record = this.state.builds?.[0];
+      const record = this.state.builds?.find(item => item.id === built.buildId);
       if (!record) throw new Error('打包未产出可安装模型');
       const manifest = JSON.parse(await readFile(join(record.packDir,'figure.json'),'utf8'));
       signal?.throwIfAborted();
-      await this.doInstall(model.dir,record.id,signal);
-      return {figureId:manifest.id,target:this.state.install?.target,installed:true,mappings:native.bindings};
+      const installed = await this.doInstall(model.dir,record.id,signal,beforeSwap);
+      const warning = [built.warn, installed.warn].filter(Boolean).join('。');
+      return {figureId:manifest.id,target:this.state.install?.target,installed:true,mappings:native.bindings,...(warning ? { warning } : {})};
     });
   }
 
@@ -861,11 +962,36 @@ export class Live2dWorld implements World {
     return out;
   }
 
+  private async installDirectory(): Promise<string> {
+    const figures = await canonicalPath(await resolveFigures(this.opts.getConfig(), this.opts.dataDir));
+    const backups = await canonicalPath(join(dirname(figures), 'figure-backups'));
+    for (const path of [join(this.workRoot(), 'builds'), ...(this.state.builds ?? []).map(build => build.packDir)]) {
+      const build = await canonicalPath(path);
+      if ([figures, backups].some(target => containsPath(build, target) || containsPath(target, build))) {
+        throw Error('安装或备份目录不能与打包目录重叠');
+      }
+    }
+    return figures;
+  }
+
+  private async assertRemovableBuild(path: string): Promise<void> {
+    const build = await canonicalPath(path);
+    const figures = await canonicalPath(await resolveFigures(this.opts.getConfig(), this.opts.dataDir));
+    const installed = this.state.install?.target;
+    const builds = await canonicalPath(join(this.workRoot(), 'builds'));
+    const managed = build !== builds && containsPath(builds, build);
+    if (!managed || containsPath(build, figures) || containsPath(figures, build)
+        || installed && containsPath(build, await canonicalPath(installed))) {
+      throw Error('打包目录与已安装形象重叠，或已不在当前工作目录内');
+    }
+  }
+
   private async removeBuild(id: string, opts: { quiet?: boolean } = {}): Promise<void> {
     const list = this.state.builds ?? [];
     const idx = list.findIndex((b) => b.id === id);
     if (idx < 0) throw new Error('没有这份打包产物');
     const rec = list[idx];
+    await this.assertRemovableBuild(rec.packDir);
     await rm(rec.packDir, { recursive: true, force: true });
     list.splice(idx, 1);
     this.state.builds = list;

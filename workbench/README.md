@@ -8,7 +8,7 @@
 |---|---|
 | `tools/convert.mjs` | 读取模型，生成 Coo 形象包 |
 | `tools/parameter-mapping.mjs` | 通用参数、VTS 配置与物理链识别 |
-| `tools/shrink-textures.py` | 可选的贴图降采样，需要 Python 与 Pillow |
+| `tools/shrink-textures.mjs` | 打包时按画质缩放超限 PNG |
 | `tools/workbench/` | 独立开发预览资源 |
 | `pack/` | 复制进形象包的入口、Live2D 后端及第三方运行组件 |
 | `vendor/coo-kit/` | 独立预览使用的宿主组件副本，不复制进形象包 |

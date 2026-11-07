@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-figure",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "type": "module",
   "description": "自动适配 Live2D 模型的通用动作与表情，生成封面并打包安装到 Coo。 / Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo.",
   "license": "AGPL-3.0-or-later",
@@ -45,8 +45,8 @@
         "description": "Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo."
       }
     },
-    "webUiClient": "dist/webui-7ee9c86797a4.js",
-    "webUiStyle": "dist/webui-2c2a0a939115.css",
+    "webUiClient": "dist/webui-5b4b9d3f9ddf.js",
+    "webUiStyle": "dist/webui-115b5ec520cf.css",
     "describe": "describe.json"
   },
   "files": [
@@ -55,6 +55,7 @@
     "scripts/build-webui.mjs",
     "assets",
     "workbench",
+    "licenses",
     "describe.json",
     "CHANGELOG.md",
     "README.md",
@@ -62,7 +63,8 @@
     "NOTICE"
   ],
   "dependencies": {
-    "fflate": "0.8.3"
+    "fflate": "0.8.3",
+    "pngjs": "7.0.0"
   },
   "exports": {
     ".": "./src/index.ts"

@@ -6,8 +6,9 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, join, relative, resolve, sep } from 'node:path';
-import { childPath, packId } from './paths.ts';
+import { basename, join } from 'node:path';
+import { canonicalPath, childPath, containsPath } from './paths.ts';
+import { readPackManifest } from './pack-manifest.ts';
 import { packFingerprint } from './pack-fingerprint.ts';
 
 /** Imported packages may not redirect copying or editing outside their own directory. */
@@ -52,7 +53,8 @@ export async function packDetail(root: string) {
     if (gain && kind) { bodyGain = Number(gain[1]); style = kind[1]; tunable = true; break; }
   }
   const string = (value: unknown) => typeof value === 'string' ? value : '';
-  return {nameZh:string(manifest.name?.zh),nameEn:string(manifest.name?.en),aboutZh:string(manifest.about?.zh),aboutEn:string(manifest.about?.en),bodyGain,style,tunable};
+  const about = (value: unknown) => value === '—' ? '' : string(value);
+  return {nameZh:string(manifest.name?.zh),nameEn:string(manifest.name?.en),aboutZh:about(manifest.about?.zh),aboutEn:about(manifest.about?.en),bodyGain,style,tunable};
 }
 
 export interface RunResult {
@@ -74,8 +76,8 @@ export function runNode(args: string[], cwd: string, signal?: AbortSignal): Prom
     let err = '';
     const abort = () => { child.kill(); };
     signal?.addEventListener('abort', abort, {once:true});
-    child.stdout?.on('data', (b: Buffer) => { out += b.toString(); });
-    child.stderr?.on('data', (b: Buffer) => { err += b.toString(); });
+    child.stdout?.setEncoding('utf8').on('data', (text: string) => { out += text; });
+    child.stderr?.setEncoding('utf8').on('data', (text: string) => { err += text; });
     child.once('error', (e) => resolve({ code: -1, out, err: String(e?.message ?? e) }));
     child.once('close', (code) => { signal?.removeEventListener('abort',abort); resolve({ code: code ?? -1, out, err }); });
   });
@@ -174,19 +176,15 @@ export async function buildPack(
 export async function installPack(
   packDir: string,
   figuresDir: string,
-  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal; expectedFingerprint?: string } = {},
+  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal; expectedFingerprint?: string; beforeSwap?: (replacesOtherPack: boolean) => void } = {},
 ): Promise<string> {
   opts.signal?.throwIfAborted();
   await assertRegularTree(packDir);
-  const manifest = JSON.parse(await readFile(join(packDir, 'figure.json'), 'utf8'));
-  const id = packId(manifest.id);
+  const { id } = await readPackManifest(packDir);
+  figuresDir = await canonicalPath(figuresDir);
   const target = childPath(figuresDir, id);
-  const source = resolve(packDir);
-  const inside = (a: string, b: string): boolean => {
-    const rel = relative(a, b);
-    return !rel || (rel.split(sep)[0] !== '..' && !rel.includes(':'));
-  };
-  if (inside(source, target) || inside(target, source)) throw new Error('安装目录不能与打包目录重叠');
+  const source = await canonicalPath(packDir);
+  if (containsPath(source, target) || containsPath(target, source)) throw new Error('安装目录不能与打包目录重叠');
   await mkdir(figuresDir, { recursive: true });
   const nonce = randomUUID();
   const pending = childPath(figuresDir, `.${id}-install-${nonce}`);
@@ -198,22 +196,37 @@ export async function installPack(
     if (opts.expectedFingerprint && await packFingerprint(pending, opts.signal) !== opts.expectedFingerprint) {
       throw new Error('形象包内容已改变，请重新分析确认');
     }
-    const copied = JSON.parse(await readFile(join(pending, 'figure.json'), 'utf8'));
+    await assertRegularTree(pending);
+    const copied = await readPackManifest(pending);
     if (copied.id !== id) throw new Error('复制后的形象包校验失败');
     opts.signal?.throwIfAborted();
     if (existsSync(target)) {
       if ((await lstat(target)).isSymbolicLink()) throw new Error('安装目标不能是符号链接');
+      let replacesOtherPack = true;
+      if (opts.beforeSwap) {
+        const sourceHash = async (dir: string) => {
+          const file = join(dir, 'build.json');
+          const info = await lstat(file).catch(() => null);
+          if (!info?.isFile() || info.isSymbolicLink() || info.size > 1048576) return null;
+          return await readFile(file, 'utf8').then(text => JSON.parse(text).sourceHash).catch(() => null);
+        };
+        const hash = await sourceHash(pending);
+        replacesOtherPack = typeof hash !== 'string' || !hash || hash !== await sourceHash(target);
+        opts.beforeSwap(replacesOtherPack);
+      }
       if (opts.backupRoot) {
         const backup = childPath(opts.backupRoot, `${id}.bak-${Date.now()}-${nonce}`);
-        if (inside(target, resolve(opts.backupRoot))) throw new Error('备份目录不能位于安装目标内部');
+        if (containsPath(target, await canonicalPath(opts.backupRoot))) throw new Error('备份目录不能位于安装目标内部');
         await mkdir(opts.backupRoot, { recursive: true });
         await cp(target, backup, { recursive: true });
       }
       opts.signal?.throwIfAborted();
+      opts.beforeSwap?.(replacesOtherPack);
       await rename(target, previous);
       moved = true;
     }
     try {
+      if (!moved) opts.beforeSwap?.(false);
       await rename(pending, target);
     } catch (e) {
       if (moved) { await rename(previous, target); moved = false; }
@@ -273,8 +286,12 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
     manifest.about = { ...(manifest.about ?? {}) };
     if (patch.aboutZh !== undefined) manifest.about.zh = patch.aboutZh;
     if (patch.aboutEn !== undefined) manifest.about.en = patch.aboutEn;
+    if (!Object.values(manifest.about).some(v => typeof v === 'string' && v.trim())) {
+      manifest.about[patch.aboutZh !== undefined ? 'zh' : 'en'] = '—';
+    }
   }
-  const opt = Array.isArray(manifest.axes) ? manifest.axes[0]?.options?.[0] : null;
+  const modelAxis = Array.isArray(manifest.axes) ? manifest.axes.find((axis: any) => axis?.id === 'model') : null;
+  const opt = modelAxis?.options?.length === 1 ? modelAxis.options[0] : null;
   if (opt && (patch.nameZh || patch.nameEn)) {
     opt.name = { ...(opt.name ?? {}) };
     if (patch.nameZh) opt.name.zh = patch.nameZh;

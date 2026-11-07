@@ -16,7 +16,7 @@ export function wardrobeConfig(catalog,groups=[],bindings=[],axisOffset=1){
   for(const binding of bindings)for(const id of [binding.resource,binding.release].filter(Boolean))for(const key of wardrobeChannels(resources.get(id)))owners.set(key,'动作');
   const clean=groups.map(g=>{
     if(!/^[a-z][a-z0-9]{1,24}$/.test(g.id)||ids.has(g.id)||typeof g.name!=='string'||!g.name.trim()||g.name.length>40||!Array.isArray(g.options)||g.options.length>16)throw Error('装扮分组无效');ids.add(g.id);
-    const options=new Set(['default']);return {id:g.id,slot:g.slot,name:g.name,options:g.options.map(o=>{
+    const options=new Set(['default']);return {id:g.id,...(g.slot?{slot:g.slot}:{}),...(g.custom?{custom:true}:{}),name:g.name,...(g.en?{en:g.en}:{}),options:g.options.map(o=>{
       if(!/^[a-z0-9]{1,24}$/.test(o.id)||options.has(o.id)||typeof o.name!=='string'||!o.name.trim()||o.name.length>60||!resources.has(o.resource))throw Error('装扮选项无效');options.add(o.id);
       for(const t of wardrobeTracks(resources.get(o.resource))){const key=channel(t),owner=owners.get(key);if(owner&&owner!==g.id)throw Error('装扮与动作或其他分组共用参数，请调整绑定');owners.set(key,g.id);}used.add(o.resource);
       if(o.ground!==undefined&&typeof o.ground!=='boolean')throw Error('贴地开关无效');

@@ -78,8 +78,9 @@ export class StaticPreviewRenderer implements PreviewWorker {
     await new Promise<void>((ok,bad)=>{this.server!.once('error',bad);this.server!.listen(0,'127.0.0.1',ok);});
     if(this.closed){await this.close();throw Error('预览已关闭');}
     this.origin='http://127.0.0.1:'+(this.server.address() as {port:number}).port;
-    this.profile=await mkdtemp(join(tmpdir(),'l2d-preview-'));
-    if(this.closed)throw Error('预览已关闭');
+    const profile=await mkdtemp(join(tmpdir(),'l2d-preview-'));
+    if(this.closed){await rm(profile,{recursive:true,force:true}).catch(()=>{});throw Error('预览已关闭');}
+    this.profile=profile;
     this.child=spawn(browser,['--headless=new','--disable-gpu','--enable-unsafe-swiftshader','--disable-background-timer-throttling','--hide-scrollbars','--mute-audio','--no-first-run','--window-size=640,640','--user-data-dir='+this.profile,this.origin+this.prefix],{windowsHide:true,stdio:'ignore'});
     this.child.once('error',e=>this.fail('启动预览失败：'+e.message));
     this.child.once('exit',()=>{if(!this.closed)this.fail('预览进程已退出，请重试');});

@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, cp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { PNG } from 'pngjs';
 import { PackImporter, filesFromZip, filesFromBundle } from '../src/import.ts';
-import { editPack, installPack, scanModel } from '../src/pipeline.ts';
+import { buildPack, editPack, installPack, scanModel } from '../src/pipeline.ts';
 import { coreState } from '../src/core.ts';
 import { captureCover } from '../src/cover.ts';
 import { LIVE2D } from '../src/index.ts';
-import { makeCtx } from './_ctx.mjs';
+import { makeCtx, fixtureManifest } from './_ctx.mjs';
 
 const bytes = (value) => Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
 async function fixture(t) {
@@ -19,7 +21,8 @@ async function fixture(t) {
 }
 async function pack(root, id = 'sample') {
   await mkdir(join(root, 'models', 'sample'), { recursive: true });
-  await writeFile(join(root, 'figure.json'), JSON.stringify({ id, name: { zh: '名字' }, about: { zh: '旧简介' } }));
+  await writeFile(join(root, 'figure.json'), JSON.stringify(fixtureManifest({ id })));
+  await writeFile(join(root, 'figure.js'), 'export function createFigureBody(){}');
   await writeFile(join(root, 'models', 'sample', 'profile.js'), 'export default {"bodyGain": 1.8, "style": "natural"};');
   return root;
 }
@@ -31,8 +34,8 @@ test('workbench settings expose only declared editable values and the notice has
   const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({});
   t.after(() => world.stop());
   const page = world.webUi('zh');
-  assert.deepEqual(page.panels.map(p => p.id), ['workbench','appearance']);
-  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',gearTheme:'red',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'subtle',uiStyle:'custom',uiButtonFill:'gradient',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:false,modelRoots:'' });
+  assert.deepEqual(page.panels.map(p => p.id), ['workbench','settings','appearance']);
+  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',previewSize:'512',gearTheme:'red',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'subtle',uiStyle:'custom',uiButtonFill:'gradient',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:false,modelRoots:'' });
   assert.ok(page.panels.some(p=>p.id==='appearance'));assert.deepEqual(await page.invoke('appearance','settings',[]),await page.invoke('workbench','settings',[]));
   await assert.rejects(()=>page.invoke('appearance','install',[]),/未知面板/);
   cfg.clean=true; cfg.texture='1024';
@@ -40,7 +43,7 @@ test('workbench settings expose only declared editable values and the notice has
   assert.equal(next.clean,true); assert.equal(next.texture,'1024');
   assert.equal('modelDir' in next,false); assert.equal('workDir' in next,false);
   cfg.gearTheme='cyan';cfg.particleEffect='meteors';const appearance=await page.invoke('workbench','settings',[]);assert.equal(appearance.gearTheme,'cyan');assert.equal(appearance.particleEffect,'meteors');
-  const props=page.config[0].schema.properties;assert.equal(props['worlds.figure.gearTheme'].enum.length,6);assert.equal(props['worlds.figure.particleEffect'].enum.length,3);
+  const props=page.config[0].schema.properties;assert.equal(props['worlds.figure.gearTheme'].enum.length,6);assert.equal(props['worlds.figure.particleEffect'].enum.length,6);
   cfg.gearTheme='unknown';cfg.particleEffect='unknown';const fallback=await page.invoke('workbench','settings',[]);assert.equal(fallback.gearTheme,'red');assert.equal(fallback.particleEffect,'stars');assert.equal(cfg.gearTheme,'unknown');
 });
 
@@ -64,8 +67,10 @@ test('import rejects dangerous ids and thumbnails outside the pack, and rejects 
     assert.equal(result.packs.length, 0);
     assert.ok(result.problems.length);
   }
-  const staged = await importer.stage([file('a/figure.json', { id: 'safe', thumb: '../secret.png' }), file('secret.png', 'private')], false, new Map());
-  assert.equal(staged.packs[0].thumb, null);
+  const rejected = await importer.stage([file('a/figure.json', fixtureManifest({ id: 'safe', thumb: '../secret.png' })), file('a/figure.js', ''), file('secret.png', 'private')], false, new Map());
+  assert.equal(rejected.packs.length, 0);
+  assert.match(rejected.problems[0].reason, /路径/);
+  const staged = await importer.stage([file('a/figure.json', fixtureManifest()), file('a/figure.js', '')], false, new Map());
   const result = await importer.install(staged.token, ['../escape'], [], { figuresDir: await fixture(t) });
   assert.match(result.error, /待装清单/);
 });
@@ -74,7 +79,7 @@ test('folder upload survives multiple chunks, conflicts require replacement, and
   const root = await fixture(t);
   const importer = new PackImporter(); t.after(() => importer.cancel());
   const token = await importer.beginUpload();
-  await importer.appendUpload(token, [file('a/figure.json', { id: 'sample', version: '1.0.0' })]);
+  await importer.appendUpload(token, [file('a/figure.json', fixtureManifest({ version: '1.0.0' })), file('a/figure.js', '')]);
   await importer.appendUpload(token, [file('a/data.txt', 'new')]);
   const staged = await importer.finishUpload(token, true, new Map());
   assert.equal(staged.token, token);
@@ -99,6 +104,9 @@ test('install failure preserves existing figure; source/target overlap is reject
   assert.equal(await readFile(join(target, 'keep.txt'), 'utf8'), 'original');
   assert.deepEqual((await readdir(figures)).sort(), ['sample']);
   await assert.rejects(installPack(target, figures), /重叠/);
+  await writeFile(join(source, 'figure.json'), '{"id":"sample"}');
+  await assert.rejects(installPack(source, figures), /manifest/);
+  assert.equal(await readFile(join(target, 'keep.txt'), 'utf8'), 'original');
   await writeFile(join(source, 'figure.json'), '{"id":"../outside"}');
   await assert.rejects(installPack(source, figures), /id/);
 });
@@ -106,7 +114,7 @@ test('install failure preserves existing figure; source/target overlap is reject
 test('edit clears about and rejects invalid tuning before writing any files', async (t) => {
   const root = await pack(await fixture(t));
   await editPack(root, { aboutZh: '', bodyGain: 2.4, style: 'calm' });
-  assert.equal(JSON.parse(await readFile(join(root, 'figure.json'), 'utf8')).about.zh, '');
+  assert.equal(JSON.parse(await readFile(join(root, 'figure.json'), 'utf8')).about.zh, '—');
   const profile = await import(`${pathToFileURL(join(root, 'models/sample/profile.js')).href}?edited`);
   assert.equal(profile.default.bodyGain, 2.4);
   assert.equal(profile.default.style, 'calm');
@@ -184,6 +192,27 @@ test('world locks mutations before awaits and releases lock after errors', async
   await world.stop();
 });
 
+test('card install confirms an occupied ID and rejects an installation directory inside a draft',async t=>{
+ const root=await fixture(t);
+ const first=await pack(join(root,'figure','builds','first'));
+ const second=await pack(join(root,'figure','builds','second'));
+ const cfg={enabled:true,figuresDir:join(root,'figures')};
+ await writeFile(join(first,'build.json'),JSON.stringify({sourceHash:'first'}));
+ await writeFile(join(second,'build.json'),JSON.stringify({sourceHash:'second'}));
+ await writeFile(join(root,'figure','state.json'),JSON.stringify({builds:[{id:'first',packDir:first},{id:'second',packDir:second}]}));
+ const world=LIVE2D.create(makeCtx(root,cfg));await world.start({});t.after(()=>world.stop());
+ const invoke=(method,args=[])=>world.webUi().invoke('workbench',method,args);
+ await invoke('noticeAccept',[1]);
+ await invoke('install',['','first']);
+ const target=join(root,'figures','sample','build.json');
+ assert.deepEqual(await invoke('install',['','second']),{replacementRequired:true});
+ assert.equal(JSON.parse(await readFile(target,'utf8')).sourceHash,'first');
+ await invoke('install',['','second',true]);
+ assert.equal(JSON.parse(await readFile(target,'utf8')).sourceHash,'second');
+ cfg.figuresDir=first;
+ await assert.rejects(invoke('install',['','second',true]),/重叠/);
+});
+
 test('package links are rejected before installation or profile editing touches another directory',async t=>{
   const root=await fixture(t),outside=join(root,'outside'),source=await pack(join(root,'source'));
   await mkdir(outside);await writeFile(join(outside,'profile.js'),'export default {"bodyGain": 1.8, "style": "natural"};');
@@ -200,6 +229,41 @@ test('conversion rejects a corrupt moc3 and missing required textures instead of
   await assert.rejects(scanModel(workbench,root),/moc3.*无效|不完整/);
   const header=Buffer.alloc(64);header.write('MOC3');await writeFile(join(root,'role.moc3'),header);
   await assert.rejects(scanModel(workbench,root),/缺少贴图/);
+});
+
+test('external model diagnostics remain data when the generated profile loads',async t=>{
+ const root=await fixture(t),workbench=join(import.meta.dirname,'..','workbench');
+ const source=join(root,'source');await mkdir(source);
+ const id='EyeProbe */\nglobalThis.__figureAuditMarker = true;\n/*';
+ await writeFile(join(source,'role.model3.json'),JSON.stringify({FileReferences:{Moc:'role.moc3',Textures:['texture.png'],DisplayInfo:'role.cdi3.json'}}));
+ await writeFile(join(source,'role.cdi3.json'),JSON.stringify({Parameters:[{Id:id,Name:'Probe'}]}));
+ const header=Buffer.alloc(64);header.write('MOC3');await writeFile(join(source,'role.moc3'),header);
+ await writeFile(join(source,'texture.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jnoYAAAAASUVORK5CYII=','base64'));
+ const core=join(root,'core.js');await writeFile(core,'// synthetic converter fixture');
+ const output=await buildPack(workbench,source,root,{corePath:core,maxTexture:0});
+ const profile=await readFile(join(output,'models','source','profile.js'),'utf8');
+ assert.doesNotMatch(profile,/__figureAuditMarker/);
+ const module=await import('data:text/javascript;base64,'+Buffer.from(profile).toString('base64'));
+ assert.ok(module.default.roles);
+ assert.equal(globalThis.__figureAuditMarker,undefined);
+});
+
+test('building with a texture cap writes the smaller PNG and keeps its transparent edge and original file', async t => {
+  const root = await fixture(t), workbench = join(import.meta.dirname, '..', 'workbench');
+  const source = join(root, 'source');
+  await mkdir(source);
+  const moc = Buffer.alloc(64);
+  moc.write('MOC3');
+  const texture = PNG.sync.write({ width: 2, height: 1, data: Buffer.from([240, 30, 60, 255, 0, 0, 0, 0]) });
+  await writeFile(join(source, 'role.model3.json'), JSON.stringify({ FileReferences: { Moc: 'role.moc3', Textures: ['texture.png'] } }));
+  await writeFile(join(source, 'role.moc3'), moc);
+  await writeFile(join(source, 'texture.png'), texture);
+  const corePath = join(root, 'core.js');
+  await writeFile(corePath, '// synthetic converter fixture');
+  const result = await buildPack(workbench, source, root, { corePath, maxTexture: 1 });
+  const small = PNG.sync.read(await readFile(join(result, 'models', 'source', 'textures', 'texture_00.png')));
+  assert.deepEqual([small.width, small.height, ...small.data], [1, 1, 240, 30, 60, 128]);
+  assert.deepEqual(await readFile(join(source, 'texture.png')), texture);
 });
 
 test('a completed installation stays successful if writing its history fails',async t=>{
@@ -243,6 +307,55 @@ test('core cache rejects corruption; cover handles browser spawn error without c
   try {
     const result = await captureCover(root, root, 500);
     assert.equal(result.ok, false); assert.match(result.error, /启动|超时/);
+  } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
+});
+
+test('optional cover reports an early browser exit without waiting for its timeout', async (t) => {
+  const root = await fixture(t);
+  const previous = process.env.CHROME_PATH;
+  // Node accepts the executable launch, then exits immediately on Chromium-only flags.
+  process.env.CHROME_PATH = process.execPath;
+  try {
+    const result = await captureCover(root, root, 2000);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /浏览器已退出/);
+  } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
+});
+
+test('optional cover returns a diagnostic if its local HTTP server cannot listen', async (t) => {
+  const root = await fixture(t);
+  const previous = process.env.CHROME_PATH;
+  process.env.CHROME_PATH = process.execPath;
+  t.mock.method(http.Server.prototype, 'listen', function () {
+    queueMicrotask(() => this.emit('error', new Error('port unavailable')));
+    return this;
+  });
+  try {
+    const result = await captureCover(root, root);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /封面渲染服务失败.*port unavailable/);
+  } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
+});
+
+test('skipping cover while its server starts preserves the cancellation reason', async (t) => {
+  const root = await fixture(t);
+  const previous = process.env.CHROME_PATH;
+  process.env.CHROME_PATH = process.execPath;
+  const controller = new AbortController();
+  const reason = new Error('skip images');
+  const listen = http.Server.prototype.listen;
+  let server;
+  t.mock.method(http.Server.prototype, 'listen', function (port, host, ready) {
+    server = this;
+    return listen.call(this, port, host, () => {
+      controller.abort(reason);
+      ready();
+    });
+  });
+  try {
+    await assert.rejects(captureCover(root, root, 2000, [], controller.signal), error => error === reason);
+    assert.equal(server.listening, false);
+    assert.deepEqual(await readdir(root), []);
   } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
 });
 

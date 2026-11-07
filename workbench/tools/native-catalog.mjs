@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {createReadStream} from 'node:fs';
 import {lstat,readFile,readdir,realpath} from 'node:fs/promises';
 import {basename,dirname,isAbsolute,join,relative,resolve,sep} from 'node:path';
 import {compileCurve} from '../pack/backends/native-actions.js';
@@ -8,6 +9,24 @@ export const MOTION_WORDS=['idle','nod','shake','wave','bow','cheer','dance','ju
 const WORDS=new Set([...FACE_WORDS,...MOTION_WORDS]);
 const reversePose=(a,b)=>b.id!==a.id&&b.kind==='motion'&&a.parameters.some(p=>Math.abs(p.start-p.end)>.001)&&b.parameters.length===a.parameters.length&&a.parameters.every(p=>{const q=b.parameters.find(q=>q.id===p.id&&q.target===p.target);return q&&Math.abs(p.start-q.end)<.01&&Math.abs(p.end-q.start)<.01;});
 const digest=value=>createHash('sha256').update(value).digest('hex');
+
+/** @param {any[]} vocab @param {any[]} bindings @param {any[]} resources */
+export function appendNativeVocab(vocab, bindings, resources) {
+ const labels = {nod:['点头','Nod'],shake:['摇头','Shake'],wave:['招手','Wave'],bow:['鞠躬','Bow'],cheer:['欢呼','Cheer'],dance:['跳舞','Dance'],jump:['跳跃','Jump'],sit:['坐下','Sit'],stretch:['伸展','Stretch'],shiver:['发抖','Shiver']};
+ const used = new Set(vocab.flatMap(word => [word.id, ...Object.values(word.names || {}).flat()]));
+ for (const {word,resource:id} of bindings) {
+  if (word === 'idle' || used.has(word)) continue;
+  const resource = resources.find(item => item.id === id);
+  if (!resource) continue;
+  const [zh,en] = labels[word] ?? [word,word];
+  used.add(word);
+  const names = {};
+  for (const [locale,label] of [['zh',zh],['en',en]]) {
+   if (!used.has(label)) { names[locale] = [label]; used.add(label); }
+  }
+  vocab.push({id:word,kind:resource.kind,names,about:{zh:`原生${zh}`,en:`Native ${en}`},seconds:Math.max(.1,resource.seconds || 1)});
+ }
+}
 export const readJson=async file=>JSON.parse((await readFile(file,'utf8')).replace(/^\uFEFF/,''));
 export async function localFile(root,name,max=4*1048576){
  if(typeof name!=='string'||isAbsolute(name)||name.includes('\0'))throw Error('资源路径无效');
@@ -138,7 +157,7 @@ export async function inspectNative(model,{signal}={}){
    if(values.length>2048||!values.length||values.some(v=>typeof v.id!=='string'||v.id.length>200||kind==='expression'&&(!Number.isFinite(v.value)||!['Add','Multiply','Overwrite'].includes(v.blend))))throw Error('无有效参数或曲线过多');
    const label=values.map(v=>`${v.id} ${metadata.get(v.id)?.name||''} ${metadata.get(v.id)?.group||''}`).join(' '),text=`${title} ${basename(rel)} ${label}`;
    const appearance=appearancePattern.test(text);
-   const pose=kind==='motion'&&(/打开|关闭|开启|收起|放下|抬起|手|臂|pose|arm|hand/i.test(text));
+   const pose=kind==='motion'&&values.some(v=>Math.abs(v.end-v.start)>=.01)&&(/打开|关闭|开启|收起|放下|抬起|手|臂|pose|arm|hand/i.test(text));
    const classification=appearance?'appearance':pose?'pose':kind==='expression'?'expression':/idle|待机/i.test(text)?'idle':'gesture';
    const hit=hints.find(([,rx])=>rx.test(`${title} ${basename(rel)}`));
    const candidate=hit&&!appearance?{word:hit[0],confidence:.82,reason:'文件名或作者热键含明确动作／表情含义'}:null;
@@ -155,8 +174,13 @@ export async function inspectNative(model,{signal}={}){
   if(opposite.length===1)a.release=opposite[0].id;
  }
  const assets=[];
- for(const name of [refs.Moc,refs.Physics,...(refs.Textures||[])].filter(v=>typeof v==='string').slice(0,40)){
-  try{const file=await localFile(root,name,512*1048576),s=await lstat(file);assets.push([name,s.size,s.mtimeMs]);}catch(e){assets.push([name,'missing']);}
+ for(const name of [refs.Moc,refs.Physics,refs.Pose,refs.DisplayInfo,...(refs.Textures||[])].filter(v=>typeof v==='string')){
+  signal?.throwIfAborted();
+  try{
+   const file=await localFile(root,name,512*1048576),hash=createHash('sha256');
+   for await (const chunk of createReadStream(file,{signal})) hash.update(chunk);
+   assets.push([name,hash.digest('hex')]);
+  }catch(e){signal?.throwIfAborted();assets.push([name,'missing']);}
  }
  const fingerprint=digest(JSON.stringify({model:await readFile(await localFile(root,model.file),'utf8'),assets,metadataHashes,resources:resources.map(r=>[r.file,r.hash])}));
  return {model,fingerprint,resources,warnings,truncated:scanned>3000||resources.length>=256};

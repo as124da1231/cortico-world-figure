@@ -47,7 +47,7 @@ async function mount(t, opts = {}) {
       return { builds: opts.builds ?? [] };
     },
   };
-  const handle = await (opts.appearance ? panel.panels.appearance : opts.configuration ? panel.configuration : panel.panels.workbench).mount(ctx);
+  const handle = await (opts.appearance ? panel.panels.appearance : opts.configuration ? panel.panels.settings : panel.panels.workbench).mount(ctx);
   t.after(() => { handle.dispose(); dom.window.close(); });
   await tick();
   const button = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent === label);
@@ -56,7 +56,7 @@ async function mount(t, opts = {}) {
 
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
   const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
-  assert.equal(root.querySelectorAll('.l2d-gear-input').length,5);
+  assert.equal(root.querySelectorAll('.l2d-gear-input').length,6);
   assert.equal(root.querySelector('.l2d-config-notice'),null);
   assert.equal(root.querySelector('.l2d-config-page .l2d-notice-entry'),null);
   assert.equal(root.querySelector('.l2d-version-corner').textContent,'v1.4.2');
@@ -65,6 +65,13 @@ test('primary configuration uses the shared gear form and auto-saves only change
   assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.texture':'2048'}}]);
   assert.equal(guards[0](),null);
   assert.equal(root.querySelector('.l2d-settings-status').textContent,'已保存');
+});
+
+test('preview resolution is saved independently from formal pack quality',async t=>{
+ const {root,dom,configCalls}=await mount(t,{configuration:true,quality:'balanced'}),preview=root.querySelector('[aria-label="预览精度"]');
+ assert.equal(preview.value,'1');assert.equal(preview.getAttribute('aria-valuetext'),'512 px');
+ preview.value='0';preview.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await tick();
+ assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.previewSize':'256'}}]);assert.equal(root.querySelector('[aria-label="画质"]').value,'1');
 });
 
 test('auto-save serializes rapid edits and keeps the latest selection', async t => {
@@ -78,9 +85,9 @@ test('auto-save serializes rapid edits and keeps the latest selection', async t 
   assert.equal(configCalls[1].values['worlds.figure.texture'],'4096');
   release();await tick();assert.equal(guards[0](),null);
 });
-test('six themes and three particles preview independently and auto-save only the chosen preference',async t=>{
+test('six themes and six particles preview independently and auto-save only the chosen preference',async t=>{
  const {root,configCalls}=await mount(t,{appearance:true});const themes=root.querySelector('[role=radiogroup][aria-label="主题配色"]'),particles=root.querySelector('[role=radiogroup][aria-label="粒子效果"]');
- assert.equal(themes.querySelectorAll('input').length,6);assert.equal(particles.querySelectorAll('input').length,3);assert.equal(themes.querySelector(':checked').value,'red');assert.equal(particles.querySelector(':checked').value,'stars');assert.equal(configCalls.length,0);
+ assert.equal(themes.querySelectorAll('input').length,6);assert.equal(particles.querySelectorAll('input').length,6);assert.equal(themes.querySelector(':checked').value,'red');assert.equal(particles.querySelector(':checked').value,'stars');assert.equal(configCalls.length,0);
  themes.querySelector('[value=cyan]').click();await tick();assert.equal(root.querySelector('form').dataset.gearTheme,'cyan');assert.equal(root.querySelector('form').dataset.particleEffect,'stars');
  particles.querySelector('[value=meteors]').click();await tick();assert.deepEqual(configCalls.map(c=>c.values),[{'worlds.figure.gearTheme':'cyan'},{'worlds.figure.particleEffect':'meteors'}]);
 });
@@ -490,6 +497,82 @@ test('one-click packing retries only failed models and keeps completed packs', a
   assert.equal(button('一键打包').disabled, true);
 });
 
+test('one-click install reuses a prepared pack after replacement is declined', async t => {
+  let confirm = false;
+  const { root, button, calls, dom } = await mount(t, {
+    ack: true,
+    confirm: async () => confirm,
+    invoke(method, args) {
+      if (method === 'importPaths') return {
+        token: 'batch', models: [{ dir: 'bongo', title: 'BongoCat' }],
+        packs: [{ dir: 'packed', id: 'packed' }],
+      };
+      if (method === 'importBuild' || method === 'importKeep') return { buildId: args[1] };
+      if (method === 'install' && args[1] === 'bongo' && !args[2]) return { replacementRequired: true };
+      if (method === 'install') return { log: [] };
+    },
+  });
+  paste(dom, root.querySelector('.l2d-drop-zone'), 'G:/models');
+  await tick();
+  button('一键安装').click();
+  await tick();
+  assert.match(root.querySelector('.l2d-source-hint').textContent, /1 项已打包，等待确认替换/);
+  assert.equal(button('一键安装').disabled, false);
+  confirm = true;
+  button('一键安装').click();
+  await tick();
+  assert.deepEqual(calls.filter(c => ['importBuild', 'importKeep'].includes(c.method)).map(c => c.args[1]), ['bongo', 'packed']);
+  assert.deepEqual(calls.filter(c => c.method === 'install').map(c => c.args), [
+    ['', 'bongo'], ['', 'packed'], ['', 'bongo'], ['', 'bongo', true],
+  ]);
+  assert.equal(button('一键安装').disabled, true);
+});
+
+test('one-click install can skip the current model cover without blocking installation', async t => {
+  let firstBuild, firstInstall, firstSkip, secondBuild, keep;
+  const { root, button, calls, dom } = await mount(t, {
+    ack: true,
+    invoke(method, args) {
+      if (method === 'importPaths') return {
+        token: 'batch', models: [{ dir: 'first', title: '一' }, { dir: 'second', title: '二' }],
+        packs: [{ dir: 'packed', id: 'packed' }],
+      };
+      if (method === 'importBuild') return new Promise(resolve => {
+        if (args[1] === 'first') firstBuild = resolve; else secondBuild = resolve;
+      });
+      if (method === 'skipImportCover') {
+        if (args[1] === 'first') return new Promise(resolve => firstSkip = resolve);
+        return { skipped: true };
+      }
+      if (method === 'install') {
+        if (args[1] === 'first') return new Promise(resolve => firstInstall = resolve);
+        return { log: [] };
+      }
+      if (method === 'importKeep') return new Promise(resolve => keep = resolve);
+    },
+  });
+  paste(dom, root.querySelector('.l2d-drop-zone'), 'G:/models'); await tick();
+  const skip = button('跳过封面');
+  assert(skip.hidden);
+  button('一键安装').click(); await tick();
+  assert(!skip.hidden); assert(!skip.disabled);
+  skip.click(); assert(skip.disabled);
+  firstBuild({ buildId: 'first' }); await tick();
+  assert(skip.hidden);
+  firstInstall({ log: [] }); await tick();
+  assert(!skip.hidden); assert(!skip.disabled);
+  firstSkip({ skipped: true }); await tick();
+  assert.equal(skip.textContent, '跳过封面'); assert(!skip.disabled);
+  skip.click(); await tick();
+  assert.equal(skip.textContent, '已跳过封面'); assert(skip.disabled);
+  secondBuild({ buildId: 'second' }); await tick();
+  assert(skip.hidden);
+  keep({ buildId: 'packed' }); await tick();
+  assert(skip.hidden);
+  assert.deepEqual(calls.filter(c => c.method === 'skipImportCover').map(c => c.args), [['batch', 'first'], ['batch', 'second']]);
+  assert.deepEqual(calls.filter(c => c.method === 'install').map(c => c.args[1]), ['first', 'second', 'packed']);
+});
+
 test('failed imports keep the error visible and cannot package a stale selection', async (t) => {
   const { root, button, dom } = await mount(t, { ack: true, invoke: method => { if (method === 'importPaths') throw new Error('目录不存在'); } });
   paste(dom, root.querySelector('.l2d-drop-zone'), 'G:/missing'); await tick();
@@ -515,6 +598,7 @@ test('non-Live2D pack metadata can be saved without sending unsupported performa
   button('编辑').click();await tick();
   const modal=root.querySelector('[role="dialog"]');assert(modal);
   assert.equal(modal.querySelector('input[type="range"]').closest('.l2d-field').hidden,true);
+  modal.querySelector('input').value='新名字';
   button('保存').click();await tick();
   const patch=calls.find(call=>call.method==='edit').args[1];
   assert.equal('bodyGain' in patch,false);assert.equal('style' in patch,false);

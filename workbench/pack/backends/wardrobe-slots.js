@@ -11,13 +11,15 @@ export function fixedWardrobeGroups(groups=[]) {
   const assigned=new Map(),waiting=[],custom=[];
   for(const group of groups){
     if(!group||typeof group!=='object'||!Array.isArray(group.options))throw Error('装扮分组无效');
+    if(group.custom&&!group.slot){custom.push(group);continue;}
     const slot=group.slot?WARDROBE_SLOTS.find(s=>s.slot===group.slot):WARDROBE_SLOTS.find(s=>s.name===group.name||s.en===group.name);
     if(group.slot&&!slot)throw Error('装扮栏位无效');
     if(slot){if(assigned.has(slot.slot))throw Error('装扮栏位重复');assigned.set(slot.slot,group);}
-    else if(group.custom)custom.push(group);else waiting.push(group);
+    else waiting.push(group);
   }
   // 老包可能没有 slot 字段：按顺序补进空着的内置栏。
   for(const slot of WARDROBE_SLOTS)if(!assigned.has(slot.slot)&&waiting.length)assigned.set(slot.slot,waiting.shift());
+  custom.push(...waiting);
 
   const used=new Set();
   const unique=base=>{let id=base,n=1;while(used.has(id))id=`${base}${n++}`;used.add(id);return id;};

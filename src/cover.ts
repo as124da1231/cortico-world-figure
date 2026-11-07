@@ -5,10 +5,11 @@
  * 不依赖 Electron，也不装依赖：Chrome / Edge 用系统里已有的。
  */
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { extname, join, normalize, sep } from 'node:path';
 import type {StaticPreviewPlan} from './manual-preview.ts';
 
@@ -30,8 +31,13 @@ const COVER_PAGE = `<!doctype html>
 </head><body><div id="root"></div>
 <script type="module">
 const post = (body) => fetch('/__cover', {
-  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  method: 'POST', headers: { 'content-type': 'application/json', 'x-figure-capture': __CAPTURE_TOKEN__ }, body: JSON.stringify(body),
 });
+const checkRender = () => {
+  const error = globalThis.__l2dRenderQuality?.()?.error;
+  if (error) throw new Error(error);
+};
+let body;
 try {
   const kit = await import('/kit/body.js');
   const mod = await import('/pack/figure.js');
@@ -47,42 +53,54 @@ try {
   });
   const asset = (p) => new URL(p, new URL('/pack/', location.origin));
   const plan = __STATIC_PREVIEW__;
-  const body = await mod.createFigureBody(new URL('/pack/', location.origin), { kit, host, loadImage, asset, scheme: '', model: undefined, preview: !!plan });
+  body = await mod.createFigureBody(new URL('/pack/', location.origin), { kit, host, loadImage, asset, scheme: '', model: undefined, preview: !!plan });
   body.do?.('neutral');
   body.set?.({ roam: 'off' });
-  await new Promise((r) => setTimeout(r, 1200));
-  if(plan){
-    if(!globalThis.__l2dStaticSample)throw Error('静态预览接口不可用');
-    globalThis.__l2dPreview.wardrobe(plan.groups,{});
-    for(let i=0;i<8;i++)body.step(1/60);
-    const frames=plan.samples.map(sample=>({...sample,...globalThis.__l2dStaticSample(sample)}));
-    await post({frames,quality:globalThis.__l2dRenderQuality?.()});
-    body.dispose?.();document.title='done';
-  }else{
-  let fit = null;
-  if (!__WARDROBE_ONLY__) try { globalThis.__l2dAutoFit?.(); fit = globalThis.__l2dFit?.get?.() ?? null; } catch (e) { fit = null; }
-  await new Promise((r) => setTimeout(r, 400));
-  const r = globalThis.__l2dCover?.();
-  if (!r || !r.png) throw new Error('cover api unavailable');
-  const evidence = [];
-  for (const sample of __NATIVE_SAMPLES__) {
-    const png = globalThis.__l2dNativeSample?.(sample.id, sample.time, sample.word, sample.generic);
-    if (!png) throw new Error('native sample api unavailable');
-    evidence.push({ ...sample, png });
+  const deadline = performance.now() + 20000;
+  while (globalThis.__l2dPreviewReady && !globalThis.__l2dPreviewReady()) {
+    checkRender();
+    if (performance.now() >= deadline) throw new Error('模型加载超时');
+    body.step(1 / 60);
+    await new Promise((resolve) => setTimeout(resolve, 16));
   }
-  const wardrobe = [];
-  for (const sample of __WARDROBE_SAMPLES__) {
-    await body.setScheme?.(sample.scheme);
-    const shot = globalThis.__l2dCover?.();
-    if (!shot?.png128) throw new Error('装扮缩略图渲染失败');
-    wardrobe.push({ ...sample, png: shot.png128 });
+  checkRender();
+  if (plan) {
+    if (!globalThis.__l2dStaticSample) throw new Error('静态预览接口不可用');
+    globalThis.__l2dPreview.wardrobe(plan.groups, {});
+    for (let i = 0; i < 8; i++) body.step(1 / 60);
+    const frames = plan.samples.map(sample => ({ ...sample, ...globalThis.__l2dStaticSample(sample) }));
+    await post({ frames, quality: globalThis.__l2dRenderQuality?.() });
+  } else {
+    let fit = null, cover = null;
+    if (!__WARDROBE_ONLY__) {
+      try { globalThis.__l2dAutoFit?.(); fit = globalThis.__l2dFit?.get?.() ?? null; } catch { /* Cover can still work without auto-fit. */ }
+      cover = globalThis.__l2dCover?.();
+      checkRender();
+      if (!cover?.png) throw new Error('封面渲染失败');
+    }
+    const evidence = [];
+    for (const sample of __NATIVE_SAMPLES__) {
+      const png = globalThis.__l2dNativeSample?.(sample.id, sample.time, sample.word, sample.generic);
+      checkRender();
+      if (!png) throw new Error('动作取样渲染失败');
+      evidence.push({ ...sample, png });
+    }
+    const wardrobe = [];
+    for (const sample of __WARDROBE_SAMPLES__) {
+      await body.setScheme?.(sample.scheme);
+      const shot = globalThis.__l2dCover?.();
+      checkRender();
+      if (!shot?.png128) throw new Error('装扮缩略图渲染失败');
+      wardrobe.push({ ...sample, png: shot.png128 });
+    }
+    await post({ png: cover?.png, png128: cover?.png128, fit, evidence, wardrobe });
   }
-  await post({ png: r.png, png128: r.png128, fit, evidence, wardrobe });
   document.title = 'done';
-  }
 } catch (e) {
   await post({ error: String((e && e.message) || e) }).catch(() => {});
   document.title = 'failed';
+} finally {
+  body?.dispose?.();
 }
 </script></body></html>`;
 
@@ -111,16 +129,21 @@ export async function captureWardrobeThumbnails(packDir:string,workbenchDir:stri
 export function findBrowser(): string | null {
   const env = process.env.CHROME_PATH?.trim();
   if (env && existsSync(env)) return env;
+  const userApps = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
   const cands = [
     'C:/Program Files/Google/Chrome/Application/chrome.exe',
     'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
     'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
     'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
     'C:/Program Files (x86)/Chromium/Application/chrome.exe',
+    join(userApps, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    join(userApps, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    join(userApps, 'Chromium', 'Application', 'chrome.exe'),
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
     '/Applications/Chromium.app/Contents/MacOS/Chromium',
     '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
   ];
@@ -144,19 +167,77 @@ export async function captureCover(
   const manifest=options.wardrobe?JSON.parse(await readFile(join(packDir,'figure.json'),'utf8')):null;
   const library=options.wardrobe?JSON.parse(await readFile(join(packDir,'native-library.json'),'utf8')):null;
   const wardrobe=options.wardrobe?wardrobeSamples(manifest,library.wardrobe||[]):[];
-  if(wardrobe.length>136)throw Error('装扮缩略图数量超出上限');
+  if(wardrobe.length>136)return { ok: false, error: '装扮缩略图数量超出上限' };
   if(options.wardrobe&&!wardrobe.length)return {ok:true,thumbnails:0};
   const browser = findBrowser();
   if (!browser) return { ok: false, error: '没找到 Chrome / Edge，跳过封面' };
 
-  let resolveResult: (r: CoverResult) => void = () => {};
-  const done = new Promise<CoverResult>((resolve) => { resolveResult = resolve; });
+  type CaptureReply = CoverResult | { body: any };
+  let resolveResult: (r: CaptureReply) => void = () => {};
+  const done = new Promise<CaptureReply>((resolve) => { resolveResult = resolve; });
+  const token = randomUUID();
+  let origin = '';
+  let received = false;
+
+  async function persistCapture(body: any): Promise<CoverResult> {
+    if(options.preview){
+      if(!Array.isArray(body.frames)||body.frames.length!==options.preview.samples.length)throw Error('预览图片不完整');
+      const frames=body.frames.map((frame:any,i:number)=>{
+        const png=pngOf(frame.png);if(png.length<24||png.length>262144||png.readUInt32BE(16)!==256||png.readUInt32BE(20)!==256)throw Error('预览图片尺寸无效');
+        return {...options.preview!.samples[i],png:frame.png,fit:frame.fit,picks:frame.picks,values:frame.values};
+      });
+      if(body.quality?.error)throw Error(body.quality.error);
+      if(body.quality?.textureLimit!==256||body.quality?.canvas?.some((n:number)=>n>256)||body.quality?.maskSize>256)throw Error('预览画质上限无效');
+      return {ok:true,frames,quality:body.quality};
+    }
+    const fit = body.fit && typeof body.fit === 'object' ? body.fit : null;
+    const main = options.wardrobe ? null : pngOf(body.png,512);
+    const small = options.wardrobe ? null : pngOf(body.png128,128);
+    const evidence = samples.length ? body.evidence : [];
+    if (!Array.isArray(evidence) || evidence.length !== samples.length) throw new Error('动作采样不完整');
+    for (const [i, item] of evidence.entries()) {
+      if (item.id !== samples[i].id || item.time !== samples[i].time) throw new Error('动作采样标识不一致');
+      pngOf(item.png,384);
+    }
+    const dir = join(packDir, 'thumb');
+    await mkdir(dir, { recursive: true });
+    if(main&&small){await writeFile(join(dir, 'cover.png'), main);await writeFile(join(dir, 'opt-model.png'), small);}
+    const file = join(packDir, 'figure.json');
+    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    if(!options.wardrobe)manifest.thumb = 'thumb/cover.png';
+    if (!options.wardrobe && Array.isArray(manifest.axes) && manifest.axes[0]?.options?.[0]) {
+      manifest.axes[0].options[0].thumb = 'thumb/opt-model.png';
+    }
+    if(wardrobe.length){
+      if(!Array.isArray(body.wardrobe)||body.wardrobe.length!==wardrobe.length)throw Error('装扮缩略图不完整');
+      for(const [i,item]of body.wardrobe.entries()){
+        const expected=wardrobe[i];if(item.axis!==expected.axis||item.option!==expected.option)throw Error('装扮缩略图标识不一致');
+        const png=pngOf(item.png);if(png.length<24||png.length>131072||png.readUInt32BE(16)!==128||png.readUInt32BE(20)!==128)throw Error('装扮缩略图尺寸无效');
+        const path='thumb/wardrobe-'+i+'.png';await writeFile(join(packDir,path),png);
+        manifest.axes.find((a:any)=>a.id===expected.axis).options.find((o:any)=>o.id===expected.option).thumb=path;
+      }
+    }
+    const next = file + '.' + token + '.tmp';
+    try {
+      await writeFile(next, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+      signal?.throwIfAborted();
+      await rename(next, file);
+    } finally {
+      await rm(next, { force: true }).catch(() => {});
+    }
+    return { ok: true, bytes: main?.length, fit, evidence,thumbnails:wardrobe.length };
+  }
 
   const server = http.createServer(async (req, res) => {
+    if (!origin || req.headers.host !== new URL(origin).host) { res.writeHead(421).end(); return; }
     let url: URL;
     try { url = new URL(req.url ?? '/', 'http://x'); decodeURIComponent(url.pathname); }
     catch { res.writeHead(400).end(); return; }
     if (req.method === 'POST' && url.pathname === '/__cover') {
+      if (req.headers.origin !== origin || req.headers['x-figure-capture'] !== token
+          || req.headers['content-type'] !== 'application/json') { res.writeHead(403).end(); return; }
+      if (received) { res.writeHead(409).end(); return; }
+      received = true;
       let raw = '';
       try {
         for await (const c of req) {
@@ -168,53 +249,16 @@ export async function captureCover(
       try {
         const body = JSON.parse(raw);
         if (body.error) { resolveResult({ ok: false, error: String(body.error) }); return; }
-        if(options.preview){
-          if(!Array.isArray(body.frames)||body.frames.length!==options.preview.samples.length)throw Error('预览图片不完整');
-          const frames=body.frames.map((frame:any,i:number)=>{
-            const png=pngOf(frame.png);if(png.length<24||png.length>262144||png.readUInt32BE(16)!==256||png.readUInt32BE(20)!==256)throw Error('预览图片尺寸无效');
-            return {...options.preview!.samples[i],png:frame.png,fit:frame.fit,picks:frame.picks,values:frame.values};
-          });
-          if(body.quality?.error)throw Error(body.quality.error);
-          if(body.quality?.textureLimit!==256||body.quality?.canvas?.some((n:number)=>n>256)||body.quality?.maskSize>256)throw Error('预览画质上限无效');
-          resolveResult({ok:true,frames,quality:body.quality});return;
-        }
-        const fit = body.fit && typeof body.fit === 'object' ? body.fit : null;
-        const main = pngOf(body.png);
-        const small = pngOf(body.png128);
-        const dir = join(packDir, 'thumb');
-        await mkdir(dir, { recursive: true });
-        if(!options.wardrobe){await writeFile(join(dir, 'cover.png'), main);await writeFile(join(dir, 'opt-model.png'), small);}
-        const file = join(packDir, 'figure.json');
-        const manifest = JSON.parse(await readFile(file, 'utf8'));
-        if(!options.wardrobe)manifest.thumb = 'thumb/cover.png';
-        if (!options.wardrobe && Array.isArray(manifest.axes) && manifest.axes[0]?.options?.[0]) {
-          manifest.axes[0].options[0].thumb = 'thumb/opt-model.png';
-        }
-        if(wardrobe.length){
-          if(!Array.isArray(body.wardrobe)||body.wardrobe.length!==wardrobe.length)throw Error('装扮缩略图不完整');
-          for(const [i,item]of body.wardrobe.entries()){
-            const expected=wardrobe[i];if(item.axis!==expected.axis||item.option!==expected.option)throw Error('装扮缩略图标识不一致');
-            const png=pngOf(item.png);if(png.length<24||png.length>131072||png.readUInt32BE(16)!==128||png.readUInt32BE(20)!==128)throw Error('装扮缩略图尺寸无效');
-            const path='thumb/wardrobe-'+i+'.png';await writeFile(join(packDir,path),png);
-            manifest.axes.find((a:any)=>a.id===expected.axis).options.find((o:any)=>o.id===expected.option).thumb=path;
-          }
-        }
-        await writeFile(file, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-        const evidence = samples.length ? body.evidence : [];
-        if (!Array.isArray(evidence) || evidence.length !== samples.length) throw new Error('动作采样不完整');
-        for (const [i, item] of evidence.entries()) {
-          if (item.id !== samples[i].id || item.time !== samples[i].time) throw new Error('动作采样标识不一致');
-          pngOf(item.png);
-        }
-        resolveResult({ ok: true, bytes: main.length, fit, evidence,thumbnails:wardrobe.length });
+        resolveResult({ body });
       } catch (e) {
         resolveResult({ ok: false, error: String((e as Error)?.message ?? e) });
       }
       return;
     }
     if (url.pathname === '/' || url.pathname === '/index.html') {
+      if (req.method !== 'GET' || url.searchParams.get('capture') !== token) { res.writeHead(404).end(); return; }
       const json=(v:unknown)=>JSON.stringify(v).replaceAll('<','\\u003c');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(COVER_PAGE.replace('__STATIC_PREVIEW__',json(options.preview||null)).replace('__NATIVE_SAMPLES__', json(samples)).replace('__WARDROBE_ONLY__',String(!!options.wardrobe)).replace('__WARDROBE_SAMPLES__',json(wardrobe)));
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }).end(COVER_PAGE.replace('__CAPTURE_TOKEN__',json(token)).replace('__STATIC_PREVIEW__',()=>json(options.preview||null)).replace('__NATIVE_SAMPLES__',()=>json(samples)).replace('__WARDROBE_ONLY__',String(!!options.wardrobe)).replace('__WARDROBE_SAMPLES__',()=>json(wardrobe)));
       return;
     }
     const isKit = url.pathname.startsWith('/kit/');
@@ -233,37 +277,61 @@ export async function captureCover(
     }
   });
 
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const port = (server.address() as { port: number }).port;
-  const url = `http://127.0.0.1:${port}/`;
-
   let profile = '';
   let child: ReturnType<typeof spawn> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const abort = () => { child?.kill(); resolveResult({ok:false,error:'任务已停止'}); };
+  let failure = '启动封面渲染服务失败';
+  const abort = () => resolveResult({ ok: false, error: '任务已停止' });
   signal?.addEventListener('abort',abort,{once:true});
   try {
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      server.on('error', (error) => {
+        reject(error);
+        resolveResult({ ok: false, error: `封面渲染服务失败：${error.message}` });
+      });
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    signal?.throwIfAborted();
+    const port = (server.address() as { port: number }).port;
+    origin = `http://127.0.0.1:${port}`;
+    const url = `${origin}/?capture=${token}`;
+
+    failure = '启动浏览器失败';
     profile = await mkdtemp(join(tmpdir(), 'l2d-cover-'));
+    signal?.throwIfAborted();
     child = spawn(browser, [
       '--headless=new',
       '--disable-gpu',
       '--enable-unsafe-swiftshader',
+      '--disable-background-timer-throttling',
       '--hide-scrollbars',
       '--mute-audio',
       '--no-first-run',
       '--window-size=640,640',
-      '--virtual-time-budget=30000',
       '--user-data-dir=' + profile,
       url,
     ], { windowsHide: true, stdio: 'ignore' });
 
     child.once('error', (e) => resolveResult({ ok: false, error: `启动浏览器失败：${e.message}` }));
-    const timeout = new Promise<CoverResult>((resolve) => {
+    child.once('exit', (code, signal) => {
+      if (!received) resolveResult({ ok: false, error: `封面浏览器已退出（${signal ?? code}）` });
+    });
+    const timeout = new Promise<CaptureReply>((resolve) => {
       timer = setTimeout(() => resolve({ ok: false, error: '封面超时' }), timeoutMs).unref?.();
     });
-    return await Promise.race([done, timeout]);
+    const reply = await Promise.race([done, timeout]);
+    signal?.throwIfAborted();
+    if (!('body' in reply)) return reply;
+
+    // Only the winning reply can write files, and those writes finish before returning.
+    failure = '保存封面失败';
+    const result = await persistCapture(reply.body);
+    signal?.throwIfAborted();
+    return result;
   } catch (e) {
-    return { ok: false, error: `启动浏览器失败：${(e as Error).message}` };
+    signal?.throwIfAborted();
+    return { ok: false, error: `${failure}：${(e as Error).message}` };
   } finally {
     signal?.removeEventListener('abort',abort);
     clearTimeout(timer);
@@ -275,10 +343,23 @@ export async function captureCover(
 }
 
 /** PNG data URL → Buffer，顺带校验头。 */
-export function pngOf(raw: unknown): Buffer {
+export function pngOf(raw: unknown, size?: number): Buffer {
   const m = /^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/.exec(String(raw ?? ''));
   if (!m) throw new Error('封面不是 PNG data URL');
   const buf = Buffer.from(m[1].replace(/\s+/g, ''), 'base64');
-  if (buf.length < 8 || !buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('封面不是有效 PNG');
-  return buf;
+  const invalid = () => new Error('封面不是有效 PNG');
+  if (buf.length < 45 || !buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      || buf.readUInt32BE(8) !== 13 || buf.toString('ascii',12,16) !== 'IHDR') throw invalid();
+  const width = buf.readUInt32BE(16), height = buf.readUInt32BE(20);
+  if (!width || !height || width > 1024 || height > 1024 || size && (width !== size || height !== size)) throw invalid();
+  let hasImage = false;
+  for (let offset=33; offset+12<=buf.length;) {
+    const length = buf.readUInt32BE(offset), end = offset+12+length;
+    if (end > buf.length) throw invalid();
+    const kind = buf.toString('ascii',offset+4,offset+8);
+    if (kind === 'IDAT' && length) hasImage = true;
+    if (kind === 'IEND' && !length && hasImage && end === buf.length) return buf;
+    offset = end;
+  }
+  throw invalid();
 }

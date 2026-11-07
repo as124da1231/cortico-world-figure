@@ -24,10 +24,12 @@
  *       textures/*.png       复制后按 --max-texture 可选降采样
  */
 import { inferRoles, ROLE_RULES } from './parameter-mapping.mjs';
+import { appendNativeVocab } from './native-catalog.mjs';
+import { readBongoPackage } from './bongo-package.mjs';
+import { shrinkPng } from './shrink-textures.mjs';
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -57,7 +59,7 @@ const OVERRIDES_PATH = arg('overrides');
 const MAX_TEX = Math.max(0, Number(arg('max-texture', 2048)) || 0);
 const CLEAN = flag('clean');
 /** 生成器配方版本：写进 build.json；工作台用它判断包是否过期 */
-const GENERATOR_VERSION = 'rt-2026-11-01.quality.1';
+const GENERATOR_VERSION = 'rt-2026-11-07.bongo.3';
 /** 简易模式：只做 role + 通用配方，不产出/不引用任何原生 exp3 / motion / pose 绑定。 */
 const SIMPLE = true;
 
@@ -107,15 +109,19 @@ const files = ref.FileReferences ?? ref;   // VTS 有时多包一层
 // 纯中文目录名 slug 后为空：给个短的稳定后缀，免得所有中文模型都装成同一个 "model"
 const _rawName = basename(modelDir).replace(/_vts$/i, '');
 const _explicitId = arg('id');
-const id = (_explicitId ? slug(_explicitId) : '')
-  || slug(_rawName)
+const entryName = basename(model3Path);
+const hasVariants = (await readdir(modelDir)).filter(name => /\.model3\.json$/i.test(name)).length > 1;
+const entryHash = createHash('sha256').update(entryName).digest('hex').slice(0, 8);
+const requestedId = (_explicitId ? slug(_explicitId) : '')
+  || (hasVariants ? `${(slug(_rawName) || 'model').slice(0, 23)}-${entryHash}` : slug(_rawName))
   || `model-${createHash('sha1').update(_rawName).digest('hex').slice(0, 6)}`;
+const id = requestedId === 'coo' ? `model-${entryHash}` : requestedId;
 // Coo 的 axis option id 不能带连字符（scheme 用 '-' 拼多轴），模型/包 id 可以
 const optionId = id.replace(/-/g, '').slice(0, 24);
 const OUT = resolve(arg('out', join(HERE, '..', 'build', id)));
 
 // ---------------------------------------------------------------- 模型资产
-const resolveAsset = (p) => {
+const resolveAsset = (p, allowBasename = true) => {
   if (typeof p !== 'string' || isAbsolute(p) || /[:\u0000-\u001f]/.test(p) || p.split(/[\\/]/).some(part => part === '..' || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) return null;
   const direct = resolve(modelDir, p);
   const safe = (file) => {
@@ -124,7 +130,7 @@ const resolveAsset = (p) => {
       return rel && rel.split(sep)[0] !== '..' && !isAbsolute(rel) && statSync(real).isFile() ? real : null;
     } catch { return null; }
   };
-  return safe(direct) || safe(join(modelDir, basename(p)));
+  return safe(direct) || (allowBasename ? safe(join(modelDir, basename(p))) : null);
 };
 
 const mocName = files.Moc ?? files.MocFile;
@@ -150,6 +156,7 @@ const cdiPath = (() => {
 
 const display = cdiPath ? await readJson(cdiPath) : { Parameters: [], ParameterGroups: [] };
 const params = (display.Parameters ?? []).map((p) => p.Id);
+const bongo = await readBongoPackage(modelDir, params, files.Motions, resolveAsset, pngSize);
 const groups = new Map((display.ParameterGroups ?? []).map((g) => [g.Id, g.Name ?? g.Id]));
 const paramMeta = new Map((display.Parameters ?? []).map((p) => [
   p.Id,
@@ -450,7 +457,8 @@ const identity = {
 };
 // roam = 跟随 Coo 的走动偏好；stand = 固定站定（后端强制 roam off）
 const motionSpeed = Math.min(2, Math.max(.5, Number(overrides.motion?.speed) || 1));
-const motion = { kind: overrides.motion?.kind === 'stand' ? 'stand' : 'roam', speed: motionSpeed };
+const motion = { kind: bongo || overrides.motion?.kind === 'stand' ? 'stand' : 'roam', speed: motionSpeed };
+const fit = overrides.fit ?? { mode: 'contain', anchor: 'bottom', padding: [0.04, 0.02], offset: [0, 0], zoom: 1, ...(bongo ? { autoFit: false } : {}) };
 
 /* ---- 资源池：exp3 + 动作，带自动分类和手动覆盖 ---- */
 const resources = [
@@ -484,6 +492,7 @@ if (posePath) hashParts.push(`pose:${sha(JSON.stringify(await readJson(posePath)
 for (const p of textures) hashParts.push(`tex:${basename(p)}:${sha(await readFile(p))}`);
 if (!SIMPLE) for (const e of expressionFiles) hashParts.push(`exp3:${e.file}:${sha(JSON.stringify(e.raw))}`);
 if (!SIMPLE) for (const m of motions) hashParts.push(`motion:${m.file}:${sha(JSON.stringify(m.raw))}`);
+for (const { source, file } of bongo?.files ?? []) hashParts.push(`bongo:${file}:${sha(await readFile(source))}`);
 const sourceHash = sha(hashParts.join('\n'));
 
 
@@ -499,7 +508,8 @@ const plan = {
   physicsPath,
   posePath,
   cdiPath,
-  fit: overrides.fit ?? { mode: 'contain', anchor: 'bottom', padding: [0.04, 0.02], offset: [0, 0], zoom: 1 },
+  fit,
+  ...(bongo ? { sourceFormat: 'bongocat' } : {}),
   textures: textures.map((p) => basename(p)),
   /** 源贴图尺寸 + 缩小后的尺寸（构建后显存估算用） */
   textureSizes: textures.map((p) => {
@@ -590,34 +600,41 @@ if (!SIMPLE && expressionFiles.length) {
 
 // 3) 贴图（平铺到 textures/）
 const textureFiles = [];
+const textureShrink = MAX_TEX > 0 ? { ok: true, max: MAX_TEX, files: [], skipped: [], bytesBefore: 0, bytesAfter: 0 } : null;
 for (const [i, p] of textures.entries()) {
   const name = `texture_${String(i).padStart(2, '0')}${extname(p).toLowerCase() || '.png'}`;
-  await copyFile(p, join(OUT, 'models', id, 'textures', name));
-  textureFiles.push(`textures/${name}`);
-}
-
-// 3.5) 贴图降采样：只动 OUT 里的副本，源模型一个字节都不改。
-// 没有 Pillow 也不阻断构建——运行时会兜底（backends/live2d.js 里超过 maxTex 再缩）。
-let textureShrink = null;
-if (MAX_TEX > 0 && textureFiles.some((f) => f.toLowerCase().endsWith('.png'))) {
-  const texDir = join(OUT, 'models', id, 'textures');
-  const script = join(HERE, 'shrink-textures.py');
-  const r = spawnSync('python', [script, '--dir', texDir, '--max', String(MAX_TEX), '--json'], {
-    encoding: 'utf8',
-    timeout: 180000,
-  });
-  if (r.status === 0 && r.stdout) {
-    try { textureShrink = JSON.parse(r.stdout.trim().split('\n').pop()); } catch { textureShrink = null; }
-    if (textureShrink?.files?.length) {
-      console.log(`  贴图降采样：${textureShrink.files.length} 张 → 最长边 ${MAX_TEX}（${fmtMB(textureShrink.bytesBefore)} → ${fmtMB(textureShrink.bytesAfter)}）`);
-    } else if (textureShrink) {
-      console.log(`  贴图：都在 ${MAX_TEX} 以内，未改动`);
+  const target = join(OUT, 'models', id, 'textures', name);
+  const size = textureShrink && pngSize(p);
+  const bytesFrom = textureShrink ? (await stat(p)).size : 0;
+  let bytesAfter = bytesFrom;
+  if (size && Math.max(size.w, size.h) > MAX_TEX) {
+    try {
+      const png = shrinkPng(await readFile(p), MAX_TEX);
+      await writeFile(target, png);
+      const scaled = pngSize(target);
+      bytesAfter = png.length;
+      textureShrink.files.push({ file: name, from: [size.w, size.h], to: [scaled.w, scaled.h], bytesFrom, bytesAfter });
+    } catch (error) {
+      throw Error(`无法将贴图 ${basename(p)} 缩到 ${MAX_TEX}px：${error.message}`, { cause: error });
     }
   } else {
-    const why = String(r.stderr || r.error?.message || 'python 不可用').trim().split('\n').pop();
-    console.warn(`  贴图降采样失败，保留原尺寸：${why}`);
-    textureShrink = { ok: false, error: why.slice(0, 200) };
+    await copyFile(p, target);
+    if (textureShrink && !size) textureShrink.skipped.push({ file: name, why: '不是 PNG，运行时缩放' });
   }
+  if (textureShrink) {
+    textureShrink.bytesBefore += bytesFrom;
+    textureShrink.bytesAfter += bytesAfter;
+  }
+  textureFiles.push(`textures/${name}`);
+}
+if (textureShrink?.files.length) {
+  console.log(`  贴图降采样：${textureShrink.files.length} 张 → 最长边 ${MAX_TEX}（${fmtMB(textureShrink.bytesBefore)} → ${fmtMB(textureShrink.bytesAfter)}）`);
+}
+
+for (const { source, file } of bongo?.files ?? []) {
+  const target = join(OUT, 'models', id, file);
+  await mkdir(dirname(target), { recursive: true });
+  await copyFile(source, target);
 }
 
 // 4) 动作
@@ -651,12 +668,10 @@ const profileJs = `/**
  * 格式与运行时约定见 README「数据驱动」一节：
  *   role = 语义位 → targets 是真实参数；模型没有的参数自动跳过
  *   space/default 是语义输入；真实范围从 moc3 读取，ranges 仅用于已确认输入的校准
- *
- * 自动适配记录（供调试查阅）：
-${todo.length ? todo.map((t) => ` *   - ${t}`).join('\n') : ' *   - 无'}
  */
 export default {
-${overrides.fit ? `  fit: ${JSON.stringify(overrides.fit)},` : "  fit: { mode: 'contain', anchor: 'bottom', padding: [0.04, 0.02], offset: [0, 0], zoom: 1 },"}
+  fit: ${JSON.stringify(fit)},
+${bongo ? `  bongo: ${JSON.stringify(bongo.profile)},` : ''}
   // roam：跟随 Coo 的走动偏好；stand：固定站定（后端强制 roam off）
   motion: ${JSON.stringify(motion)},
   render: ${JSON.stringify(overrides.render ?? {mode:'original',textureLimit:MAX_TEX,canvasLimit:0,strict:true})},
@@ -721,7 +736,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/wardrobe.js', 'backends/wardrobe-slots.js']) {
+for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/wardrobe.js', 'backends/wardrobe-slots.js', 'backends/bongo.js']) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);
@@ -834,6 +849,7 @@ const vocabMotions = (gestureMotions.length ? gestureMotions : motions).slice(0,
   seconds: m.seconds,
 }));
 if (SIMPLE) vocabMotions.length = 0;
+const thumb = `models/${id}/${bongo?.cover?.file ?? textureFiles[0]}`;
 const figureJson = {
   manifest: 2,
   api: 2,
@@ -846,21 +862,14 @@ const figureJson = {
   license: '仅供个人测试，请遵守模型自身的授权',
   entry: 'figure.js',
   export: 'createFigureBody',
-  thumb: `models/${id}/${textureFiles[0]}`,
-  axes: [{ id: 'model', name: { zh: '模型', en: 'Model' }, options: [{ id: optionId, name: { zh: identity.nameZh, en: identity.nameEn }, thumb: `models/${id}/${textureFiles[0]}` }] }],
+  thumb,
+  axes: [{ id: 'model', name: { zh: '模型', en: 'Model' }, options: [{ id: optionId, name: { zh: identity.nameZh, en: identity.nameEn }, thumb }] }],
   presets: [],
   vocab: [...vocabExpressions, ...(SIMPLE ? [] : vocabMotions)],
   sounds: {},
   can: { walk: motion.kind === 'roam' },
 };
-for (const b of overrides.native?.bindings ?? []) {
-  if (b.word === 'idle' || figureJson.vocab.some(v => v.id === b.word)) continue;
-  const resource = overrides.native.resources?.find(r => r.id === b.resource);
-  if (!resource) continue;
-  const names = {nod:['点头','Nod'],shake:['摇头','Shake'],wave:['招手','Wave'],bow:['鞠躬','Bow'],cheer:['欢呼','Cheer'],dance:['跳舞','Dance'],jump:['跳跃','Jump'],sit:['坐下','Sit'],stretch:['伸展','Stretch'],shiver:['发抖','Shiver']};
-  const labels = names[b.word] ?? [b.word,b.word];
-  figureJson.vocab.push({id:b.word,kind:resource.kind === 'expression' ? 'expression' : 'motion',names:{zh:[labels[0]],en:[labels[1]]},about:{zh:`自动适配的${labels[0]}`,en:`Mapped native ${labels[1]}`},seconds:Math.max(.1,resource.seconds || 1)});
-}
+appendNativeVocab(figureJson.vocab, overrides.native?.bindings ?? [], overrides.native?.resources ?? []);
 await writeFile(join(OUT, 'figure.json'), JSON.stringify(figureJson, null, 2) + '\n', 'utf8');
 await writeFile(join(OUT, 'build.json'), JSON.stringify({
   tool: 'cortico-live2d-pack',
@@ -875,6 +884,7 @@ await writeFile(join(OUT, 'build.json'), JSON.stringify({
   resourceRoles: Object.fromEntries(resources.filter((r) => r.custom).map((r) => [r.file, r.cls])),
   unmapped,
   renderPolicy: 'adaptive',
+  ...(bongo ? { sourceFormat: 'bongocat' } : {}),
 }, null, 2) + '\n', 'utf8');
 
 // ---------------------------------------------------------------- 报告
