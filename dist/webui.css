@@ -5,9 +5,9 @@
 .l2d-sheet [hidden],.l2d-dialog-body [hidden],.l2d-bind-modal [hidden]{display:none!important}
 .l2d-header{display:flex;align-items:center;gap:12px;flex:none;padding-bottom:12px;border-bottom:1px solid var(--line-2,#d5dbd7)}
 .l2d-toolbar{display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap}
-.l2d-sheet .l2d-version-corner{position:static;flex:none;white-space:nowrap;margin:0;padding:3px 8px;border:1px solid var(--l2d-line);border-radius:6px;background:transparent;color:var(--l2d-soft);font:400 11px/1.4 ui-monospace,Consolas,monospace;cursor:pointer}
-.l2d-version-corner.unack{background:color-mix(in srgb,#b94e4e 14%,var(--l2d-surface))}
-.l2d-version-corner.ack{background:color-mix(in srgb,var(--l2d-accent,#397ff5) 7%,var(--l2d-surface))}
+:is(.l2d-sheet,.l2d-provider-chrome) .l2d-version-corner{position:static;flex:none;white-space:nowrap;margin:0;padding:3px 8px;border:1px solid var(--l2d-line,var(--line,#e2e6e3));border-radius:6px;background:transparent;color:var(--l2d-soft,var(--ink-soft,#5c5c60));font:400 11px/1.4 ui-monospace,Consolas,monospace;cursor:pointer}
+.l2d-version-corner.unack{background:color-mix(in srgb,#b94e4e 14%,var(--l2d-surface,var(--sheet,#fff)))}
+.l2d-version-corner.ack{background:color-mix(in srgb,var(--l2d-accent,#397ff5) 7%,var(--l2d-surface,var(--sheet,#fff)))}
 .l2d-header .l2d-settings-button{margin:0}
 .l2d-adaptation-note:empty,.l2d-result-feedback:empty,.l2d-assist-dock:empty{display:none}
 .l2d-body{display:flex;flex-direction:column;min-height:0;gap:14px}
@@ -396,7 +396,15 @@
   --l2d-chrome-current:color-mix(in srgb,var(--l2d-accent) 76%,var(--ink,#1b1a1e));
 }
 .l2d-provider-chrome>.providerintro,.l2d-provider-chrome>.providertabs{border-color:var(--l2d-chrome-line)}
-.l2d-provider-chrome .pagetitle{color:var(--ink,#1b1a1e)}
+.l2d-provider-chrome:has(>.providerintro>.pagetitle-row){padding-block-start:12px}
+.l2d-provider-chrome>.providerintro:has(>.pagetitle-row){
+  display:flex;align-items:center;gap:12px;min-height:38px;padding-block-end:8px
+}
+.l2d-provider-chrome .pagetitle-row{flex:1;min-width:0}
+.l2d-provider-chrome .pagetitle{color:var(--ink,#1b1a1e);font-size:19px;line-height:1.25}
+.l2d-provider-chrome>.providerintro>.page-badge-row{
+  flex:0 1 340px;max-width:45%;min-width:0;margin:0;justify-content:safe flex-end
+}
 .l2d-provider-chrome :is(.page-badge-row,.page-badge-pop)>.pill{
   color:var(--ink-soft,#5c5c60);border-color:var(--l2d-chrome-line);background-color:var(--sheet,#fff)
 }

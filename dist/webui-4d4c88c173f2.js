@@ -1594,7 +1594,15 @@ const NOTICE_TEXT = {
   zh: '生成的形象包可能包含 Live2D Cubism Core，仅供本机使用。请保留模型、贴图和第三方组件各自的许可。',
   en: 'Generated figure packs may include Live2D Cubism Core for local use. Keep the separate licenses for models, textures and third-party components.',
 };
-// Theme only extension-owned roots. Restore inherited host values on unmount.
+function figureProviderChrome(root) {
+  const chrome = root.previousElementSibling;
+  const route = root.ownerDocument.defaultView?.location.hash || '';
+  if (root.classList.contains('panelslot') && chrome?.matches('.providerchrome')
+      && /^#\/provider\/world(?:%3a|:)figure(?:\/|$)/i.test(route)) return chrome;
+  return null;
+}
+
+// Restore panel theme values on unmount.
 function applyAppearance(root, cfg) {
   const preferences=normalizeAppearance(cfg),classic=preferences.uiStyle==='classic';
   const appearance=classic?{...preferences,gearTheme:'purple',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'off',uiButtonFill:'solid'}:preferences;
@@ -1605,10 +1613,8 @@ function applyAppearance(root, cfg) {
   root.style.setProperty('--gear-max-color',classic?theme.color:'var(--appearance-effective, '+theme.color+')');
   root.style.setProperty('--gear-max-fill',theme.fill);
   root.style.setProperty('--gear-spark-glow',theme.glow);
-  const chrome = root.previousElementSibling;
-  const route = root.ownerDocument.defaultView?.location.hash || '';
-  if (root.classList.contains('panelslot') && chrome?.matches('.providerchrome')
-      && /^#\/provider\/world(?:%3a|:)figure(?:\/|$)/i.test(route)) {
+  const chrome = figureProviderChrome(root);
+  if (chrome) {
     // Coo reuses this header between tabs of the same provider and drops it on exit.
     chrome.classList.add('l2d-themed', 'l2d-provider-chrome');
     chrome.dataset.uiMode = appearance.uiMode;
@@ -2011,7 +2017,18 @@ export default {
         versionCorner.type = 'button';
         versionCorner.disabled = true;
         versionCorner.setAttribute('aria-haspopup', 'dialog');
-        header.appendChild(versionCorner);
+        const chrome = figureProviderChrome(ctx.root);
+        chrome?.classList.add('l2d-provider-chrome');
+        function placeVersion() {
+          // Older hosts and standalone panel mounts keep the button in the toolbar.
+          const title = chrome?.querySelector(':scope > .providerintro:has(> .pagetitle-row)');
+          const destination = title ?? header;
+          if (versionCorner.parentElement !== destination) destination.append(versionCorner);
+        }
+        placeVersion();
+        // Badge updates can rebuild the provider header without remounting this panel.
+        const chromeObserver = chrome ? new win.MutationObserver(placeVersion) : null;
+        chromeObserver?.observe(chrome, { childList: true });
         function paintNotice() {
           if (disposed) return;
           const ack = notice?.acknowledged === true;
@@ -3357,6 +3374,8 @@ export default {
           modal?.close(); modal?.remove();
           popup?.dispose(); overlay?.dispose?.();
           observer?.disconnect(); win.removeEventListener('resize', resize);
+          chromeObserver?.disconnect();
+          versionCorner.remove();
           shell.remove();
           cancelOwnedImport();
           ctx.root.removeAttribute('aria-busy');

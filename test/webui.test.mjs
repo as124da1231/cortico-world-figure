@@ -6,7 +6,11 @@ import { VOICE_PROVIDERS } from '../src/voice-catalog.mjs';
 
 const tick = () => new Promise((r) => setTimeout(r, 15));
 async function mount(t, opts = {}) {
-  const dom = new JSDOM('<main></main>', { url: 'http://localhost/' });
+  const providerHeader = opts.providerHeader
+    ? '<div class="providerchrome"><header class="providerintro"><div class="pagetitle-row"></div></header></div>'
+    : '';
+  const route = opts.providerHeader ? '#/provider/world%3Afigure/workbench' : '';
+  const dom = new JSDOM(providerHeader + '<main class="panelslot"></main>', { url: 'http://localhost/' + route });
   globalThis.window = dom.window; globalThis.document = dom.window.document;
   if (opts.fetch) dom.window.fetch = opts.fetch;
   // jsdom has no top-layer implementation; real modality is checked in the browser.
@@ -388,6 +392,23 @@ test('the version opens a bounded notice and restores focus after consent', asyn
   version.click();assert.match(root.querySelector('dialog').textContent,/Live2D Cubism Core/);
   assert.equal(button('我已知晓，不再分发').hidden,true);
   assert.equal(calls.filter(c=>c.method==='noticeAccept').length,1);
+});
+
+test('the compact Figure header keeps the same notice button when the host redraws the header', async t => {
+  const {root, handle} = await mount(t, {providerHeader:true, version:'4.0.0'});
+  const chrome = root.previousElementSibling;
+  const version = chrome.querySelector('.l2d-version-corner');
+  assert.equal(version.textContent, 'v4.0.0');
+  assert.equal(root.querySelector('.l2d-version-corner'), null);
+  const next = chrome.firstElementChild.cloneNode(false);
+  next.append(chrome.querySelector('.pagetitle-row').cloneNode());
+  chrome.replaceChildren(next);
+  await tick();
+  assert.equal(next.querySelector('.l2d-version-corner'), version);
+  version.click();
+  assert.equal(root.querySelector('dialog.l2d-notice-popup').open, true);
+  handle.dispose();
+  assert.equal(chrome.querySelector('.l2d-version-corner'), null);
 });
 
 test('an acknowledged upgrade shows no inline notice or core banner',async t=>{
