@@ -395,7 +395,7 @@ test('the version opens a bounded notice and restores focus after consent', asyn
 });
 
 test('the compact Figure header keeps the same notice button when the host redraws the header', async t => {
-  const {root, handle} = await mount(t, {providerHeader:true, version:'4.0.0'});
+  const {root, ctx, dom, handle} = await mount(t, {providerHeader:true, version:'4.0.0'});
   const chrome = root.previousElementSibling;
   const version = chrome.querySelector('.l2d-version-corner');
   assert.equal(version.textContent, 'v4.0.0');
@@ -408,6 +408,16 @@ test('the compact Figure header keeps the same notice button when the host redra
   version.click();
   assert.equal(root.querySelector('dialog.l2d-notice-popup').open, true);
   handle.dispose();
+  const settings = await panel.panels.settings.mount(ctx);
+  assert.equal(chrome.querySelector('.l2d-version-corner'), version);
+  assert.equal(root.querySelector('.l2d-version-corner'), null);
+  version.click();
+  assert.equal(chrome.querySelector('dialog.l2d-notice-popup').open, true);
+  chrome.querySelector('.l2d-modal-close').click();
+  settings.dispose();
+  dom.window.location.hash = '#/provider/world%3Aother';
+  chrome.replaceChildren(next.cloneNode(false));
+  await tick();
   assert.equal(chrome.querySelector('.l2d-version-corner'), null);
 });
 

@@ -26,7 +26,8 @@ for (const [extension, field] of [['js', 'webUiClient'], ['css', 'webUiStyle']])
     join(source, 'effects.js'),
     join(source, 'crop-editor.js'),
   ].map(file => readFile(file, 'utf8')))).map(code => code.replace(/^export /gm, '')).join('\n') + '\n' : '';
-  const bytes = Buffer.from((shared+content).replace(/\r\n/g, '\n'));
+  const version = extension === 'js' ? `const FIGURE_UI_VERSION = ${JSON.stringify(pkg.version)};\n` : '';
+  const bytes = Buffer.from((version + shared + content).replace(/\r\n/g, '\n'));
   await writeFile(join(dist, `webui.${extension}`), bytes);
   const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12);
   const name = `webui-${hash}.${extension}`;

@@ -1,3 +1,4 @@
+const FIGURE_UI_VERSION = "4.0.0";
 const GEAR_THEMES = [
   {id:'purple',name:'紫色',en:'Purple',color:'#9654ff',fill:'linear-gradient(105deg,#343bdc 0%,#7957f5 36%,#bd75ff 65%,#8c52ff 100%)',glow:'#ece0ff90'},
   {id:'red',name:'红色',en:'Red',color:'#d63c43',fill:'linear-gradient(105deg,#b91c3c 0%,#e83e50 36%,#ff7c66 65%,#e53e3e 100%)',glow:'#ffe3df90'},
@@ -1602,6 +1603,126 @@ function figureProviderChrome(root) {
   return null;
 }
 
+const figureHeaders = new WeakMap();
+
+function paintVersionBadge(button, version, acknowledged, t) {
+  button.textContent = version ? `v${version}` : '…';
+  button.classList.toggle('unack', !acknowledged);
+  button.classList.toggle('ack', acknowledged);
+  button.title = acknowledged ? t('查看须知', 'Read notice') : t('请阅读并确认须知', 'Read and acknowledge the notice');
+  button.setAttribute('aria-label', `${button.textContent} · ${acknowledged ? t('已确认', 'Acknowledged') : t('未确认', 'Not acknowledged')}`);
+}
+
+function figureHeader(ctx) {
+  const { root } = ctx;
+  const chrome = figureProviderChrome(root);
+  if (!chrome?.querySelector(':scope > .providerintro > .pagetitle-row')) return null;
+  const existing = figureHeaders.get(chrome);
+  if (existing) return existing;
+
+  const doc = root.ownerDocument;
+  const win = doc.defaultView;
+  const t = (zh, en) => String(ctx.language || 'zh').toLowerCase().startsWith('zh') ? zh : en;
+  const button = doc.createElement('button');
+  button.type = 'button';
+  button.className = 'l2d-version-corner';
+  button.setAttribute('aria-haspopup', 'dialog');
+  const state = { button, version: FIGURE_UI_VERSION, acknowledged: false, core: null, workbench: null, dialog: null };
+  state.update = ({ version, acknowledged, core }) => {
+    if (version) state.version = version;
+    if (acknowledged != null) state.acknowledged = acknowledged;
+    if (core) state.core = core;
+    paintVersionBadge(button, state.version, state.acknowledged, t);
+  };
+  state.update({});
+  const place = () => {
+    if (figureProviderChrome(root) !== chrome) {
+      button.remove();
+      state.dialog?.dispose();
+      chrome.classList.remove('l2d-provider-chrome', 'l2d-themed');
+      delete chrome.dataset.uiMode;
+      delete chrome.dataset.uiStyle;
+      chrome.style.removeProperty('--appearance-accent');
+      observer.disconnect();
+      figureHeaders.delete(chrome);
+      return;
+    }
+    const title = chrome.querySelector(':scope > .providerintro:has(> .pagetitle-row)');
+    if (title && button.parentElement !== title) title.append(button);
+  };
+  // Coo keeps the provider chrome when switching tabs and can rebuild its header contents.
+  const observer = new win.MutationObserver(place);
+  observer.observe(chrome, { childList: true });
+  chrome.classList.add('l2d-provider-chrome');
+  place();
+
+  button.addEventListener('click', () => {
+    if (state.workbench) { state.workbench(); return; }
+    if (state.dialog || figureProviderChrome(root) !== chrome) return;
+    const body = doc.createElement('div');
+    body.className = 'l2d-dialog-body';
+    const summary = doc.createElement('p');
+    summary.textContent = t(NOTICE_TEXT.zh, NOTICE_TEXT.en);
+    body.append(summary);
+    const card = doc.createElement('div');
+    card.className = 'l2d-license l2d-license-core' + (state.core?.ok ? ' ok' : '');
+    const status = doc.createElement('div');
+    status.className = 'l2d-license-core-status';
+    const title = doc.createElement('strong');
+    title.className = 'l2d-license-title';
+    title.textContent = 'Live2D';
+    status.append(title);
+    if (state.core?.ok) {
+      const ready = doc.createElement('span');
+      ready.textContent = runtimeReadyText(state.core, t);
+      status.append(ready);
+    }
+    const links = doc.createElement('span');
+    links.className = 'l2d-license-docs';
+    for (const [label, href] of [
+      [t('Core 许可', 'Core license'), 'https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html'],
+      [t('SDK 许可', 'SDK license'), 'https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html'],
+      [t('打开官网', 'Download page'), state.core?.home || 'https://www.live2d.com/en/sdk/download/web/'],
+    ]) {
+      const link = doc.createElement('a');
+      link.className = 'l2d-link';
+      link.textContent = label;
+      link.href = href;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      links.append(link);
+    }
+    card.append(status, links);
+    body.append(card);
+    state.dialog = openFigureDialog(chrome, t('须知', 'Notice'), body, {
+      closeLabel: t('关闭', 'Close'), variant: 'l2d-notice-popup',
+      onClose() { state.dialog = null; },
+    });
+  });
+  figureHeaders.set(chrome, state);
+  return state;
+}
+
+function runtimeReadyText(core, t) {
+  const kb = Math.round((core.bytes || 0) / 1024);
+  return t(`运行组件已就绪 · ${core.version || ''} · ${kb} KB · 已校验`,
+    `Runtime ready · ${core.version || ''} · ${kb} KB · verified`);
+}
+
+function withFigureHeader(panel) {
+  return {
+    mount(ctx) {
+      const header = figureHeader(ctx);
+      if (header && !header.core) {
+        void ctx.invoke('core', []).then(core => {
+          if (!ctx.signal?.aborted) header.update({ core, acknowledged: core.notice?.acknowledged });
+        }).catch(() => {});
+      }
+      return panel.mount(ctx);
+    },
+  };
+}
+
 // Restore panel theme values on unmount.
 function applyAppearance(root, cfg) {
   const preferences=normalizeAppearance(cfg),classic=preferences.uiStyle==='classic';
@@ -1859,10 +1980,10 @@ const configuration = {
 
 export default {
   panels: {
-    settings: configuration,
-    effects: effectsGallery,
-    voice: speechProviders,
-    appearance: {
+    settings: withFigureHeader(configuration),
+    effects: withFigureHeader(effectsGallery),
+    voice: withFigureHeader(speechProviders),
+    appearance: withFigureHeader({
       async mount(ctx){
         const cfg=await ctx.invoke('settings',[]);
         if(ctx.signal?.aborted)return;
@@ -1873,7 +1994,7 @@ export default {
         shell.append(form);ctx.root.append(shell);
         return {dispose(){shell.remove();restoreAppearance();}};
       },
-    },
+    }),
     workbench: {
       mount(ctx) {
         const ui = ctx.ui;
@@ -1961,13 +2082,10 @@ export default {
 
         function paintCore() {
           if (disposed) return;
+          sharedHeader?.update({ core });
           coreCard.classList.toggle('ok', coreReady());
           if (coreReady()) {
-            const kb = Math.round((core.bytes || 0) / 1024);
-            coreText.textContent = t(
-              `运行组件已就绪 · ${core.version || ''} · ${kb} KB · 已校验`,
-              `Runtime ready · ${core.version || ''} · ${kb} KB · verified`,
-            );
+            coreText.textContent = runtimeReadyText(core, t);
             coreGet.hidden = true;
           } else {
             coreText.textContent = core.consentAt
@@ -2015,38 +2133,30 @@ export default {
         operation.setAttribute('aria-label',t('导入与处理','Import and processing'));
         const operationBottom = el('div','l2d-operation-bottom');
         sheet.body.append(operation);
-        const versionCorner = el('button', 'l2d-version-corner', '…');
+        const sharedHeader = figureHeader(ctx);
+        const versionCorner = sharedHeader?.button ?? el('button', 'l2d-version-corner', '…');
         versionCorner.type = 'button';
         versionCorner.disabled = true;
         versionCorner.setAttribute('aria-haspopup', 'dialog');
-        const chrome = figureProviderChrome(ctx.root);
-        chrome?.classList.add('l2d-provider-chrome');
-        function placeVersion() {
-          // Older hosts and standalone panel mounts keep the button in the toolbar.
-          const title = chrome?.querySelector(':scope > .providerintro:has(> .pagetitle-row)');
-          const destination = title ?? header;
-          if (versionCorner.parentElement !== destination) destination.append(versionCorner);
+        const openVersion = () => openNotice();
+        if (sharedHeader) sharedHeader.workbench = openVersion;
+        else {
+          header.append(versionCorner);
+          versionCorner.addEventListener('click', openVersion);
         }
-        placeVersion();
-        // Badge updates can rebuild the provider header without remounting this panel.
-        const chromeObserver = chrome ? new win.MutationObserver(placeVersion) : null;
-        chromeObserver?.observe(chrome, { childList: true });
         function paintNotice() {
           if (disposed) return;
           const ack = notice?.acknowledged === true;
-          versionCorner.textContent = version ? `v${version}` : '…';
-          versionCorner.classList.toggle('unack', !ack);
-          versionCorner.classList.toggle('ack', ack);
-          versionCorner.title = ack ? t('查看须知', 'Read notice') : t('请阅读并确认须知', 'Read and acknowledge the notice');
+          if (sharedHeader) {
+            if (notice) sharedHeader.update({ version, acknowledged: ack });
+          } else paintVersionBadge(versionCorner, version, ack, t);
           versionCorner.disabled = !notice || state.busy;
           noticeEntry.hidden = !ack;
-          versionCorner.setAttribute('aria-label', `${versionCorner.textContent} · ${ack ? t('已确认', 'Acknowledged') : t('未确认', 'Not acknowledged')}`);
           if (noticeDialog) {
             noticeDialog.accept.hidden = ack;
             noticeDialog.accept.disabled = state.busy;
           }
         }
-        versionCorner.addEventListener('click', () => openNotice());
         function ensureNotice(resume, needsCore = false) {
           if (notice?.acknowledged && (!needsCore || coreReady())) return true;
           if (notice?.acknowledged && needsCore && core.consentAt && !state.busy) {
@@ -2525,9 +2635,13 @@ export default {
             titleEl.addEventListener('click', () => { if (!state.busy) openEdit(b, card, titleEl); });
             titleEl.title = b.id;
             info.appendChild(titleEl);
-            info.appendChild(el('div', 'meta',
-              `${(b.bytes / 1048576).toFixed(1)} MB · ${clock(b.at)}`));
-            if (installedId === b.id) info.appendChild(el('span', 'tagline', t('已安装', 'Installed')));
+            const metaRow = el('div', 'l2d-card-meta');
+            const metadata = `${(b.bytes / 1048576).toFixed(1)} MB · ${clock(b.at)}`;
+            const meta = el('span', 'meta', metadata);
+            meta.title = metadata;
+            metaRow.append(meta);
+            if (installedId === b.id) metaRow.append(el('span', 'tagline', t('已安装', 'Installed')));
+            info.append(metaRow);
             card.appendChild(info);
             const adaptation = adaptationDetails(b.adaptation);
             if (adaptation) {
@@ -3393,8 +3507,10 @@ export default {
           modal?.close(); modal?.remove();
           popup?.dispose(); overlay?.dispose?.();
           observer?.disconnect(); win.removeEventListener('resize', resize);
-          chromeObserver?.disconnect();
-          versionCorner.remove();
+          if (sharedHeader) {
+            if (sharedHeader.workbench === openVersion) sharedHeader.workbench = null;
+            versionCorner.disabled = false;
+          } else versionCorner.remove();
           shell.remove();
           cancelOwnedImport();
           ctx.root.removeAttribute('aria-busy');

@@ -340,7 +340,7 @@ export class Live2dWorld implements World {
   }
 
   private async dispatch(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    if (panel !== 'workbench' && !(['appearance','settings','effects','voice'].includes(panel) && ['settings','state'].includes(method))) throw new Error(`未知面板：${panel}`);
+    if (panel !== 'workbench' && !(['appearance','settings','effects','voice'].includes(panel) && ['settings','state','core'].includes(method))) throw new Error(`未知面板：${panel}`);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();
 
     if (method === 'state') {
