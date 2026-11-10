@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-figure",
-  "version": "3.0.2",
+  "version": "4.0.0",
   "type": "module",
-  "description": "自动适配 Live2D 模型的通用动作与表情，生成封面并打包安装到 Coo。 / Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo.",
+  "description": "导入 Live2D 和 BongoCat 模型，生成封面并打包安装到 Coo。 / Import Live2D and BongoCat models, generate covers, and install them into Coo.",
   "license": "AGPL-3.0-or-later",
   "author": "lian0721",
   "repository": {
@@ -33,20 +33,21 @@
     "displayName": "Live2D 模型一键安装",
     "icon": "assets/icon.svg",
     "tags": [
-      "experimental"
+      "experimental",
+      "voice"
     ],
     "locales": {
       "zh": {
         "displayName": "Live2D 模型一键安装",
-        "description": "自动适配 Live2D 模型的通用动作与表情，生成封面并打包安装到 Coo。"
+        "description": "导入 Live2D 和 BongoCat 模型，生成封面并打包安装到 Coo。"
       },
       "en": {
         "displayName": "Live2D One-Click Install",
-        "description": "Adapt Live2D models to shared motions and expressions, generate covers, and install them into Coo."
+        "description": "Import Live2D and BongoCat models, generate covers, and install them into Coo."
       }
     },
-    "webUiClient": "dist/webui-5b4b9d3f9ddf.js",
-    "webUiStyle": "dist/webui-115b5ec520cf.css",
+    "webUiClient": "dist/webui-951743470b92.js",
+    "webUiStyle": "dist/webui-020064beebb7.css",
     "describe": "describe.json"
   },
   "files": [
@@ -58,6 +59,7 @@
     "licenses",
     "describe.json",
     "CHANGELOG.md",
+    "RELEASE-3.0.0.md",
     "README.md",
     "LICENSE",
     "NOTICE"

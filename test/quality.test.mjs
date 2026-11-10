@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, cp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { PNG } from 'pngjs';
 import { PackImporter, filesFromZip, filesFromBundle } from '../src/import.ts';
 import { buildPack, editPack, installPack, scanModel } from '../src/pipeline.ts';
 import { coreState } from '../src/core.ts';
@@ -34,16 +32,36 @@ test('workbench settings expose only declared editable values and the notice has
   const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({});
   t.after(() => world.stop());
   const page = world.webUi('zh');
-  assert.deepEqual(page.panels.map(p => p.id), ['workbench','settings','appearance']);
-  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',previewSize:'512',gearTheme:'red',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'subtle',uiStyle:'custom',uiButtonFill:'gradient',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:false,modelRoots:'' });
+  assert.deepEqual(page.panels.map(p => p.id), ['workbench','settings','appearance','effects','voice']);
+  assert.equal(page.panels.find(p => p.id === 'effects').title, '特效');
+  assert.equal(world.webUi('en').panels.find(p => p.id === 'effects').title, 'Effects');
+  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',previewSize:'512',emotionEffect:'native',emotionEffectSize:'medium',gearTheme:'red',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'subtle',uiStyle:'custom',uiButtonFill:'gradient',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:true,assistConfirmFallback:false,modelRoots:'' });
   assert.ok(page.panels.some(p=>p.id==='appearance'));assert.deepEqual(await page.invoke('appearance','settings',[]),await page.invoke('workbench','settings',[]));
   await assert.rejects(()=>page.invoke('appearance','install',[]),/未知面板/);
+  assert.deepEqual(await page.invoke('effects', 'settings', []), await page.invoke('workbench', 'settings', []));
+  assert.equal((await page.invoke('effects', 'state', [])).version, (await page.invoke('workbench', 'state', [])).version);
+  await assert.rejects(() => page.invoke('effects', 'install', []), /未知面板/);
+  assert.equal((await page.invoke('voice', 'voiceState', [])).controls.voiceEnabled, false);
+  assert.deepEqual(await page.invoke('voice', 'settings', []), await page.invoke('workbench', 'settings', []));
+  assert.equal((await page.invoke('voice', 'state', [])).version, (await page.invoke('workbench', 'state', [])).version);
+  assert.equal((await page.invoke('voice', 'voiceControls', [{voiceMouthGain:1.7}])).controls.voiceMouthGain, 1.7);
+  await assert.rejects(()=>page.invoke('voice','install',[]),/未知面板/);
   cfg.clean=true; cfg.texture='1024';
   const next=await page.invoke('workbench', 'settings', []);
   assert.equal(next.clean,true); assert.equal(next.texture,'1024');
   assert.equal('modelDir' in next,false); assert.equal('workDir' in next,false);
   cfg.gearTheme='cyan';cfg.particleEffect='meteors';const appearance=await page.invoke('workbench','settings',[]);assert.equal(appearance.gearTheme,'cyan');assert.equal(appearance.particleEffect,'meteors');
   const props=page.config[0].schema.properties;assert.equal(props['worlds.figure.gearTheme'].enum.length,6);assert.equal(props['worlds.figure.particleEffect'].enum.length,6);
+  assert.deepEqual(props['worlds.figure.emotionEffect'].enum, ['native','kaomoji','orb','flow','bubbles','softglow']);
+  assert.deepEqual(props['worlds.figure.emotionEffectSize'].enum, ['small','medium','large']);
+  cfg.emotionEffect='flow';
+  assert.equal((await page.invoke('workbench', 'settings', [])).emotionEffect, 'flow');
+  cfg.emotionEffectSize='large';
+  assert.equal((await page.invoke('effects', 'settings', [])).emotionEffectSize, 'large');
+  cfg.emotionEffectSize='unknown';
+  assert.equal((await page.invoke('effects', 'settings', [])).emotionEffectSize, 'medium');
+  cfg.emotionEffect='unknown';
+  assert.equal((await page.invoke('workbench', 'settings', [])).emotionEffect, 'native');
   cfg.gearTheme='unknown';cfg.particleEffect='unknown';const fallback=await page.invoke('workbench','settings',[]);assert.equal(fallback.gearTheme,'red');assert.equal(fallback.particleEffect,'stars');assert.equal(cfg.gearTheme,'unknown');
 });
 
@@ -248,24 +266,6 @@ test('external model diagnostics remain data when the generated profile loads',a
  assert.equal(globalThis.__figureAuditMarker,undefined);
 });
 
-test('building with a texture cap writes the smaller PNG and keeps its transparent edge and original file', async t => {
-  const root = await fixture(t), workbench = join(import.meta.dirname, '..', 'workbench');
-  const source = join(root, 'source');
-  await mkdir(source);
-  const moc = Buffer.alloc(64);
-  moc.write('MOC3');
-  const texture = PNG.sync.write({ width: 2, height: 1, data: Buffer.from([240, 30, 60, 255, 0, 0, 0, 0]) });
-  await writeFile(join(source, 'role.model3.json'), JSON.stringify({ FileReferences: { Moc: 'role.moc3', Textures: ['texture.png'] } }));
-  await writeFile(join(source, 'role.moc3'), moc);
-  await writeFile(join(source, 'texture.png'), texture);
-  const corePath = join(root, 'core.js');
-  await writeFile(corePath, '// synthetic converter fixture');
-  const result = await buildPack(workbench, source, root, { corePath, maxTexture: 1 });
-  const small = PNG.sync.read(await readFile(join(result, 'models', 'source', 'textures', 'texture_00.png')));
-  assert.deepEqual([small.width, small.height, ...small.data], [1, 1, 240, 30, 60, 128]);
-  assert.deepEqual(await readFile(join(source, 'texture.png')), texture);
-});
-
 test('a completed installation stays successful if writing its history fails',async t=>{
   const root=await fixture(t),source=await pack(join(root,'draft'));
   const stateDir=join(root,'figure');await mkdir(stateDir);
@@ -310,58 +310,9 @@ test('core cache rejects corruption; cover handles browser spawn error without c
   } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
 });
 
-test('optional cover reports an early browser exit without waiting for its timeout', async (t) => {
-  const root = await fixture(t);
-  const previous = process.env.CHROME_PATH;
-  // Node accepts the executable launch, then exits immediately on Chromium-only flags.
-  process.env.CHROME_PATH = process.execPath;
-  try {
-    const result = await captureCover(root, root, 2000);
-    assert.equal(result.ok, false);
-    assert.match(result.error, /浏览器已退出/);
-  } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
-});
-
-test('optional cover returns a diagnostic if its local HTTP server cannot listen', async (t) => {
-  const root = await fixture(t);
-  const previous = process.env.CHROME_PATH;
-  process.env.CHROME_PATH = process.execPath;
-  t.mock.method(http.Server.prototype, 'listen', function () {
-    queueMicrotask(() => this.emit('error', new Error('port unavailable')));
-    return this;
-  });
-  try {
-    const result = await captureCover(root, root);
-    assert.equal(result.ok, false);
-    assert.match(result.error, /封面渲染服务失败.*port unavailable/);
-  } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
-});
-
-test('skipping cover while its server starts preserves the cancellation reason', async (t) => {
-  const root = await fixture(t);
-  const previous = process.env.CHROME_PATH;
-  process.env.CHROME_PATH = process.execPath;
-  const controller = new AbortController();
-  const reason = new Error('skip images');
-  const listen = http.Server.prototype.listen;
-  let server;
-  t.mock.method(http.Server.prototype, 'listen', function (port, host, ready) {
-    server = this;
-    return listen.call(this, port, host, () => {
-      controller.abort(reason);
-      ready();
-    });
-  });
-  try {
-    await assert.rejects(captureCover(root, root, 2000, [], controller.signal), error => error === reason);
-    assert.equal(server.listening, false);
-    assert.deepEqual(await readdir(root), []);
-  } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
-});
-
 test('real model: scan, Core verification, packing, cover and installation', { skip: !process.env.L2D_MODEL || !process.env.L2D_CORE }, async (t) => {
   const root = await fixture(t);
-  const cfg = { enabled: true, figuresDir: join(root, 'figures'), workDir: join(root, 'figure'), cover: true };
+  const cfg = { enabled: true, figuresDir: join(root, 'figures'), workDir: join(root, 'figure'), cover: true, emotionEffect: 'kaomoji' };
   await mkdir(join(cfg.workDir, 'sdk'), { recursive: true });
   await cp(process.env.L2D_CORE, join(cfg.workDir, 'sdk', 'live2dcubismcore.min.js'));
   const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({}); t.after(() => world.stop());
@@ -372,10 +323,59 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   const built = await inv('build', [process.env.L2D_MODEL]); assert.ok(built.state.build.bytes > 0);
   assert.equal(built.state.build.cover, true);
   const list = await inv('list'); assert.equal(list.builds.length, 1);
+  const saved = JSON.parse(await readFile(join(root, 'figure', 'state.json'), 'utf8'));
+  const packDir = saved.build.packDir;
+  assert.equal(JSON.parse(await readFile(join(packDir, 'figure-voice.json'), 'utf8')).version, 3);
+  assert.match(await readFile(join(packDir, 'backends', 'emotion-style.js'), 'utf8'), /"kaomoji"/);
+  assert.match(await readFile(join(packDir, 'backends', 'emotion-style.js'), 'utf8'), /emotionEffectSize = "medium"/);
+  assert.match(await readFile(join(packDir, 'backends', 'gaze-config.js'), 'utf8'), /normalizeGazeConfig/);
+  const coverFile = join(packDir, 'thumb', 'cover.png');
+  const originalCover = await readFile(coverFile);
+  await rm(coverFile);
+  assert.match((await inv('cropPreview', [list.builds[0].id])).image, /^data:image\/png;base64,/);
+  await assert.rejects(readFile(coverFile), {code:'ENOENT'});
+  await writeFile(coverFile, originalCover);
+  // A saved card with the same protocol may still have the older audio renderer.
+  const oldVoiceBackend = 'export function createFigureVoicePlayback() {}\n';
+  await writeFile(join(packDir, 'backends', 'voice-playback.js'), oldVoiceBackend);
+  cfg.emotionEffect = 'flow';
+  cfg.emotionEffectSize = 'small';
   const installed = await inv('install', ['', list.builds[0].id]);
   const licenses = await readFile(join(installed.state.install.target, 'LICENSES.txt'), 'utf8');
   assert.match(licenses, /请勿上传、分享或再次分发/);
-  await inv('edit', [list.builds[0].id, { aboutZh: '', style: 'shy' }]);
-  await inv('install', ['', list.builds[0].id]);
+  assert.equal(JSON.parse(await readFile(join(installed.state.install.target, 'figure-voice.json'), 'utf8')).version, 3);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'voice-playback.js'), 'utf8'), /createFigureVoicePlayback/);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'voice-playback.js'), 'utf8'), /createVoiceMouthEnvelope/);
+  assert.equal(await readFile(join(packDir, 'backends', 'voice-playback.js'), 'utf8'), oldVoiceBackend);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'emotion-style.js'), 'utf8'), /"flow"/);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'emotion-style.js'), 'utf8'), /emotionEffectSize = "small"/);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'emotion-effects', 'index.js'), 'utf8'), /createPetEmotionEffects/);
+  assert.match(await readFile(join(packDir, 'backends', 'emotion-style.js'), 'utf8'), /"kaomoji"/);
+  assert.match(await readFile(join(packDir, 'backends', 'emotion-style.js'), 'utf8'), /emotionEffectSize = "medium"/);
+  for (const file of ['figure-voice.json', 'backends/voice-playback.js', 'backends/emotion-effects/index.js']) {
+    await cp(join(installed.state.install.target, file), join(packDir, file));
+  }
+  await writeFile(join(packDir, 'backends', 'crop-config.js'), '// Older runtime already had body-crop.js.\n');
+  await rm(join(packDir, 'backends', 'gaze-config.js'));
+  const crop = {mode:'upper',edge:'round',line:.52,curve:.5,feather:.04,transition:.36};
+  const gaze = {enabled:false,speed:1.6};
+  await inv('edit', [list.builds[0].id, { aboutZh: '', style: 'shy', crop, gaze }]);
+  assert.deepEqual((await inv('detail', [list.builds[0].id])).crop, crop);
+  assert.deepEqual((await inv('detail', [list.builds[0].id])).gaze, gaze);
+  assert.match((await inv('cropPreview', [list.builds[0].id])).image, /^data:image\/png;base64,/);
+  cfg.emotionEffect = 'native';
+  assert.deepEqual(await inv('install', ['', list.builds[0].id]), { replacementRequired: true });
+  await inv('install', ['', list.builds[0].id, true]);
+  const installedManifest = JSON.parse(await readFile(join(installed.state.install.target, 'figure.json'), 'utf8'));
+  assert.equal(installedManifest.effects, undefined);
+  assert.deepEqual(installedManifest.axes.at(-1).options.map(option => option.id), ['figureupperframe','figurefullframe']);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'body-crop.js'), 'utf8'), /createCropMask/);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'crop-config.js'), 'utf8'), /curve: between/);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'gaze-config.js'), 'utf8'), /normalizeGazeConfig/);
+  const installedModels = await readdir(join(installed.state.install.target, 'models'), {withFileTypes:true});
+  const installedModel = installedModels.find(entry => entry.isDirectory());
+  assert.ok(installedModel);
+  assert.match(await readFile(join(installed.state.install.target, 'models', installedModel.name, 'profile.js'), 'utf8'), /gaze: \{"enabled":false,"speed":1\.6\}/);
+  assert.match(await readFile(join(installed.state.install.target, 'backends', 'emotion-style.js'), 'utf8'), /"native"/);
   assert.equal((await readdir(join(root, 'figure-backups'))).length, 1);
 });

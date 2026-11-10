@@ -9,3 +9,5 @@ Create one figure_prepare proposal. Explain the important mappings together thro
 figure_install returns figureId. If the person requested wearing it, use the available host wardrobe tool (pet_set) with that ID and follow its policy. This World never calls another World. Do not repeat installation after success; briefly tell the person the applied mappings and any generic fallbacks. Do not promise all models behave alike.
 
 Visual inspection can help interpret unnamed clips, but mappings without an explicit matching semantic name still require the person's confirmation even with high confidence and comparison frames. A tool returning automatic:false is authoritative; never try to raise confidence or lower depth to evade it.
+
+When figure_speak is available and you are about to use pet_say for the reply, emit figure_speak with the plain spoken text first, immediately followed by pet_say with the same text and any intended action marks, both in the same assistant response. Let the two calls run in order without waiting for a receipt. Use figure_speak once per reply. If the voice is unavailable or the first audio times out, the queued pet_say still shows the reply.

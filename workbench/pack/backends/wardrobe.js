@@ -19,8 +19,7 @@ export function wardrobeConfig(catalog,groups=[],bindings=[],axisOffset=1){
     const options=new Set(['default']);return {id:g.id,...(g.slot?{slot:g.slot}:{}),...(g.custom?{custom:true}:{}),name:g.name,...(g.en?{en:g.en}:{}),options:g.options.map(o=>{
       if(!/^[a-z0-9]{1,24}$/.test(o.id)||options.has(o.id)||typeof o.name!=='string'||!o.name.trim()||o.name.length>60||!resources.has(o.resource))throw Error('装扮选项无效');options.add(o.id);
       for(const t of wardrobeTracks(resources.get(o.resource))){const key=channel(t),owner=owners.get(key);if(owner&&owner!==g.id)throw Error('装扮与动作或其他分组共用参数，请调整绑定');owners.set(key,g.id);}used.add(o.resource);
-      if(o.ground!==undefined&&typeof o.ground!=='boolean')throw Error('贴地开关无效');
-      return {id:o.id,name:o.name.trim(),resource:o.resource,...(o.ground?{ground:true}:{})};
+      return {id:o.id,name:o.name.trim(),resource:o.resource};
     })};
   });
   return {version:1,axisOffset,groups:clean,resources:[...used].map(id=>({id,tracks:wardrobeTracks(resources.get(id))}))};
@@ -37,8 +36,7 @@ export function createWardrobe(model,paramIndex,partIndex,defaults={}){
     scheme(value){const values=String(value||'').split('-').slice(config.axisOffset||0);picks=Object.fromEntries(config.groups.map((g,i)=>[g.id,values[i]||'default']));},
     apply(){reset();for(const g of config.groups){const option=g.options.find(o=>o.id===picks[g.id]);const r=option&&config.resources.find(r=>r.id===option.resource);for(const t of r?.tracks||[]){const def=base(t);write(t,t.blend==='Add'?def+t.value:t.blend==='Multiply'?def*t.value:t.value);}}},
     state:()=>({...picks}),
-    grounding:()=>config.groups.some(g=>g.options.find(o=>o.id===picks[g.id])?.ground===true),
-    layoutKey:()=>JSON.stringify(config.groups.map(g=>{const o=g.options.find(o=>o.id===picks[g.id]);return [g.id,o?.id||'default',o?.ground===true];})),
+    layoutKey:()=>JSON.stringify(config.groups.map(g=>{const o=g.options.find(o=>o.id===picks[g.id]);return [g.id,o?.id||'default',o?.resource??null];})),
     inspect:()=>[...owned.values()].slice(0,256).map(t=>({id:t.id,target:t.target,value:t.target==='PartOpacity'&&partIndex.has(t.id)?model.getPartOpacityByIndex(partIndex.get(t.id)):paramIndex.has(t.id)?model.getParameterValueByIndex(paramIndex.get(t.id)):undefined})),
   };
 }

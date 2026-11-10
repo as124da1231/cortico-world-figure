@@ -3,21 +3,24 @@ import {cp,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {manualPreviewPlan,previewSize} from './manual-preview.ts';
 import {StaticPreviewRenderer,type PreviewWorker} from './preview-renderer.ts';
-import {assertRegularTree} from './pipeline.ts';
+import {assertRegularTree,refreshPackRuntime} from './pipeline.ts';
 import {packFingerprint} from './pack-fingerprint.ts';
+import {parseFigureJson} from './pack-manifest.ts';
 import {appendNativeVocab,nativeConfig,validateBindings,FACE_WORDS,MOTION_WORDS} from '../workbench/tools/native-catalog.mjs';
 import {wardrobeConfig,wardrobeTracks,wardrobeChannels} from '../workbench/pack/backends/wardrobe.js';
 import {fixedWardrobeGroups} from '../workbench/pack/backends/wardrobe-slots.js';
+import {BODY_CROP_AXIS} from '../workbench/pack/backends/crop-config.js';
 
 export const LIBRARY = 'native-library.json';
 export async function writeNativePack(root:string,catalog:any,bindings:any[],preview=false,groups:any[]=[]) {
   const native=nativeConfig(catalog,bindings,{includeAll:preview});
-  const manifestFile=join(root,'figure.json'),manifest=JSON.parse(await readFile(manifestFile,'utf8'));
+  const manifestFile=join(root,'figure.json'),manifest=parseFigureJson(await readFile(manifestFile,'utf8'));
   const previousLibrary=await readFile(join(root,LIBRARY),'utf8').then(s=>JSON.parse(s)).catch(()=>({}));
   const previousAxes=new Set((previousLibrary.wardrobe||[]).map((g:any)=>g.id));
-  const axes=(manifest.axes||[]).filter((a:any)=>!previousAxes.has(a.id));
+  const cropAxis=(manifest.axes||[]).find((a:any)=>a.id===BODY_CROP_AXIS&&!previousAxes.has(a.id));
+  const axes=(manifest.axes||[]).filter((a:any)=>!previousAxes.has(a.id)&&a!==cropAxis);
   const wardrobe=wardrobeConfig(catalog,groups,bindings,axes.length);
-  if(wardrobe.groups.some(g=>g.options.length&&axes.some((a:any)=>a.id===g.id)))throw Error('装扮分组标识与模型选项重复');
+  if(wardrobe.groups.some(g=>g.options.length&&(g.id===BODY_CROP_AXIS||axes.some((a:any)=>a.id===g.id))))throw Error('装扮分组标识与模型选项重复');
   const oldOrder=new Map((manifest.axes||[]).map((a:any,i:number)=>[a.id,i]));
   const runtimeGroups=wardrobe.groups.filter(g=>g.options.length).sort((a,b)=>Number(oldOrder.get(a.id)??Infinity)-Number(oldOrder.get(b.id)??Infinity));
   const dirs=await readdir(join(root,'models'),{withFileTypes:true});let count=0;
@@ -37,7 +40,7 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
     const removed=new Set(previous.map((b:any)=>b.word).filter((w:string)=>MOTION_WORDS.includes(w)));
     manifest.vocab=(manifest.vocab||[]).filter((v:any)=>!removed.has(v.id));
     appendNativeVocab(manifest.vocab,bindings,catalog.resources);
-    manifest.axes=[...axes,...runtimeGroups.map(g=>({id:g.id,name:{zh:g.name,en:g.en||g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]}))];
+    manifest.axes=[...axes,...runtimeGroups.map(g=>({id:g.id,name:{zh:g.name,en:g.en||g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]})),...(cropAxis?[cropAxis]:[])];
     manifest.presets=(manifest.presets||[]).map((p:any)=>({...p,pick:Object.fromEntries(manifest.axes.map((a:any)=>[a.id,a.options.some((o:any)=>o.id===p.pick?.[a.id])?p.pick[a.id]:a.options[0].id]))}));
     // Empty groups are editor drafts only; runtime offsets follow the actual emitted axes.
     await writeFile(manifestFile,JSON.stringify(manifest,null,2)+'\n');
@@ -68,8 +71,7 @@ export class ManualSessions {
       await assertRegularTree(pack);
       await mkdir(dir,{recursive:true});await cp(pack,copy,{recursive:true});
       // The preview always uses this version's trusted renderer, including old generated packs.
-      for(const file of ['live2d.js','native-actions.js','wardrobe.js','wardrobe-slots.js','render-config.js','render-quality.js','role-values.js','soullink.js','bongo.js'])
-        await cp(join(this.workbench,'pack','backends',file),join(copy,'backends',file));
+      await refreshPackRuntime(join(this.workbench,'pack'),copy);
       await writeNativePack(copy,catalog,bindings,true,groups);
       // Preview settings are isolated from the source pack and final installation.
       for(const model of await readdir(join(copy,'models'),{withFileTypes:true}))if(model.isDirectory()){
@@ -101,7 +103,8 @@ export class ManualSessions {
     const s=this.get(token);if(s.saving)throw Error('正在保存，请稍后预览');
     const plan=manualPreviewPlan(s.catalog,input),key=JSON.stringify(plan),generation=++s.generation;
     s.renderAbort?.abort();await s.renderTask?.catch(()=>{});
-    if(!this.sessions.has(token)||generation!==s.generation)throw Error('预览已取消');
+    if(s.renderer?.closed)await s.renderer.close();
+    if(!this.sessions.has(token)||generation!==s.generation||s.saving)throw Error('预览已取消');
     if(s.cache.has(key))return s.cache.get(key);
     const abort=new AbortController();s.renderAbort=abort;
     if(!s.renderer||s.renderer.closed)s.renderer=this.createRenderer(s.copy,this.workbench);

@@ -1,0 +1,7 @@
+Emotion effect painters from cortico-world-image-figure 3.10.0
+Copyright (C) 2026 as124da1231
+License: GNU Affero General Public License v3.0 or later.
+Source revision: e637c53, engine/runtime/emotion-*.js.
+
+The emotion-*.js modules retain the source implementation. The adjacent
+index.js adapts these painters to the Figure Live2D runtime.

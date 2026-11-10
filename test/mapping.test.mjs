@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { inferRoles, ROLE_RULES } from '../workbench/tools/parameter-mapping.mjs';
-import { roleValue, maskBufferCount } from '../workbench/pack/backends/role-values.js';
+import { bubbleMouthPose, roleValue, maskBufferCount } from '../workbench/pack/backends/role-values.js';
 import { createAdaptiveRenderer } from '../workbench/pack/backends/render-config.js';
 
 const display = (...ids) => ({ Parameters: ids.map(Id => ({ Id })) });
@@ -17,6 +17,17 @@ const link = (input, output, weight = 100) => ({
 const vts = (target, low = -20, high = 20) => ({ ParameterSettings: [
   { Input: 'FaceAngleX', OutputLive2D: target, OutputRangeLower: low, OutputRangeUpper: high },
 ] });
+
+test('bubble mouth uses one pulse, preserves expression opening, and fades back to the motion', () => {
+  assert.deepEqual(bubbleMouthPose(50, 0, 0, 3), { base: 0, open: 0, weight: 0 });
+  assert.deepEqual(bubbleMouthPose(62, 1, 0, 1), { base: 0, open: .45, weight: 1 });
+  assert.deepEqual(bubbleMouthPose(62, 1, 0, 2), { base: 0, open: .9, weight: 1 });
+  assert.deepEqual(bubbleMouthPose(50, 0, .6, 3), { base: .6, open: .6, weight: 0 });
+  const fading = bubbleMouthPose(50.48, .04, .6, 1);
+  assert.equal(fading.base, .6);
+  assert.ok(Math.abs(fading.open - .618) < 1e-9);
+  assert.equal(fading.weight, .5);
+});
 
 test('standard model keeps all previous semantic targets and ranges', () => {
   const d = display(...ROLE_RULES.flatMap(([, ids]) => ids));

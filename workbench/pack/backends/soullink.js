@@ -165,7 +165,11 @@ export function createPerformance(profile, warn = console.warn) {
   const accentSpeed = Number.isFinite(tuning.accentSpeed) ? tuning.accentSpeed : 12;
 
   runtime.setIdleEnabled(true);
-  runtime.setLipSyncEnabled(false);           // 嘴由宿主 talk / kit 驱动，避免双重口型
+  runtime.setLipSyncEnabled(false);
+  const measuredSpeech = typeof runtime.setAudioLevelAnalyzer === 'function'
+    && typeof runtime.setVoicePlaybackActive === 'function';
+  let voiceLevel = 0, voiceActive = false;
+  if (measuredSpeech) runtime.setAudioLevelAnalyzer({ getLevel: () => voiceLevel });
   runtime.setParameterGain(Number.isFinite(tuning.gain) ? tuning.gain : 1.15);
   runtime.setBodyMotionGain(Number.isFinite(tuning.bodyGain) ? tuning.bodyGain : 1.8);
   runtime.setVADDecayRate(Number.isFinite(tuning.vadDecay) ? tuning.vadDecay : 0.03);
@@ -178,10 +182,17 @@ export function createPerformance(profile, warn = console.warn) {
 
   return {
     /** 每帧调用；返回 role → 值的表（已只保留 role 表里有的名字）。 */
-    update(t, dt, face) {
+    update(t, dt, face, speechLevel) {
       if (dead) return null;
       try {
         const name = face ?? 'neutral';
+        const speaking = measuredSpeech && Number.isFinite(speechLevel);
+        voiceLevel = speaking ? speechLevel : 0;
+        if (speaking !== voiceActive) {
+          voiceActive = speaking;
+          runtime.setLipSyncEnabled(speaking);
+          runtime.setVoicePlaybackActive(speaking);
+        }
         if (name !== lastFace || (name !== 'neutral' && t - lastPush > keepSeconds)) {
           const preset = getVADPreset(emotion[name] ?? name);
           runtime.applyVADTarget(preset, blend);
@@ -191,6 +202,8 @@ export function createPerformance(profile, warn = console.warn) {
         const snap = runtime.update(t, dt);
         const out = {};
         for (const [role, value] of Object.entries(snap.live2dParams)) {
+          // SoulLink supplies measured accents. Figure writes mouth opening after physics.
+          if (speaking && role === 'mouthOpen') continue;
           if (Number.isFinite(value)) out[role] = value * (response[role] ?? 1);
         }
 

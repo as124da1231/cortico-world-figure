@@ -1,5 +1,17 @@
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+/** The kit already adds 12 × talk to gap. Remove it before adding our text pulse. */
+export function bubbleMouthPose(gap, talk, expression, gain = 1) {
+  const pulse = Number.isFinite(talk) ? clamp(talk, 0, 1) : 0;
+  const expressionGap = Number.isFinite(gap) ? gap - 50 - 12 * pulse : 0;
+  const base = clamp(Math.max(expressionGap / 22, Number.isFinite(expression) ? expression : 0), 0, 1);
+  return {
+    base,
+    open: clamp(base + pulse * 0.45 * gain, 0, 1),
+    weight: clamp(pulse / 0.08, 0, 1),
+  };
+}
+
 /** Cubism packs 36 unique clipping groups into one texture, or 32 per
  * texture when multiple buffers are used. Count groups, not masked meshes. */
 export function maskBufferCount(masks) {

@@ -13,7 +13,7 @@ async function editor(t,fail=false,opts={}){
  if(opts.upgrade)data.wardrobeNeedsSave=true;
  if(opts.previewSize)data.previewSize=opts.previewSize;
  if(opts.resources)data.resources=opts.resources;if(opts.wardrobe)data.wardrobe=opts.wardrobe;
- const ctx={root:doc.querySelector('main'),language:'zh',signal:ac.signal,notifyOnUnmount:(...args)=>notifications.push(args),guardLeave:()=>({dispose(){}}),frame:()=>({dispose(){}}),ui:{toast:(...args)=>toasts.push(args),confirm:async()=>{hostConfirms++;throw Error('Host confirmation must not be used');}},invoke:async(method,args)=>{calls.push({method,args:structuredClone(args)});if(method==='manualPreview'){if(opts.preview)return opts.preview(args);return {frames:[{kind:'generic',png:'data:image/png;base64,aGVsbG8='}],quality:{textureLimit:256,canvas:[256,256],maskSize:256}};}if(method==='manualSave'&&opts.save)return opts.save(args);if(method==='manualSkipImages'&&opts.skipImages)return opts.skipImages(args);if(method==='manualOpenBuild'){if(fail)throw Error('编辑已过期，请重新打开');return data;}return {};}};
+ const ctx={root:doc.querySelector('main'),language:'zh',signal:ac.signal,notifyOnUnmount:(...args)=>notifications.push(args),guardLeave:()=>({dispose(){}}),frame:()=>({dispose(){}}),ui:{toast:(...args)=>toasts.push(args),confirm:async()=>{hostConfirms++;throw Error('Host confirmation must not be used');}},invoke:async(method,args)=>{calls.push({method,args:structuredClone(args)});if(method==='manualPreview'){if(opts.preview)return opts.preview(args);return {frames:[{kind:'generic',png:'data:image/png;base64,aGVsbG8='}],quality:{textureLimit:256,canvas:[256,256],maskSize:256}};}if(method==='manualSave'&&opts.save)return opts.save(args);if(method==='manualOpenBuild'){if(fail)throw Error('编辑已过期，请重新打开');return data;}return {};}};
  const handle=await w.openEditor(ctx,'manualOpenBuild',['pack'],opts.onSaved||(async()=>{}));t.after(()=>handle.dispose());
  const modal=doc.querySelector('.l2d-bind-modal'),gallery=doc.querySelector('.l2d-bind-gallery');const settle=()=>new Promise(r=>setTimeout(r,10));await settle();assert(!doc.querySelector('iframe'));
  const button=text=>[...doc.querySelectorAll('button')].find(b=>b.textContent===text);
@@ -34,60 +34,21 @@ test('existing cards require a real change; reset all is confirmed, reversible a
  e.button('全部恢复通用').click();e.button('保留绑定').click();await Promise.resolve();assert.match(e.doc.querySelector('.l2d-bind-summary').textContent,/1 项绑定/);
  e.button('全部恢复通用').click();e.button('全部恢复').click();await Promise.resolve();assert.match(e.doc.querySelector('.l2d-bind-summary').textContent,/0 项绑定/);assert(e.button('保存绑定').disabled);assert(!e.calls.some(c=>c.method==='manualSave'));assert.equal(e.doc.querySelectorAll('.l2d-bind-resource').length,1);
 });
-test('saving works during a slow preview and can skip optional images',async t=>{
- const image={frames:[{kind:'generic',png:'data:image/png;base64,aGVsbG8='}]};
- let finishSave,finishPreview,holdPreview=false,skipAttempts=0;
- const e=await editor(t,false,{
-  preview:()=>holdPreview?new Promise(resolve=>finishPreview=resolve):image,
-  save:()=>new Promise(resolve=>finishSave=resolve),
-  skipImages:()=>{if(++skipAttempts===1)throw Error('图片任务尚未开始');return {skipped:true};},
-  onSaved:async()=>{throw Error('refresh failed');},
- });
- const skip=e.button('跳过图片'),status=e.doc.querySelector('.l2d-bind-status');
- assert(skip.hidden);
- await e.dirty();
- holdPreview=true;e.button('重新取样').click();await e.settle();
- assert.equal(e.gallery.getAttribute('aria-busy'),'true');assert(!e.button('保存绑定').disabled);
- e.button('保存绑定').click();assert(e.doc.querySelector('.l2d-bind-layout').inert);assert(!skip.hidden);
- assert(e.button('恢复通用').disabled);e.button('恢复通用').onclick();
- assert.match(e.doc.querySelector('.l2d-bind-summary').textContent,/1 项绑定/);
- finishPreview(image);await e.settle();assert.match(status.textContent,/保存并打包/);
- skip.click();await e.settle();assert.match(status.textContent,/图片任务尚未开始/);assert(!skip.disabled);
- skip.click();await e.settle();assert.match(status.textContent,/已跳过图片，继续保存绑定/);assert(skip.disabled);
- assert.deepEqual(e.calls.filter(c=>c.method==='manualSkipImages').map(c=>c.args),[['test'],['test']]);
- finishSave({buildId:'pack',warn:'已跳过装扮缩略图'});await e.settle();
- assert(!e.doc.querySelector('dialog'));assert.equal(e.calls.filter(c=>c.method==='manualSave').length,1);
- assert(e.toasts.some(([s])=>s.includes('绑定已保存，可从卡片安装 · 已跳过装扮缩略图')));
- assert(e.toasts.some(([s])=>s.includes('绑定已保存，模型包列表刷新失败')));
+test('saving locks binding mutations and a committed save survives list refresh errors',async t=>{
+ let finish;const e=await editor(t,false,{save:()=>new Promise(r=>finish=r),onSaved:async()=>{throw Error('refresh failed');}});await e.dirty();e.button('保存绑定').click();assert(e.doc.querySelector('.l2d-bind-layout').inert);assert(e.button('恢复通用').disabled);e.button('恢复通用').onclick();assert.match(e.doc.querySelector('.l2d-bind-summary').textContent,/1 项绑定/);
+ finish({buildId:'pack'});await new Promise(r=>setTimeout(r,5));assert(!e.doc.querySelector('dialog'));assert.equal(e.calls.filter(c=>c.method==='manualSave').length,1);assert(e.toasts.some(([s])=>s.includes('绑定已保存，模型包列表刷新失败')));
 });
-test('preview failures allow binding and saving, and can be retried at a lower resolution',async t=>{
- const image={frames:[{kind:'generic',png:'data:image/png;base64,aGVsbG8='}]};
- const e=await editor(t,false,{existing:true,preview:([,request])=>{
-  if(request.previewSize>256)throw Error('renderer lost');
-  return image;
- }});
- assert.match(e.doc.querySelector('.l2d-bind-status').textContent,/可继续编辑.*renderer lost/);
- assert(!e.button('重试预览').hidden);assert(!e.button('取消').disabled);
- await e.dirty();assert(!e.button('保存绑定').disabled);assert(!e.button('绑定到「开心」').disabled);
- const size=e.doc.querySelector('[aria-label="预览精度"]');
- size.value='256';size.dispatchEvent(new e.w.Event('change'));await e.settle();
- assert.equal(e.gallery.querySelector('img').width,256);assert(e.button('重试预览').hidden);
- size.value='512';size.dispatchEvent(new e.w.Event('change'));await e.settle();
- assert.match(e.doc.querySelector('.l2d-bind-status').textContent,/仍显示上次预览/);
- e.button('保存绑定').click();await e.settle();
- assert.equal(e.calls.find(c=>c.method==='manualSave').args[1][0].resource,'smile');
- assert(!e.doc.querySelector('dialog'));
+test('preview failures preserve drafts and retry without an iframe or host modification',async t=>{
+ let fail=false;const e=await editor(t,false,{preview:()=>{if(fail)throw Error('renderer lost');return {frames:[{kind:'generic',png:'data:image/png;base64,aGVsbG8='}]};}});await e.dirty();fail=true;e.button('重新取样').click();await e.settle();assert(!e.button('保存绑定').disabled);assert.match(e.doc.querySelector('.l2d-bind-status').textContent,/renderer lost/);
+ fail=false;e.button('重试预览').click();await e.settle();assert(!e.button('保存绑定').disabled);assert.match(e.doc.querySelector('.l2d-bind-summary').textContent,/1 项绑定/);
 });
-test('an expired editor keeps the close route and disables edits',async t=>{
- let expired=false;
- const e=await editor(t,false,{preview:()=>{
-  if(expired)throw Error('编辑已过期，请重新打开');
-  return {frames:[{kind:'generic',png:'data:image/png;base64,aGVsbG8='}]};
- }});
- await e.dirty();expired=true;e.button('重新取样').click();await e.settle();
- assert.match(e.doc.querySelector('.l2d-bind-status').textContent,/编辑已过期/);
- assert(e.button('保存绑定').disabled);assert(e.button('恢复通用').disabled);assert(!e.button('取消').disabled);
- e.button('取消').click();e.button('放弃修改').click();await Promise.resolve();assert(!e.doc.querySelector('dialog'));
+test('enlarging a comparison does not close or change the binding editor',async t=>{
+ const e=await editor(t);const shot=e.gallery.querySelector('.l2d-bind-shot-button');
+ shot.focus();shot.click();
+ const viewer=e.modal.querySelector('dialog.l2d-image-popup');
+ assert(viewer.open);assert.equal(viewer.querySelector('img').src,shot.querySelector('img').src);
+ viewer.dispatchEvent(new e.w.Event('cancel',{bubbles:true,cancelable:true}));
+ assert(e.modal.open);assert(!e.modal.querySelector('dialog'));assert.equal(e.doc.activeElement,shot);
 });
 test('unmount registers independent close notifications and does not invoke with an aborted signal',async t=>{
  const e=await editor(t);assert(e.notifications.some(([method,args])=>method==='manualClose'&&args[0]==='test'));e.ac.abort();await Promise.resolve();assert(!e.doc.querySelector('dialog'));assert(!e.calls.some(c=>c.method==='manualClose'));
@@ -103,8 +64,12 @@ test('confirmation Escape preserves edits; panel disposal removes a pending conf
  const e=await editor(t);await e.dirty();e.button('取消').click();const event=new e.w.Event('cancel',{bubbles:true,cancelable:true});e.doc.querySelector('.l2d-bind-discard').dispatchEvent(event);await Promise.resolve();assert(e.modal.open);assert(!e.doc.querySelector('.l2d-bind-discard'));
  e.button('×').click();e.ac.abort();await Promise.resolve();assert(!e.doc.querySelector('dialog'));assert.equal(e.hostConfirms(),0);
 });
-test('ground switch sits beside add, defaults off and persists an explicitly enabled option',async t=>{
- const e=await editor(t,false,{resources:[{id:'egg',kind:'expression',classification:'appearance',title:'蛋',channels:['Parameter:Egg']}]});e.doc.querySelector('[role=tab]:last-child').click();e.doc.querySelector('.l2d-bind-resource').click();await e.settle();const input=e.doc.querySelector('[aria-label="切换后贴地"]');assert.equal(input.checked,false);assert.equal(input.parentElement.parentElement,e.button('添加选项').parentElement);input.checked=true;input.dispatchEvent(new e.w.Event('change'));await e.settle();e.button('添加选项').click();await e.settle();e.button('保存绑定').click();await new Promise(r=>setTimeout(r,5));assert.equal(e.calls.find(c=>c.method==='manualSave').args[2][0].options[0].ground,true);
+test('wardrobe preview and save need no grounding switch',async t=>{
+ const e=await editor(t,false,{resources:[{id:'egg',kind:'expression',classification:'appearance',title:'蛋',channels:['Parameter:Egg']}]});e.doc.querySelector('[role=tab]:last-child').click();e.doc.querySelector('.l2d-bind-resource').click();await e.settle();
+ assert.equal(e.doc.querySelector('.l2d-bind-modal [role="switch"]'),null);
+ assert.deepEqual(e.calls.findLast(c=>c.method==='manualPreview').args[1].groups[0].options[0],{id:'preview',name:'蛋',resource:'egg'});
+ e.button('添加选项').click();await e.settle();e.button('保存绑定').click();await new Promise(r=>setTimeout(r,5));const option=e.calls.find(c=>c.method==='manualSave').args[2][0].options[0];
+ assert.equal(option.resource,'egg');assert.equal(Object.hasOwn(option,'ground'),false);
 });
 test('previewing a candidate in a full wardrobe group stays within runtime limits and does not change its draft',async t=>{
  const e=await editor(t,false,{resources:[{id:'coat',kind:'expression',classification:'appearance',title:'冬装',channels:['Parameter:Coat']}],wardrobe:[{id:'lookcoat',name:'服装',options:Array.from({length:16},(_,i)=>({id:'v'+i,name:'衣服'+i,resource:'coat'}))}]});

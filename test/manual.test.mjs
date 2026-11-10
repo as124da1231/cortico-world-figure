@@ -10,6 +10,8 @@ import {makeCtx,fixtureManifest} from './_ctx.mjs';
 import {readPackManifest} from '../src/pack-manifest.ts';
 import {wardrobeConfig} from '../workbench/pack/backends/wardrobe.js';
 import {Live2dWorld} from '../src/world.ts';
+import {editPack,packDetail} from '../src/pipeline.ts';
+import {BODY_CROP_AXIS,BODY_CROP_DEFAULT,bodyCropForScheme} from '../workbench/pack/backends/crop-config.js';
 
 const catalog={model:{title:'Example'},fingerprint:'source',resources:[
  {id:'smile',kind:'expression',classification:'expression',title:'Smile',seconds:1.5,parameters:[{id:'ParamSmile',value:1}],raw:{Parameters:[{Id:'ParamSmile',Value:1}] }},
@@ -36,10 +38,45 @@ test('native edits preserve profile settings, validate targets, and remove clear
  assert.deepEqual(JSON.parse(await readFile(join(pack,'figure.json'))).vocab.map(v=>v.id),['happy']);
  assert.deepEqual(JSON.parse(await readFile(join(pack,LIBRARY))).bindings,[]);
 });
+
+test('upper-body framing stays on the same pack and keeps wardrobe selections in order', async t=>{
+ const {pack}=await fixture(t);
+ await writeFile(join(pack,'build.json'),JSON.stringify({tool:'cortico-live2d-pack'}));
+ const groups=[{id:'lookarms',name:'装扮',options:[{id:'raised',name:'抬手',resource:'wave'}]}];
+ await writeNativePack(pack,catalog,[],false,groups);
+ assert.deepEqual((await packDetail(pack)).crop,BODY_CROP_DEFAULT);
+ assert.deepEqual((await packDetail(pack)).gaze,{enabled:true,speed:1});
+ const legacyCrop={mode:'upper',edge:'round',line:.55,feather:.08,transition:.4};
+ await editPack(pack,{crop:legacyCrop});
+ assert.deepEqual((await packDetail(pack)).crop,{...legacyCrop,curve:1});
+ const crop={...legacyCrop,curve:.5};
+ const gaze={enabled:false,speed:1.75};
+ await editPack(pack,{crop,gaze});
+ await editPack(pack,{crop:legacyCrop});
+ await writeNativePack(pack,catalog,binding,false,groups);
+ const manifest=await readPackManifest(pack);
+ assert.deepEqual(manifest.axes.map(axis=>axis.id),['lookarms',BODY_CROP_AXIS]);
+ assert.deepEqual(manifest.axes[1].options.map(option=>option.id),['figureupperframe','figurefullframe']);
+ assert.deepEqual((await packDetail(pack)).crop,crop);
+ assert.deepEqual((await packDetail(pack)).gaze,gaze);
+ assert.equal(bodyCropForScheme(crop,'raised-figurefullframe').mode,'full');
+ assert.equal(bodyCropForScheme(crop,'raised-figureupperframe').mode,'upper');
+ const profile=await readFile(join(pack,'models','sample','profile.js'),'utf8');
+ assert.match(profile,/wardrobe:.*"axisOffset":0/);
+ await assert.rejects(editPack(pack,{nameZh:'Changed',crop:{...crop,line:.99}}),/取景选项无效/);
+ await assert.rejects(editPack(pack,{crop:{...crop,curve:2.1}}),/取景选项无效/);
+ await assert.rejects(editPack(pack,{gaze:{enabled:true,speed:0}}),/视线跟随选项无效/);
+ await assert.rejects(editPack(pack,{gaze:{enabled:'false',speed:1}}),/视线跟随选项无效/);
+ assert.equal(await readFile(join(pack,'models','sample','profile.js'),'utf8'),profile);
+ assert.deepEqual((await readPackManifest(pack)).axes,manifest.axes);
+});
 test('static sessions keep low-quality private copies, detect changes and release them without exposing asset URLs',async t=>{
  const {root,pack}=await fixture(t),sessions=new ManualSessions(root,new URL('../workbench',import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1'));t.after(()=>sessions.stop());const opened=await sessions.open(pack,catalog,binding);
  assert.equal(opened.resources.length,3);assert(!opened.resources[0].raw);assert.equal(opened.preview,undefined);assert.equal(opened.files,undefined);assert.equal(typeof sessions.asset,'undefined');
  const profile=await readFile(join(sessions.get(opened.token).copy,'models/sample/profile.js'),'utf8');assert.match(profile,/textureLimit:512,canvasLimit:512/);assert.doesNotMatch(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/textureLimit:512/);
+ const copy=sessions.get(opened.token).copy;
+ assert.match(await readFile(join(copy,'backends','voice-playback.js'),'utf8'),/createFigureVoicePlayback/);
+ await assert.rejects(readFile(join(pack,'backends','voice-playback.js')), {code:'ENOENT'});
  await assert.rejects(sessions.preview(opened.token,{page:'actions',raw:false,word:'happy',resource:'../secret',picks:{}}),/资源无效/);
  await writeFile(join(pack,'changed.txt'),'changed');await assert.rejects(sessions.validate(opened.token,binding),/变化/);await sessions.close(opened.token);assert.equal(sessions.sessions.size,0);assert.equal((await readdir(join(root,'manual-preview'))).length,0);
 });
@@ -59,10 +96,10 @@ test('AI mode can execute with the legacy switch off, and switching to manual st
  cfg.adaptationMode='manual';built=false;await assert.rejects(world.executeAutomation({kind:'live2d',dir:root},{version:1,bindings:[],resources:[]}),/关闭/);assert.equal(built,false);
 });
 
-async function editableWorld(t,{renderThumbnails=false}={}){
+async function editableWorld(t){
  const f=await fixture(t);await writeNativePack(f.pack,catalog,[]);
  const world=new Live2dWorld({getConfig:()=>({enabled:true,workDir:join(f.root,'work')}),persist(){},dataDir:f.root});
- if(!renderThumbnails)world.captureWardrobe=async()=>{}; // Transaction fixtures have no Core; real rendering is covered separately.
+ world.captureWardrobe=async()=>{}; // Transaction fixtures have no Core; real rendering is covered separately.
  const record={id:'existing',packDir:f.pack,at:1,bytes:1,words:0,cover:false,fit:false,manualAvailable:true};
  world.state={modelDir:'',builds:[record],build:record,distributionNotice:{revision:1,at:1}};
  t.after(()=>world.stop());const opened=await world.manual.open(f.pack,catalog,[],undefined,record.id);
@@ -97,34 +134,14 @@ test('expired leases are removed, saving leases defer close, and cancelled open 
 test('wardrobe saves into host axes and runtime data; clearing axes keeps the resource library and the same card',async t=>{
  const {world,token}=await editableWorld(t),groups=[{id:'lookarms',name:'手部',options:[{id:'raised',name:'抬起',resource:'wave',ground:true}]}];
  await world.saveManual(token,binding,groups);let pack=world.state.builds[0].packDir,m=JSON.parse(await readFile(join(pack,'figure.json')));assert.equal(m.axes[0].id,'lookarms');assert.deepEqual(m.axes[0].options.map(o=>o.id),['default','raised']);
- assert.match(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/wardrobe:.*"axisOffset":0/);const library=JSON.parse(await readFile(join(pack,LIBRARY)));assert.equal(library.wardrobe[0].options[0].resource,'wave');assert.equal(library.wardrobe[0].options[0].ground,true);assert.match(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/"ground":true/);
+ const profile=await readFile(join(pack,'models/sample/profile.js'),'utf8');assert.match(profile,/wardrobe:.*"axisOffset":0/);const library=JSON.parse(await readFile(join(pack,LIBRARY)));assert.deepEqual(library.wardrobe[0].options[0],{id:'raised',name:'抬起',resource:'wave'});assert.doesNotMatch(profile,/"ground":/);
  const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'装扮');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes,[]);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
 });
-test('failed wardrobe thumbnail rendering saves the binding and axes with a warning',async t=>{
- const {world,token,pack}=await editableWorld(t,{renderThumbnails:true});
- const previousBrowser=process.env.CHROME_PATH;
- process.env.CHROME_PATH=process.execPath; // Launches, rejects the Chrome arguments and exits without sending any images.
- t.after(()=>{if(previousBrowser===undefined)delete process.env.CHROME_PATH;else process.env.CHROME_PATH=previousBrowser;});
- const groups=[{id:'lookarm',name:'装扮',options:[{id:'up',name:'抬手',resource:'wave'}]}];
- const result=await world.invoke('workbench','manualSave',[token,binding,groups]);
- assert.match(result.warn,/装扮缩略图未生成/);
- const [record]=world.state.builds;
- assert.equal(world.state.builds.length,1);assert.equal(record.id,'existing');assert.notEqual(record.packDir,pack);
- assert.deepEqual((await readPackManifest(record.packDir)).axes[0].options.map(o=>o.id),['default','up']);
- assert.equal(JSON.parse(await readFile(join(record.packDir,LIBRARY))).bindings[0].resource,'smile');
- assert.deepEqual(await world.invoke('workbench','manualSave',[token,binding,groups]),result);
-});
-
-test('a matching save can skip optional images while busy and still commits',async t=>{
- const {world,token}=await editableWorld(t,{renderThumbnails:true});
- const groups=[{id:'lookarm',name:'装扮',options:[{id:'up',name:'抬手',resource:'wave'}]}];
- const pending=world.invoke('workbench','manualSave',[token,binding,groups]);
- await assert.rejects(world.invoke('workbench','manualSkipImages',['another-token']),/保存已结束/);
- assert.deepEqual(await world.invoke('workbench','manualSkipImages',[token]),{skipped:true});
- const result=await pending;
- assert.equal(result.buildId,'existing');assert.match(result.warn,/已选择跳过图片/);
- assert.deepEqual((await readPackManifest(world.state.builds[0].packDir)).axes[0].options.map(o=>o.id),['default','up']);
- await assert.rejects(world.invoke('workbench','manualSkipImages',[token]),/保存已结束/);
+test('failed wardrobe thumbnail rendering keeps the original card and draft for retry',async t=>{
+ const {world,token,pack,root}=await editableWorld(t);world.captureWardrobe=async()=>{throw Error('thumbnail renderer unavailable');};
+ await assert.rejects(world.saveManual(token,binding,[{id:'lookarm',name:'装扮',options:[{id:'up',name:'抬手',resource:'wave'}]}]),/renderer unavailable/);
+ assert.equal(world.state.builds[0].packDir,pack);assert.equal(world.state.builds.length,1);assert.equal(world.manual.get(token).saving,false);assert.deepEqual(await readdir(join(root,'work','builds')),[]);
+ world.captureWardrobe=async()=>{};await world.saveManual(token,binding,[]);assert.equal(world.state.builds[0].id,'existing');
 });
 
 test('legacy axis order and IDs survive fixed-slot normalization',async t=>{

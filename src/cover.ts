@@ -12,6 +12,7 @@ import http from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { extname, join, normalize, sep } from 'node:path';
 import type {StaticPreviewPlan} from './manual-preview.ts';
+import { parseFigureJson } from './pack-manifest.ts';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -53,7 +54,8 @@ try {
   });
   const asset = (p) => new URL(p, new URL('/pack/', location.origin));
   const plan = __STATIC_PREVIEW__;
-  body = await mod.createFigureBody(new URL('/pack/', location.origin), { kit, host, loadImage, asset, scheme: '', model: undefined, preview: !!plan });
+  const imageOnly = __COVER_IMAGE_ONLY__;
+  body = await mod.createFigureBody(new URL('/pack/', location.origin), { kit, host, loadImage, asset, scheme: '', model: undefined, preview: !!plan || imageOnly, previewSize: imageOnly ? 256 : undefined });
   body.do?.('neutral');
   body.set?.({ roam: 'off' });
   const deadline = performance.now() + 20000;
@@ -113,6 +115,7 @@ export interface CoverResult {
   thumbnails?: number;
   frames?: Array<any>;
   quality?: any;
+  image?: string;
 }
 
 /** Use the host's axis order; all other axes remain at their default option. */
@@ -160,11 +163,11 @@ export async function captureCover(
   timeoutMs = 60000,
   samples: Array<{id:string;time:number}> = [],
   signal?: AbortSignal,
-  options: {wardrobe?:boolean;preview?:StaticPreviewPlan} = {},
+  options: {wardrobe?:boolean;preview?:StaticPreviewPlan;imageOnly?:boolean} = {},
 ): Promise<CoverResult> {
   signal?.throwIfAborted();
   if (samples.length > 6) throw new Error('动作采样最多 6 帧');
-  const manifest=options.wardrobe?JSON.parse(await readFile(join(packDir,'figure.json'),'utf8')):null;
+  const manifest=options.wardrobe?parseFigureJson(await readFile(join(packDir,'figure.json'),'utf8')):null;
   const library=options.wardrobe?JSON.parse(await readFile(join(packDir,'native-library.json'),'utf8')):null;
   const wardrobe=options.wardrobe?wardrobeSamples(manifest,library.wardrobe||[]):[];
   if(wardrobe.length>136)return { ok: false, error: '装扮缩略图数量超出上限' };
@@ -180,6 +183,10 @@ export async function captureCover(
   let received = false;
 
   async function persistCapture(body: any): Promise<CoverResult> {
+    if (options.imageOnly) {
+      pngOf(body.png, 512);
+      return {ok:true,image:body.png};
+    }
     if(options.preview){
       if(!Array.isArray(body.frames)||body.frames.length!==options.preview.samples.length)throw Error('预览图片不完整');
       const frames=body.frames.map((frame:any,i:number)=>{
@@ -203,7 +210,7 @@ export async function captureCover(
     await mkdir(dir, { recursive: true });
     if(main&&small){await writeFile(join(dir, 'cover.png'), main);await writeFile(join(dir, 'opt-model.png'), small);}
     const file = join(packDir, 'figure.json');
-    const manifest = JSON.parse(await readFile(file, 'utf8'));
+    const manifest = parseFigureJson(await readFile(file, 'utf8'));
     if(!options.wardrobe)manifest.thumb = 'thumb/cover.png';
     if (!options.wardrobe && Array.isArray(manifest.axes) && manifest.axes[0]?.options?.[0]) {
       manifest.axes[0].options[0].thumb = 'thumb/opt-model.png';
@@ -258,7 +265,7 @@ export async function captureCover(
     if (url.pathname === '/' || url.pathname === '/index.html') {
       if (req.method !== 'GET' || url.searchParams.get('capture') !== token) { res.writeHead(404).end(); return; }
       const json=(v:unknown)=>JSON.stringify(v).replaceAll('<','\\u003c');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }).end(COVER_PAGE.replace('__CAPTURE_TOKEN__',json(token)).replace('__STATIC_PREVIEW__',()=>json(options.preview||null)).replace('__NATIVE_SAMPLES__',()=>json(samples)).replace('__WARDROBE_ONLY__',String(!!options.wardrobe)).replace('__WARDROBE_SAMPLES__',()=>json(wardrobe)));
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' }).end(COVER_PAGE.replace('__CAPTURE_TOKEN__',json(token)).replace('__STATIC_PREVIEW__',()=>json(options.preview||null)).replace('__COVER_IMAGE_ONLY__',String(!!options.imageOnly)).replace('__NATIVE_SAMPLES__',()=>json(samples)).replace('__WARDROBE_ONLY__',String(!!options.wardrobe)).replace('__WARDROBE_SAMPLES__',()=>json(wardrobe)));
       return;
     }
     const isKit = url.pathname.startsWith('/kit/');

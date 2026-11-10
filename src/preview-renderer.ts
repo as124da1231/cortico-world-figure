@@ -66,6 +66,7 @@ export class StaticPreviewRenderer implements PreviewWorker {
   private origin='';
   private waiter?:http.ServerResponse;
   private queue?:{id:string;plan:StaticPreviewPlan};
+  private activeId?:string;
   private pending=new Map<string,{plan:StaticPreviewPlan;resolve:(v:PreviewResult)=>void;reject:(e:Error)=>void;dispose:()=>void}>();
   constructor(privatePack:string,privateWorkbench:string){this.pack=resolve(privatePack);this.workbench=resolve(privateWorkbench);}
   private pack:string;
@@ -86,7 +87,12 @@ export class StaticPreviewRenderer implements PreviewWorker {
     this.child.once('exit',()=>{if(!this.closed)this.fail('预览进程已退出，请重试');});
   }
   private fail(message:string){for(const job of this.pending.values()){job.dispose();job.reject(Error(message));}this.pending.clear();void this.close();}
-  private deliver(){if(this.waiter&&this.queue){const res=this.waiter;this.waiter=undefined;const job=this.queue;this.queue=undefined;res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(job));}}
+  private deliver(){
+    if(!this.waiter||!this.queue||this.activeId)return;
+    const res=this.waiter,job=this.queue;
+    this.waiter=undefined;this.queue=undefined;this.activeId=job.id;
+    res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(job));
+  }
   private async handle(req:http.IncomingMessage,res:http.ServerResponse){
     const url=new URL(req.url||'/',this.origin||'http://127.0.0.1');
     if(this.closed){res.writeHead(410).end();return;}
@@ -101,8 +107,11 @@ export class StaticPreviewRenderer implements PreviewWorker {
       let raw='';for await(const data of req){raw+=data;if(raw.length>18*1048576){res.writeHead(413).end();return;}}
       const body=JSON.parse(raw);res.writeHead(200).end('ok');
       if(path==='fatal'){this.fail(String(body.error||'预览初始化失败'));return;}
+      if(body.id!==this.activeId)return;
+      this.activeId=undefined;
       const job=this.pending.get(body.id);if(!job)return;this.pending.delete(body.id);job.dispose();
-      try{job.resolve(previewResult(job.plan,body));}catch(error){job.reject(error as Error);}return;
+      try{job.resolve(previewResult(job.plan,body));}catch(error){job.reject(error as Error);}
+      this.deliver();return;
     }
     if(req.method!=='GET'&&req.method!=='HEAD'){res.writeHead(405).end();return;}
     if(!path){res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}).end(req.method==='HEAD'?'':PAGE);return;}
@@ -114,7 +123,14 @@ export class StaticPreviewRenderer implements PreviewWorker {
   async render(plan:StaticPreviewPlan,signal:AbortSignal):Promise<PreviewResult>{
     signal.throwIfAborted();try{await this.start();}catch(error){await this.close();throw error;}signal.throwIfAborted();if(this.closed)throw Error('预览已关闭');
     return new Promise((resolveJob,reject)=>{
-      const id=randomUUID(),dispose=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);},abort=()=>{this.pending.delete(id);if(this.queue?.id===id)this.queue=undefined;dispose();reject(Error('预览已取消'));};
+      const id=randomUUID(),dispose=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);};
+      const abort=()=>{
+        this.pending.delete(id);
+        if(this.queue?.id===id)this.queue=undefined;
+        // A busy page cannot read the next job until its current create/draw returns.
+        if(this.activeId===id)void this.close();
+        dispose();reject(Error('预览已取消'));
+      };
       const timer=setTimeout(()=>{this.pending.delete(id);if(this.queue?.id===id)this.queue=undefined;dispose();reject(Error('预览生成超时，请重试'));void this.close();},45000);timer.unref();
       this.pending.set(id,{plan,resolve:resolveJob,reject,dispose});signal.addEventListener('abort',abort,{once:true});this.queue={id,plan};this.deliver();
     });
@@ -122,8 +138,8 @@ export class StaticPreviewRenderer implements PreviewWorker {
   close():Promise<void>{
     if(this.closing)return this.closing;this.closed=true;
     return this.closing=(async()=>{
-      this.queue=undefined;for(const job of this.pending.values()){job.dispose();job.reject(Error('预览已关闭'));}this.pending.clear();this.waiter?.writeHead(410).end();this.waiter=undefined;
-      const child=this.child;if(child&&child.exitCode===null){await new Promise<void>(ok=>{const timer=setTimeout(ok,2000);child.once('exit',()=>{clearTimeout(timer);ok();});try{child.kill();}catch{clearTimeout(timer);ok();}});}
+      this.queue=undefined;this.activeId=undefined;for(const job of this.pending.values()){job.dispose();job.reject(Error('预览已关闭'));}this.pending.clear();this.waiter?.writeHead(410).end();this.waiter=undefined;
+      const child=this.child;if(child&&child.exitCode===null&&child.signalCode===null){await new Promise<void>(ok=>{const timer=setTimeout(ok,2000);child.once('exit',()=>{clearTimeout(timer);ok();});try{child.kill();}catch{clearTimeout(timer);ok();}});}
       const server=this.server;if(server){server.closeAllConnections();await new Promise<void>(ok=>server.close(()=>ok()));}
       if(this.profile)await rm(this.profile,{recursive:true,force:true}).catch(()=>{});
     })();

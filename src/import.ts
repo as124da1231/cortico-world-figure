@@ -1,5 +1,5 @@
 import { childPath } from './paths.ts';
-import { installPack } from './pipeline.ts';
+import { findInstalledTargets, installPack } from './pipeline.ts';
 import { readPackManifest } from './pack-manifest.ts';
 /**
  * 导入现成的形象包：一个 zip，或者一个（拖入 / 选中的）文件夹。
@@ -7,12 +7,12 @@ import { readPackManifest } from './pack-manifest.ts';
  * 做法照 Coopanion 的桌宠：文件先在临时目录里摊开，找出 figure.json 所在的目录（最多 3 层），
  * 列出来让人挑，再整份拷进 figures/。zip 用 fflate 解，不落中间文件。
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { unzipSync } from 'fflate';
+import { strFromU8, unzipSync } from 'fflate';
 
 /** 一次 zip 导入最多这么多（未解压）。 */
 export const IMPORT_MAX = 32 * 1024 * 1024;
@@ -51,7 +51,6 @@ export interface StagedPack {
 export interface StagedModel {
   dir: string;
   file: string;
-  /** .model3.json 去掉后缀，当标题。 */
   title: string;
   files: number;
   bytes: number;
@@ -70,24 +69,93 @@ function segments(path: string): string[] | null {
   try { childPath('.', path); return path.split(/[\\/]/); } catch { return null; }
 }
 
+/** fflate exposes names but not the UTF-8 flag. Read just the central directory names. */
+function zipNames(bytes: Uint8Array): Array<{ raw: string; path: string }> {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const short = (at: number) => view.getUint16(at, true);
+  const long = (at: number) => view.getUint32(at, true);
+  const wide = (at: number) => Number(view.getBigUint64(at, true));
+  const invalid = () => new Error('ZIP 目录无效');
+  const start = Math.max(0, bytes.length - 65557);
+  let end = bytes.length - 22;
+  while (end >= start && (long(end) !== 0x06054b50 || end + 22 + short(end + 20) !== bytes.length)) end--;
+  if (end < start) throw invalid();
+
+  let count = short(end + 10), offset = long(end + 16), size = long(end + 12), limit = end;
+  if (end >= 20 && long(end - 20) === 0x07064b50) {
+    const header = wide(end - 12);
+    if (header + 56 > end - 20 || long(header) !== 0x06064b50) throw invalid();
+    count = wide(header + 32);
+    size = wide(header + 40);
+    offset = wide(header + 48);
+    limit = header;
+  }
+  if (count > FILES_MAX) throw new Error('压缩包中的文件过多');
+  const last = offset + size;
+  if (last > limit) throw invalid();
+  const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  let gb18030: TextDecoder | undefined;
+  try { gb18030 = new TextDecoder('gb18030', { fatal: true }); }
+  catch { /* ASCII and UTF-8 imports still work in reduced ICU builds. */ }
+  const decode = (decoder: TextDecoder | undefined, data: Uint8Array) => {
+    try { return decoder?.decode(data); }
+    catch { return undefined; }
+  };
+  const names = [];
+  for (let i = 0; i < count; i++) {
+    if (offset + 46 > last || long(offset) !== 0x02014b50) throw invalid();
+    const length = short(offset + 28);
+    const from = offset + 46, to = from + length;
+    const utf8Flag = Boolean(short(offset + 8) & 0x0800);
+    offset = to + short(offset + 30) + short(offset + 32);
+    if (!length || offset > last) throw invalid();
+    const data = bytes.subarray(from, to);
+    const raw = strFromU8(data, !utf8Flag);
+    const uncertain = !utf8Flag && data.some(byte => byte >= 0x80);
+    const unflaggedUtf8 = uncertain && decode(utf8, data);
+    const legacy = uncertain && !unflaggedUtf8 && decode(gb18030, data);
+    const legacyChinese = legacy && /\p{Script=Han}/u.test(legacy) ? legacy : undefined;
+    // Adjacent high bytes distinguish common GBK names from Western names like caféa.
+    const gbkEvidence = Boolean(legacyChinese && data.some((byte, j) => byte >= 0x81 && data[j + 1] >= 0x80));
+    names.push({ raw, unflaggedUtf8, legacyChinese, gbkEvidence });
+  }
+  const gbk = names.some(name => name.gbkEvidence);
+  return names.map(name => ({ raw: name.raw, path: name.unflaggedUtf8 || (gbk && name.legacyChinese) || name.raw }));
+}
+
 /** zip 里的文件（目录跳过）；返回字符串表示读不了。 */
 export function filesFromZip(bytes: Uint8Array): ImportFile[] | string {
   if (bytes.byteLength > IMPORT_MAX) return 'ZIP 超过 32 MB，请选择解压后的文件夹';
   let total = 0;
-  let count = 0;
-  let entries: Record<string, Uint8Array>;
   try {
-    entries = unzipSync(bytes, {
-      filter: (f) => { total += f.originalSize; count++; return !f.name.endsWith('/') && total <= IMPORT_MAX && count <= FILES_MAX; },
+    const names = zipNames(bytes);
+    const paths = new Map<string, string>();
+    const used = new Set<string>();
+    let index = 0;
+    const entries = unzipSync(bytes, {
+      filter: (f) => {
+        const item = names[index++];
+        if (!item || item.raw !== f.name) throw new Error('ZIP 目录不一致');
+        const { path } = item;
+        const isDir = /[\\/]$/.test(path);
+        if (!segments(isDir ? path.slice(0, -1) : path)) throw new Error('路径不合法：' + path);
+        if (isDir) return false;
+        const key = pathKey(path);
+        if (paths.has(f.name) || used.has(key)) throw new Error('ZIP 文件路径重复：' + path);
+        paths.set(f.name, path);
+        used.add(key);
+        total += f.originalSize;
+        if (total > IMPORT_MAX) throw new Error(`压缩包太大：解压后超过 ${IMPORT_MAX / 1048576} MB`);
+        return true;
+      },
     });
+    if (index !== names.length || Object.keys(entries).length !== paths.size) throw new Error('ZIP 目录不一致');
+    const files = Array.from(paths, ([raw, path]) => ({ path, bytes: entries[raw] }));
+    if (files.reduce((n, f) => n + f.bytes.length, 0) > IMPORT_MAX) return `压缩包太大：解压后超过 ${IMPORT_MAX / 1048576} MB`;
+    return files;
   } catch (err) {
     return `解压失败：${(err as Error).message}`;
   }
-  if (total > IMPORT_MAX) return `压缩包太大：解压后超过 ${IMPORT_MAX / 1048576} MB`;
-  if (count > FILES_MAX) return '压缩包中的文件过多';
-  const files = Object.entries(entries).map(([path, data]) => ({ path, bytes: data }));
-  if (files.reduce((n, f) => n + f.bytes.length, 0) > IMPORT_MAX) return `压缩包太大：解压后超过 ${IMPORT_MAX / 1048576} MB`;
-  return files;
 }
 
 /** 面板拼的文件夹包。 */
@@ -122,13 +190,13 @@ async function findPacks(root: string, depth: number, rel = ''): Promise<string[
   return found;
 }
 
-/** root 下最多 depth 层里，含 .model3.json 的目录（不往打好的包里钻）。 */
+/** root 下最多 depth 层里的模型目录，不往打好的包里钻。 */
 async function findModels(root: string, depth: number, rel = ''): Promise<string[]> {
   const here = join(root, ...rel.split('/').filter(Boolean));
   const entries = await readdir(here, { withFileTypes: true });
   const files = entries.filter((e) => e.isFile()).map((e) => e.name.toLowerCase());
   if (files.includes('figure.json')) return [];
-  if (files.some((n) => n.endsWith('.model3.json'))) return [rel];
+  if (files.some(n => n.endsWith('.model3.json'))) return [rel];
   if (depth === 0) return [];
   const found: string[] = [];
   for (const e of entries) {
@@ -168,7 +236,7 @@ export async function thumbOf(dir: string, file: unknown): Promise<string | null
  * 同名先备份（与打包产物安装走同一套 backups 目录）。
  */
 export class PackImporter {
-  private staged: { token: string; root: string; packs: Set<string>; models:Set<string>;entries:Map<string,string>;local?:Map<string,string> } | null = null;
+  private staged: { token: string; root: string; packs: Set<string>; models: Set<string>; entries: Map<string, string>; paths: Map<string, string> } | null = null;
   private uploads = new Map<string, { root: string; bytes: number; paths: Set<string>; chunks: Map<string,{written:number;total:number}> }>();
 
   /** AI jobs outlive the panel's import token. Keep only owned upload data in a separate cache. */
@@ -223,8 +291,9 @@ export class PackImporter {
             bytes+=files.reduce((sum,f)=>sum+f.bytes.length,0);if(bytes>UPLOAD_MAX)throw new Error('导入内容超过 512 MB');
             full=join(root,`zip-${i}`);await mkdir(full);
             const error=await this.materialize(full,files);if(error)throw new Error(error);
-          } else if(/(?:\.model3\.json|[\\/]figure\.json)$/i.test(input)){full=dirname(input);entryFile=basename(input);}
-          else throw new Error('请选择模型目录、model3.json、figure.json 或 ZIP');
+          } else if (/(?:\.model3\.json|[\\/]figure\.json)$/i.test(input)) {
+            full = dirname(input); entryFile = basename(input);
+          } else throw new Error('请选择模型目录、model3.json、figure.json 或 ZIP');
         }
         sources.push({dir:`source-${i}`,full,entryFile});
       }
@@ -332,7 +401,7 @@ export class PackImporter {
       const packs: StagedPack[] = [];
       const models: StagedModel[] = [];
       const problems: StageResult['problems'] = [];
-      const local=new Map<string,string>();
+      const paths = new Map<string, string>();
       const candidates=async(kind:'pack'|'model')=>{
         const out:Array<{dir:string;full:string;entryFile?:string}>=[];
         for(const source of sources??[{dir:'',full:root}]) {
@@ -340,7 +409,7 @@ export class PackImporter {
           const dirs=source.entryFile?['']:await (kind==='pack'?findPacks:findModels)(source.full,PACK_DEPTH+(fromFolders?1:0));
           for(const rel of dirs) {
           const dir=[source.dir,rel].filter(Boolean).join('/'),full=join(source.full,...rel.split('/').filter(Boolean));
-          out.push({dir,full,entryFile:source.entryFile});if(sources)local.set(dir,full);
+          out.push({dir,full,entryFile:source.entryFile});
           }
         }
         return out;
@@ -356,6 +425,7 @@ export class PackImporter {
         }
         const { id } = manifest;
         if (packs.some((p) => p.id.toLowerCase() === id.toLowerCase())) { problems.push({ dir, reason: `同一个包里有两个 ${id}` }); continue; }
+        paths.set(dir, full);
         const name = (manifest.name ?? {}) as { zh?: unknown; en?: unknown };
         packs.push({
           dir,
@@ -374,30 +444,30 @@ export class PackImporter {
 
       for (const {dir,full,entryFile} of await candidates('model')) {
         const entries = await readdir(full, { withFileTypes: true });
-        const entry = entries.find((e) => e.isFile() && (entryFile ? e.name === entryFile : e.name.toLowerCase().endsWith('.model3.json')));
-        if (!entry) continue;
+        const variants = entries.filter(entry => entry.isFile() && /\.model3\.json$/i.test(entry.name)
+          && (!entryFile || entry.name === entryFile));
+        if (!variants.length) continue;
         const info=await dirInfo(full).catch(()=>({bytes:0,files:0}));
-        models.push({
-          dir,
-          file: entry.name,
-          title: entry.name.replace(/\.model3\.json$/i, ''),
-          files: info.files,
-          bytes: info.bytes,
-          installed: null,
-        });
+        for (const [index, entry] of variants.entries()) {
+          const key = index === 0 ? dir : `${dir}:${entry.name}`;
+          paths.set(key, full);
+          models.push({ dir: key, file: entry.name, title: entry.name.replace(/\.model3\.json$/i, ''), ...info, installed: null });
+        }
       }
 
-      if (!sources && !packs.length && models.length === 1 && models[0].dir === '') {
-        // 模型就摊在上传目录的根上：给它一个跟 .model3.json 同名的子目录，
-        // 这样打包出来的 id 是模型名，而不是临时目录的名字。
-        const title = models[0].title.replace(/[\\/:*?"<>|]+/g, '-').trim() || 'model';
-        const sub = join(root, title);
-        await mkdir(sub, { recursive: true });
-        for (const e of await readdir(root, { withFileTypes: true })) {
-          if (e.name === title) continue;
-          await rename(join(root, e.name), join(sub, e.name));
+      if (!sources && !packs.length && models[0]?.dir === '') {
+        // A new wrapper keeps the original asset layout, even if an asset shares the model's name.
+        const entries = await readdir(root);
+        const wrapper = await mkdtemp(join(root, 'model-source-'));
+        const title = models[0].title.trim();
+        let sub;
+        try { sub = childPath(wrapper, title); }
+        catch { sub = join(wrapper, 'model-' + createHash('sha256').update(title).digest('hex').slice(0, 8)); }
+        await mkdir(sub);
+        for (const name of entries) {
+          await rename(childPath(root, name), childPath(sub, name));
         }
-        models[0].dir = title;
+        for (const model of models) paths.set(model.dir, sub);
       }
 
       if (!packs.length && !models.length) {
@@ -405,7 +475,7 @@ export class PackImporter {
         return { token: '', packs: [], models: [], problems };
       }
       const token = randomUUID();
-      this.staged = { token, root, packs: new Set(packs.map((p) => p.dir)),models:new Set(models.map(m=>m.dir)),entries:new Map(models.map(m=>[m.dir,m.file])),...(sources?{local}:{}) };
+      this.staged = { token, root, packs: new Set(packs.map((p) => p.dir)), models: new Set(models.map(m => m.dir)), entries: new Map(models.map(m => [m.dir, m.file])), paths };
       return { token, packs, models, problems };
     } catch (err) {
       await rm(root, { recursive: true, force: true });
@@ -436,14 +506,18 @@ export class PackImporter {
     }
     if (!chosen.length) return { error: '挑中的包已经不在临时目录里了' };
 
-    const conflicts = chosen.filter((c) => existsSync(join(opts.figuresDir, c.id))).map((c) => c.id);
+    const conflicts: string[] = [];
+    for (const { id } of chosen) if ((await findInstalledTargets(opts.figuresDir, id)).length) conflicts.push(id);
     if (conflicts.some((id) => !replace.includes(id))) return { conflicts };
 
     const out: Array<{ id: string; target: string }> = [];
     for (const c of chosen) {
       const source = this.resolve(token,c.dir);
       if(!source)return {error:'挑中的目录已失效'};
-      const target = await installPack(source, opts.figuresDir, opts);
+      const target = await installPack(source, opts.figuresDir, {
+        ...opts,
+        beforeSwap: replaces => { if (replaces && !replace.includes(c.id)) throw Error('同 ID 形象需要确认替换'); },
+      });
       out.push({ id: c.id, target });
     }
     // Keep the staged files on failure so users can retry.
@@ -478,10 +552,6 @@ export class PackImporter {
     const staged = this.staged;
     if (!staged || staged.token !== token) return null;
     if (!staged.packs.has(dir) && !staged.models.has(dir)) return null;
-    if(staged.local)return staged.local.get(dir)??null;
-    if (!dir) return staged.root;
-    const parts = segments(dir);
-    if (!parts) return null;
-    return join(staged.root, ...parts);
+    return staged.paths.get(dir) ?? null;
   }
 }

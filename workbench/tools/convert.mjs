@@ -27,10 +27,12 @@ import { inferRoles, ROLE_RULES } from './parameter-mapping.mjs';
 import { appendNativeVocab } from './native-catalog.mjs';
 import { readBongoPackage } from './bongo-package.mjs';
 import { shrinkPng } from './shrink-textures.mjs';
-import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { closeSync, existsSync, openSync, readSync } from 'node:fs';
+import { basename, dirname, extname, join, resolve } from 'node:path';
+import { resolveModelAsset } from './model-assets.mjs';
+import { EMOTION_EFFECT_REACH, emotionStyleModule, normalizeEmotionEffect } from './emotion-effect.mjs';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -115,28 +117,20 @@ const entryHash = createHash('sha256').update(entryName).digest('hex').slice(0, 
 const requestedId = (_explicitId ? slug(_explicitId) : '')
   || (hasVariants ? `${(slug(_rawName) || 'model').slice(0, 23)}-${entryHash}` : slug(_rawName))
   || `model-${createHash('sha1').update(_rawName).digest('hex').slice(0, 6)}`;
-const id = requestedId === 'coo' ? `model-${entryHash}` : requestedId;
+const id = requestedId === 'coo' || requestedId === 'whale' ? `model-${entryHash}` : requestedId;
 // Coo 的 axis option id 不能带连字符（scheme 用 '-' 拼多轴），模型/包 id 可以
 const optionId = id.replace(/-/g, '').slice(0, 24);
 const OUT = resolve(arg('out', join(HERE, '..', 'build', id)));
 
 // ---------------------------------------------------------------- 模型资产
-const resolveAsset = (p, allowBasename = true) => {
-  if (typeof p !== 'string' || isAbsolute(p) || /[:\u0000-\u001f]/.test(p) || p.split(/[\\/]/).some(part => part === '..' || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) return null;
-  const direct = resolve(modelDir, p);
-  const safe = (file) => {
-    try {
-      const real = realpathSync(file), rel = relative(realpathSync(modelDir), real);
-      return rel && rel.split(sep)[0] !== '..' && !isAbsolute(rel) && statSync(real).isFile() ? real : null;
-    } catch { return null; }
-  };
-  return safe(direct) || (allowBasename ? safe(join(modelDir, basename(p))) : null);
-};
+const resolveAsset = (p, allowBasename = true) => resolveModelAsset(modelDir, p, { allowBasename });
 
 const mocName = files.Moc ?? files.MocFile;
 const mocPath = mocName && resolveAsset(mocName);
 if (!mocPath) {
-  console.error('没找到 moc3（model3.json 的 FileReferences.Moc）：', mocName);
+  console.error(typeof mocName === 'string' && mocName.trim()
+    ? `找不到模型清单声明的 moc3：${JSON.stringify(mocName)}。请核对名称并导入完整文件夹。`
+    : '模型清单缺少 moc3 引用（FileReferences.Moc）。');
   process.exit(1);
 }
 const mocBytes = await readFile(mocPath);
@@ -146,7 +140,12 @@ const physicsPath = files.Physics ? resolveAsset(files.Physics) : null;
 const posePath = files.Pose ? resolveAsset(files.Pose) : null;
 const textureRefs = Array.isArray(files.Textures) ? files.Textures : [];
 const textures = textureRefs.map((t) => resolveAsset(t));
-if (!textures.length || textures.some(p => !p)) throw new Error('模型缺少贴图文件，请导入包含全部配套资源的完整文件夹');
+if (!textures.length) throw new Error('模型清单未声明贴图，请导入包含全部配套资源的完整文件夹');
+const missingTextures = textureRefs.filter((_name, index) => !textures[index]);
+if (missingTextures.length) {
+  const names = missingTextures.slice(0, 3).map(name => JSON.stringify(name)).join('、');
+  throw new Error(`模型缺少贴图文件：${names}${missingTextures.length > 3 ? ' 等' : ''}。请导入包含全部配套资源的完整文件夹。`);
+}
 
 const cdiPath = (() => {
   const declared = files.DisplayInfo ? resolveAsset(files.DisplayInfo) : null;
@@ -430,6 +429,7 @@ for (const e of expressionFiles) {
 }
 
 const overrides = OVERRIDES_PATH ? await readJson(OVERRIDES_PATH) : {};
+const emotionEffect = normalizeEmotionEffect(overrides.emotionEffect);
 const nativeMap = SIMPLE ? {} : { ...nativeExpressions, ...(overrides.expressions ?? {}) };
 const performance = {
   ...(overrides.performance ?? {}),
@@ -736,7 +736,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/wardrobe.js', 'backends/wardrobe-slots.js', 'backends/bongo.js']) {
+for (const rel of ['figure.js', 'figure-voice.json', 'backends/voice-playback.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/wardrobe.js', 'backends/wardrobe-slots.js', 'backends/bongo.js', 'backends/body-crop.js', 'backends/crop-config.js', 'backends/gaze-config.js']) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);
@@ -745,6 +745,8 @@ for (const rel of ['figure.js', 'backends/live2d.js', 'backends/soullink.js', 'b
   await mkdir(dirname(join(OUT, rel)), { recursive: true });
   await copyFile(src, join(OUT, rel));
 }
+await cp(join(RUNTIME, 'backends', 'emotion-effects'), join(OUT, 'backends', 'emotion-effects'), { recursive: true });
+await writeFile(join(OUT, 'backends', 'emotion-style.js'), emotionStyleModule(emotionEffect, overrides.emotionEffectSize), 'utf8');
 for (const rel of await readdir(join(RUNTIME, 'sdk'))) {
   // Core 单独处理：它不随扩展分发
   if (rel === 'live2dcubismcore.min.js') continue;
@@ -868,6 +870,7 @@ const figureJson = {
   vocab: [...vocabExpressions, ...(SIMPLE ? [] : vocabMotions)],
   sounds: {},
   can: { walk: motion.kind === 'roam' },
+  ...(emotionEffect === 'native' ? {} : { effects: { reach: EMOTION_EFFECT_REACH } }),
 };
 appendNativeVocab(figureJson.vocab, overrides.native?.bindings ?? [], overrides.native?.resources ?? []);
 await writeFile(join(OUT, 'figure.json'), JSON.stringify(figureJson, null, 2) + '\n', 'utf8');

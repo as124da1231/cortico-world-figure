@@ -12,7 +12,20 @@ const keep = new Set();
 
 for (const [extension, field] of [['js', 'webUiClient'], ['css', 'webUiStyle']]) {
   const content=await readFile(join(source, extension === 'js' ? 'client.js' : 'styles.css'),'utf8');
-  const shared=extension==='js'?(await readFile(join(root,'src','gear-appearance.mjs'),'utf8')).replace(/^export /gm,'')+'\n'+(await readFile(join(root,'workbench','pack','backends','wardrobe-slots.js'),'utf8')).replace(/^export /gm,'')+'\n'+await readFile(join(source,'manual.js'),'utf8')+'\n':'';
+  const shared = extension === 'js' ? (await Promise.all([
+    join(root, 'src', 'gear-appearance.mjs'),
+    join(root, 'workbench', 'tools', 'emotion-effect.mjs'),
+    join(root, 'src', 'voice-catalog.mjs'),
+    join(root, 'src', 'voice-settings.mjs'),
+    join(root, 'workbench', 'pack', 'backends', 'wardrobe-slots.js'),
+    join(root, 'workbench', 'pack', 'backends', 'crop-config.js'),
+    join(root, 'workbench', 'pack', 'backends', 'gaze-config.js'),
+    join(source, 'manual.js'),
+    join(source, 'voice.js'),
+    join(source, 'effect-previews.js'),
+    join(source, 'effects.js'),
+    join(source, 'crop-editor.js'),
+  ].map(file => readFile(file, 'utf8')))).map(code => code.replace(/^export /gm, '')).join('\n') + '\n' : '';
   const bytes = Buffer.from((shared+content).replace(/\r\n/g, '\n'));
   await writeFile(join(dist, `webui.${extension}`), bytes);
   const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 12);

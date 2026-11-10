@@ -8,8 +8,11 @@ import { existsSync } from 'node:fs';
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { canonicalPath, childPath, containsPath } from './paths.ts';
-import { readPackManifest } from './pack-manifest.ts';
+import { parseFigureJson, readPackManifest } from './pack-manifest.ts';
 import { packFingerprint } from './pack-fingerprint.ts';
+import { EMOTION_EFFECT_REACH, emotionStyleModule, normalizeEmotionEffect } from '../workbench/tools/emotion-effect.mjs';
+import { BODY_CROP_AXIS, BODY_CROP_OPTIONS, normalizeBodyCrop } from '../workbench/pack/backends/crop-config.js';
+import { normalizeGazeConfig } from '../workbench/pack/backends/gaze-config.js';
 
 /** Imported packages may not redirect copying or editing outside their own directory. */
 export async function assertRegularTree(root: string): Promise<void> {
@@ -21,6 +24,37 @@ export async function assertRegularTree(root: string): Promise<void> {
     if (entry.isDirectory()) await assertRegularTree(path);
     else if (!entry.isFile()) throw new Error('形象包中包含不支持的特殊文件');
   }
+}
+
+const RUNTIME_BACKENDS = ['live2d.js', 'native-actions.js', 'wardrobe.js', 'wardrobe-slots.js', 'render-config.js',
+  'render-quality.js', 'role-values.js', 'soullink.js', 'bongo.js', 'voice-playback.js', 'body-crop.js', 'crop-config.js', 'gaze-config.js'];
+
+/** Update the runtime of a private, validated pack copy without changing its model or entry. */
+export async function refreshPackRuntime(runtime: string, pack: string): Promise<void> {
+  for (const file of RUNTIME_BACKENDS) await cp(join(runtime, 'backends', file), join(pack, 'backends', file));
+  await cp(join(runtime, 'backends', 'emotion-effects'), join(pack, 'backends', 'emotion-effects'), { recursive: true });
+  const effectStyle = join(pack, 'backends', 'emotion-style.js');
+  if (!existsSync(effectStyle)) await cp(join(runtime, 'backends', 'emotion-style.js'), effectStyle);
+  await cp(join(runtime, 'figure-voice.json'), join(pack, 'figure-voice.json'));
+}
+
+/** Stamp the chosen effect into a private copy of a Figure-generated pack. */
+export async function setPackEmotionEffect(pack: string, value: unknown, size: unknown): Promise<void> {
+  const style = normalizeEmotionEffect(value);
+  const styleFile = join(pack, 'backends', 'emotion-style.js');
+  const manifestFile = join(pack, 'figure.json');
+  const manifestText = await readFile(manifestFile, 'utf8');
+  const manifest = parseFigureJson(manifestText);
+  const hasOurReach = manifest.effects?.reach === EMOTION_EFFECT_REACH;
+  if (style !== 'native' && !hasOurReach) {
+    manifest.effects = { ...manifest.effects, reach: EMOTION_EFFECT_REACH };
+    await writeFile(manifestFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  } else if (style === 'native' && hasOurReach) {
+    delete manifest.effects.reach;
+    if (Object.keys(manifest.effects).length === 0) delete manifest.effects;
+    await writeFile(manifestFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  }
+  await writeFile(styleFile, emotionStyleModule(style, size), 'utf8');
 }
 
 async function profileFiles(root: string): Promise<Array<{file:string;text:string}>> {
@@ -41,20 +75,69 @@ async function profileFiles(root: string): Promise<Array<{file:string;text:strin
   return profiles;
 }
 
+async function editableLive2dProfile(root: string, profiles: Awaited<ReturnType<typeof profileFiles>>) {
+  const profile = profiles.length === 1 ? profiles[0] : null;
+  if (!profile || !/^\s*(?:\/\*[\s\S]*?\*\/\s*)?export default \{/.test(profile.text)
+      || !/\r?\n};\s*$/.test(profile.text) || /^  bongo:/m.test(profile.text)) return null;
+  const buildFile = join(root, 'build.json');
+  const info = await lstat(buildFile).catch(() => null);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > 4 * 1048576) return null;
+  const build = await readFile(buildFile, 'utf8').then(parseFigureJson).catch(() => null);
+  return build?.tool === 'cortico-live2d-pack' && build.sourceFormat !== 'bongocat' ? profile : null;
+}
+
+function setCropAxis(manifest: any, mode: string) {
+  const full = {id: BODY_CROP_OPTIONS.full, name:{zh:'全身',en:'Full body'}};
+  const upper = {id: BODY_CROP_OPTIONS.upper, name:{zh:'上半身',en:'Upper body'}};
+  const options = mode === 'upper' ? [upper, full] : [full, upper];
+  const axis = {id: BODY_CROP_AXIS, name:{zh:'取景',en:'Framing'}, options};
+  const axes = Array.isArray(manifest.axes) ? manifest.axes : [];
+  const index = axes.findIndex((item: {id?:string}) => item?.id === BODY_CROP_AXIS);
+  if (index >= 0 && (axes[index].options?.length !== 2
+      || !options.every(option => axes[index].options.some((old: {id:string}) => old.id === option.id)))) {
+    throw Error('取景栏位与已有装扮分组重复');
+  }
+  if (index >= 0) axes[index] = axis;
+  else axes.push(axis);
+  manifest.axes = axes;
+  for (const preset of Array.isArray(manifest.presets) ? manifest.presets : []) {
+    if (!options.some(option => option.id === preset.pick?.[BODY_CROP_AXIS])) {
+      preset.pick = {...preset.pick, [BODY_CROP_AXIS]: options[0].id};
+    }
+  }
+}
+
+function readProfileSetting(profile: string, key: 'crop' | 'gaze') {
+  const line = new RegExp(`^  ${key}: (\\{[^\\r\\n]*\\}),\\r?$`, 'm').exec(profile);
+  try { return line ? parseFigureJson(line[1]) : undefined; }
+  catch { return undefined; }
+}
+
+function writeProfileSetting(profile: string, key: 'crop' | 'gaze', value: object) {
+  return profile.replace(new RegExp(`^  ${key}: [^\\r\\n]*\\r?\\n`, 'gm'), '')
+    .replace(/\r?\n};\s*$/, () => `\n  ${key}: ${JSON.stringify(value)},\n};\n`);
+}
+
 export async function packDetail(root: string) {
   const file = join(root, 'figure.json');
   const info = await lstat(file);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error('形象清单不能是链接或特殊文件');
-  const manifest = JSON.parse(await readFile(file,'utf8'));
+  const manifest = parseFigureJson(await readFile(file,'utf8'));
   let bodyGain = 1.8, style = 'natural', tunable = false;
-  for (const profile of await profileFiles(root)) {
+  const profiles = await profileFiles(root);
+  for (const profile of profiles) {
     const gain = /"bodyGain":\s*([-\d.]+)/.exec(profile.text);
     const kind = /"style":\s*"([^"]+)"/.exec(profile.text);
     if (gain && kind) { bodyGain = Number(gain[1]); style = kind[1]; tunable = true; break; }
   }
   const string = (value: unknown) => typeof value === 'string' ? value : '';
   const about = (value: unknown) => value === '—' ? '' : string(value);
-  return {nameZh:string(manifest.name?.zh),nameEn:string(manifest.name?.en),aboutZh:about(manifest.about?.zh),aboutEn:about(manifest.about?.en),bodyGain,style,tunable};
+  const profile = await editableLive2dProfile(root, profiles);
+  const presentation = profile ? {
+    crop: normalizeBodyCrop(readProfileSetting(profile.text, 'crop')),
+    gaze: normalizeGazeConfig(readProfileSetting(profile.text, 'gaze')),
+  } : {};
+  return {nameZh:string(manifest.name?.zh),nameEn:string(manifest.name?.en),aboutZh:about(manifest.about?.zh),aboutEn:about(manifest.about?.en),bodyGain,style,tunable,...presentation};
 }
 
 export interface RunResult {
@@ -137,7 +220,7 @@ export async function buildPack(
   workbenchDir: string,
   modelDir: string,
   workDir: string,
-  opts: { fit?: unknown; native?: unknown; render?: unknown; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; signal?: AbortSignal } = {},
+  opts: { fit?: unknown; native?: unknown; render?: unknown; emotionEffect?: string; emotionEffectSize?: string; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; signal?: AbortSignal } = {},
 ): Promise<string> {
   const builds = join(workDir, 'builds');
   await mkdir(builds, { recursive: true });
@@ -153,9 +236,9 @@ export async function buildPack(
   if (opts.modelFile) args.push('--model-file', opts.modelFile);
   if (opts.clean) args.push('--clean');
   let overrideFile = '';
-  if (opts.fit || opts.native || opts.render) {
+  if (opts.fit || opts.native || opts.render || opts.emotionEffect || opts.emotionEffectSize) {
     overrideFile = join(workDir, `overrides-${randomUUID()}.json`);
-    await writeFile(overrideFile, JSON.stringify({ ...(opts.fit ? {fit:opts.fit} : {}), ...(opts.native ? {native:opts.native} : {}), ...(opts.render ? {render:opts.render} : {}) }, null, 2), 'utf8');
+    await writeFile(overrideFile, JSON.stringify({ fit: opts.fit, native: opts.native, render: opts.render, emotionEffect: opts.emotionEffect, emotionEffectSize: opts.emotionEffectSize }, null, 2), 'utf8');
     args.push('--overrides', overrideFile);
   }
   try {
@@ -172,11 +255,36 @@ export async function buildPack(
   return out;
 }
 
-/** 先复制到同级临时目录，同名先备份，再交换目录；失败恢复旧安装。 */
+/** Coo identifies a pack by its manifest ID, independently of the containing folder. */
+export async function findInstalledTargets(figuresDir: string, id: string, ignore?: string): Promise<string[]> {
+  const target = childPath(figuresDir, id);
+  const entries = await readdir(figuresDir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  });
+  const occupied = [];
+  for (const entry of entries) {
+    const path = join(figuresDir, entry.name);
+    if (path === ignore) continue;
+    if (process.platform === 'win32' ? path.toLowerCase() === target.toLowerCase() : path === target) {
+      occupied.push(path);
+      continue;
+    }
+    if (!entry.isDirectory()) continue;
+    const file = join(path, 'figure.json');
+    const info = await lstat(file).catch(() => null);
+    if (!info?.isFile() || info.size > 4 * 1048576) continue;
+    const existingId = await readFile(file, 'utf8').then(text => parseFigureJson(text)?.id).catch(() => null);
+    if (existingId === id) occupied.push(path);
+  }
+  return occupied.sort();
+}
+
+/** 先复制到同级临时目录，同 ID 先备份，再交换目录；失败恢复旧安装。 */
 export async function installPack(
   packDir: string,
   figuresDir: string,
-  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal; expectedFingerprint?: string; beforeSwap?: (replacesOtherPack: boolean) => void } = {},
+  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal; expectedFingerprint?: string; beforeSwap?: (replacesOtherPack: boolean) => void; prepare?: (pending: string) => Promise<void> } = {},
 ): Promise<string> {
   opts.signal?.throwIfAborted();
   await assertRegularTree(packDir);
@@ -188,56 +296,68 @@ export async function installPack(
   await mkdir(figuresDir, { recursive: true });
   const nonce = randomUUID();
   const pending = childPath(figuresDir, `.${id}-install-${nonce}`);
-  const previous = childPath(figuresDir, `.${id}-previous-${nonce}`);
-  let moved = false;
+  const moved: Array<{ path: string; previous: string }> = [];
   try {
     // Copy and verify before touching the installed figure.
     await cp(source, pending, { recursive: true, dereference: false });
-    if (opts.expectedFingerprint && await packFingerprint(pending, opts.signal) !== opts.expectedFingerprint) {
+    await assertRegularTree(pending);
+    await opts.prepare?.(pending);
+    const pendingHash = opts.expectedFingerprint ? await packFingerprint(pending, opts.signal) : undefined;
+    if (opts.expectedFingerprint && pendingHash !== opts.expectedFingerprint) {
       throw new Error('形象包内容已改变，请重新分析确认');
     }
-    await assertRegularTree(pending);
     const copied = await readPackManifest(pending);
     if (copied.id !== id) throw new Error('复制后的形象包校验失败');
     opts.signal?.throwIfAborted();
-    if (existsSync(target)) {
-      if ((await lstat(target)).isSymbolicLink()) throw new Error('安装目标不能是符号链接');
-      let replacesOtherPack = true;
-      if (opts.beforeSwap) {
-        const sourceHash = async (dir: string) => {
-          const file = join(dir, 'build.json');
-          const info = await lstat(file).catch(() => null);
-          if (!info?.isFile() || info.isSymbolicLink() || info.size > 1048576) return null;
-          return await readFile(file, 'utf8').then(text => JSON.parse(text).sourceHash).catch(() => null);
-        };
-        const hash = await sourceHash(pending);
-        replacesOtherPack = typeof hash !== 'string' || !hash || hash !== await sourceHash(target);
-        opts.beforeSwap(replacesOtherPack);
-      }
-      if (opts.backupRoot) {
-        const backup = childPath(opts.backupRoot, `${id}.bak-${Date.now()}-${nonce}`);
-        if (containsPath(target, await canonicalPath(opts.backupRoot))) throw new Error('备份目录不能位于安装目标内部');
-        await mkdir(opts.backupRoot, { recursive: true });
-        await cp(target, backup, { recursive: true });
-      }
+    const occupied = await findInstalledTargets(figuresDir, id, pending);
+    for (const path of occupied) {
+      if ((await lstat(path)).isSymbolicLink()) throw new Error('安装目标不能是符号链接');
+      if (containsPath(path, source) || containsPath(source, path)) throw new Error('安装目录不能与打包目录重叠');
+    }
+    let replacesOtherPack = occupied.length > 0;
+    let approvedHash: string | undefined;
+    if (opts.beforeSwap && occupied.length === 1) {
+      const installedHash = await packFingerprint(occupied[0], opts.signal).catch(() => undefined);
       opts.signal?.throwIfAborted();
-      opts.beforeSwap?.(replacesOtherPack);
-      await rename(target, previous);
-      moved = true;
+      if (installedHash && installedHash === (pendingHash ?? await packFingerprint(pending, opts.signal))) {
+        replacesOtherPack = false;
+        approvedHash = installedHash;
+      }
     }
-    try {
-      if (!moved) opts.beforeSwap?.(false);
-      await rename(pending, target);
-    } catch (e) {
-      if (moved) { await rename(previous, target); moved = false; }
-      throw e;
+    opts.beforeSwap?.(replacesOtherPack);
+    if (opts.backupRoot && occupied.length) {
+      const backupRoot = await canonicalPath(opts.backupRoot);
+      if (occupied.some(path => containsPath(path, backupRoot))) throw new Error('备份目录不能位于安装目标内部');
+      await mkdir(backupRoot, { recursive: true });
+      for (const [index, path] of occupied.entries()) {
+        const backup = childPath(backupRoot, `${id}.bak-${Date.now()}-${nonce}-${index}`);
+        await cp(path, backup, { recursive: true });
+      }
     }
+    const current = await findInstalledTargets(figuresDir, id, pending);
+    if (JSON.stringify(current) !== JSON.stringify(occupied)) throw new Error('安装目标已改变，请重新确认');
+    if (approvedHash && await packFingerprint(occupied[0], opts.signal).catch(() => undefined) !== approvedHash) replacesOtherPack = true;
+    opts.signal?.throwIfAborted();
+    opts.beforeSwap?.(replacesOtherPack);
+    for (const [index, path] of occupied.entries()) {
+      const previous = childPath(figuresDir, `.${id}-previous-${nonce}-${index}`);
+      await rename(path, previous);
+      moved.push({ path, previous });
+    }
+    await rename(pending, target);
+  } catch (error) {
+    for (const { path, previous } of moved.reverse()) {
+      await rename(previous, path).catch(() => opts.onWarning?.(`旧形象恢复失败，已保留在 ${previous}`));
+    }
+    throw error;
   } finally {
     await rm(pending, { recursive: true, force: true }).catch(() => {});
   }
-  if (moved) await rm(previous, { recursive: true, force: true }).catch(() => { opts.onWarning?.('安装已完成，旧副本暂未移除'); });
+  for (const { previous } of moved) {
+    await rm(previous, { recursive: true, force: true }).catch(() => opts.onWarning?.('安装已完成，旧副本暂未移除'));
+  }
   if (opts.backupRoot) {
-    const keep = Math.max(1, opts.keep ?? 2);
+    const keep = Math.max(1, opts.keep ?? 2, moved.length);
     const olds = (await readdir(opts.backupRoot).catch(() => []))
       .filter((n) => n.startsWith(`${id}.bak-`)).sort();
     for (const n of olds.slice(0, Math.max(0, olds.length - keep))) {
@@ -247,6 +367,8 @@ export async function installPack(
   return target;
 }
 
+type BodyCrop = ReturnType<typeof normalizeBodyCrop>;
+
 export interface PackEdit {
   nameZh?: string;
   nameEn?: string;
@@ -254,6 +376,8 @@ export interface PackEdit {
   aboutEn?: string;
   bodyGain?: number;
   style?: string;
+  crop?: Omit<BodyCrop, 'curve'> & { curve?: number };
+  gaze?: ReturnType<typeof normalizeGazeConfig>;
 }
 
 /**
@@ -270,11 +394,18 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
   }
   if (patch.bodyGain !== undefined && (!Number.isFinite(patch.bodyGain) || patch.bodyGain < 0.5 || patch.bodyGain > 3)) throw new Error('身体幅度应为 0.5–3');
   if (patch.style !== undefined && !['natural', 'lively', 'calm', 'shy'].includes(patch.style)) throw new Error('动作风格无效');
+  const cropPatch = patch.crop;
+  const crop = cropPatch === undefined ? undefined : normalizeBodyCrop(cropPatch);
+  if (crop && (!cropPatch || Object.entries(crop).some(([key,value]) =>
+    (key !== 'curve' || cropPatch.curve !== undefined) && cropPatch[key as keyof BodyCrop] !== value))) throw Error('取景选项无效');
+  const gazePatch = patch.gaze;
+  const gaze = gazePatch === undefined ? undefined : normalizeGazeConfig(gazePatch);
+  if (gaze && (gazePatch?.enabled !== gaze.enabled || gazePatch?.speed !== gaze.speed)) throw Error('视线跟随选项无效');
   const file = join(packDir, 'figure.json');
   const info = await lstat(file);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error('形象清单不能是链接或特殊文件');
   const original = await readFile(file, 'utf8');
-  const manifest = JSON.parse(original);
+  const manifest = parseFigureJson(original);
   const writes: Array<{ file: string; before: string; after: string }> = [];
 
   if (patch.nameZh || patch.nameEn) {
@@ -297,10 +428,11 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
     if (patch.nameZh) opt.name.zh = patch.nameZh;
     if (patch.nameEn) opt.name.en = patch.nameEn;
   }
-  writes.push({ file, before: original, after: JSON.stringify(manifest, null, 2) + '\n' });
-
-  if (Number.isFinite(patch.bodyGain) || patch.style) {
+  if (Number.isFinite(patch.bodyGain) || patch.style || crop || gaze) {
     const profiles = await profileFiles(packDir);
+    const live2dProfile = (crop || gaze) && await editableLive2dProfile(packDir, profiles);
+    if (crop && !live2dProfile) throw Error('这份形象包不支持上半身取景');
+    if (gaze && !live2dProfile) throw Error('这份形象包不支持视线跟随设置');
     if ((patch.bodyGain !== undefined && !profiles.some(p => /"bodyGain":\s*[-\d.]+/.test(p.text)))
       || (patch.style !== undefined && !profiles.some(p => /"style":\s*"[^"]*"/.test(p.text)))) throw new Error('这个形象包不支持通用表演配置');
     for (const {file:prof,text:before} of profiles) {
@@ -311,9 +443,20 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
       if (patch.style) {
         s = s.replace(/"style":\s*"[^"]*"/g, `"style": "${patch.style}"`);
       }
-      writes.push({ file: prof, before, after: s });
+      if (live2dProfile && prof === live2dProfile.file) {
+        if (crop) {
+          const nextCrop = cropPatch?.curve === undefined
+            ? { ...crop, curve: normalizeBodyCrop(readProfileSetting(before, 'crop')).curve } : crop;
+          s = writeProfileSetting(s, 'crop', nextCrop);
+        }
+        if (gaze) s = writeProfileSetting(s, 'gaze', gaze);
+      }
+      if (s !== before) writes.push({ file: prof, before, after: s });
     }
+    if (crop) setCropAxis(manifest, crop.mode);
   }
+  const nextManifest = JSON.stringify(manifest, null, 2) + '\n';
+  if (nextManifest !== original) writes.unshift({ file, before: original, after: nextManifest });
   const applied: typeof writes = [];
   const atomicWrite = async (file: string, data: string) => {
     const tmp = `${file}.edit-${randomUUID()}`;

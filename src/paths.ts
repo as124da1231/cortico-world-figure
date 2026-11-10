@@ -18,8 +18,8 @@ export function childPath(root: string, path: string): string {
 }
 
 export function packId(value: unknown): string {
-  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value) || value === 'coo') {
-    throw new Error('figure.json 的 id 必须是 1–32 位小写字母、数字或连字符，不能使用内置 id coo');
+  if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value) || value === 'coo' || value === 'whale') {
+    throw new Error('figure.json 的 id 必须是 1–32 位小写字母、数字或连字符，不能使用内置 id coo 或 whale');
   }
   childPath('.', value);
   return value;

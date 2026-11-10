@@ -26,11 +26,17 @@ import {
   CubismUserModel,
 } from '../sdk/framework.js';
 import { SHADERS } from '../sdk/shaders.js';
-import { roleValue } from './role-values.js';
+import { bubbleMouthPose, roleValue } from './role-values.js';
 import { createAdaptiveRenderer, resizeMaskBuffers } from './render-config.js';
+import { createFigureVoicePlayback, createVoiceMouthEnvelope } from './voice-playback.js';
 import { graphicsLimits, displayPixels, resolutionPlan, texturePlan } from './render-quality.js';
 import { createNativeActions, applyNativeValues } from './native-actions.js';
 import {createWardrobe,wardrobeConfig} from './wardrobe.js';
+import {createPetEmotionEffects} from './emotion-effects/index.js';
+import * as emotionConfig from './emotion-style.js';
+import {bodyCropForScheme,normalizeBodyCrop} from './crop-config.js';
+import {createCropMask,cropPose,interpolateCrop} from './body-crop.js';
+import {normalizeGazeConfig} from './gaze-config.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
@@ -38,6 +44,8 @@ const XHTML = 'http://www.w3.org/1999/xhtml';
 /** 角色在 256 logo 方格里的画布。 */
 const BOX = 256;
 const INITIAL_CANVAS_PX = 512;
+const KIT_LOOK_RATE = 9;
+const KIT_CURSOR_LOOK_RANGE = [5, 4];
 /** 简易模式：只走 role + 通用配方 + SoulLink，不播任何原生 exp3 / motion / Idle。 */
 const SIMPLE = true;
 
@@ -114,6 +122,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     scene.appendChild(canvas);
   }
   fo.appendChild(scene ?? canvas);
+  const bodyMask = createCropMask(doc, fo);
 
   const gl = canvas.getContext('webgl', {
     alpha: true, premultipliedAlpha: true, antialias: true,
@@ -395,6 +404,23 @@ export async function createLive2DBody(base, opts, entry, kit) {
     if (!items.length) continue;
     roles.set(name, { space: r.space ?? [-1, 1], def: r.default ?? 0, items });
   }
+  if (!roles.has('mouthOpen')) {
+    const items = [];
+    for (let i = 0; i < setting.getLipSyncParameterCount(); i++) {
+      const handle = setting.getLipSyncParameterId(i);
+      const index = paramIndex.get(handle?.getString?.());
+      if (index === undefined) continue;
+      items.push({
+        handle, index,
+        min: model._model.getParameterMinimumValue(index),
+        max: model._model.getParameterMaximumValue(index),
+        def: model._model.getParameterDefaultValue(index),
+      });
+    }
+    if (items.length) roles.set('mouthOpen', { space: [0, 1], def: 0, items });
+  }
+  let voicePlayback;
+  const voiceMouth = createVoiceMouthEnvelope();
 
   const driven = new Set();
   for (const role of roles.values()) for (const it of role.items) driven.add(it.handle.getString());
@@ -427,11 +453,11 @@ export async function createLive2DBody(base, opts, entry, kit) {
    * 语义值 → 模型值：以 default 为锚的两段线性。
    * 这样模型范围不对称、默认值不在中点也不会错。
    */
-  function writeRole(name, semantic) {
+  function writeRole(name, semantic, weight = 1) {
     const role = roles.get(name);
     if (!role) return;
     for (const it of role.items) {
-      model._model.setParameterValueById(it.handle, roleValue(semantic, role.space, role.def, it, it.endpoints));
+      model._model.setParameterValueById(it.handle, roleValue(semantic, role.space, role.def, it, it.endpoints), weight);
     }
   }
 
@@ -532,8 +558,43 @@ export async function createLive2DBody(base, opts, entry, kit) {
     }
   }
 
+  const gaze = normalizeGazeConfig(profile.gaze);
+  const customGaze = !bongoInput && (!gaze.enabled || gaze.speed !== 1) && (roles.has('eyeBallX') || roles.has('eyeBallY'));
+  let pointerInside = false, listening = false, still = false;
+  let sampledAt = 0, sampledMode = 'idle', sampledModeTime = 0;
+  const lastLook = [0, 0], kitCursorLook = [0, 0], adjustedCursorLook = [0, 0];
+
+  function eyeLookForFrame(look, face, frame, dt) {
+    const elapsed = Number.isFinite(frame.t) ? frame.t - sampledAt : dt;
+    if (elapsed > 0) {
+      // The Kit publishes one eased look vector. Recover its target from the
+      // elapsed simulation time, then replace only the cursor's contribution.
+      const transition = frame.mode !== sampledMode && frame.modeT === 0;
+      const mode = transition ? sampledMode : frame.mode;
+      const modeTime = transition ? sampledModeTime + elapsed : frame.modeT;
+      const tracksCursor = (mode === 'idle' || mode === 'sit') ? !listening
+        : (mode === 'wake' && modeTime > 1.2) || ((mode === 'walk' || mode === 'run') && still);
+      const cursorActive = pointerInside && tracksCursor && !face.lookLock && !face.lookAt
+        && frame.mode !== 'sleep' && frame.mode !== 'drag';
+      const kitBlend = -Math.expm1(-KIT_LOOK_RATE * elapsed);
+      const eyeBlend = cursorActive ? -Math.expm1(-KIT_LOOK_RATE * gaze.speed * elapsed) : kitBlend;
+      for (let axis = 0; axis < 2; axis++) {
+        const next = look[axis] ?? 0;
+        const limit = KIT_CURSOR_LOOK_RANGE[axis];
+        const target = cursorActive ? clamp(lastLook[axis] + (next - lastLook[axis]) / kitBlend, -limit, limit) : 0;
+        kitCursorLook[axis] += (target - kitCursorLook[axis]) * kitBlend;
+        adjustedCursorLook[axis] += ((gaze.enabled ? target : 0) - adjustedCursorLook[axis]) * eyeBlend;
+        lastLook[axis] = next;
+      }
+      sampledAt = Number.isFinite(frame.t) ? frame.t : sampledAt + elapsed;
+      sampledMode = frame.mode;
+      sampledModeTime = frame.modeT ?? 0;
+    }
+    return kitCursorLook.map((value, axis) => (look[axis] ?? 0) - value + adjustedCursorLook[axis]);
+  }
+
   // ---------- 每帧：base → 表演层 / 表情 → 程序动画 ----------
-  function applyFrame(face, frame, dt, neutralPose = false) {
+  function applyFrame(face, frame, dt, neutralPose = false, speechLevel = null) {
     const t = frame.t ?? 0;
 
     // 1) 全部 role 回到默认（写默认 == 模型默认姿势，所以是幂等的）
@@ -541,7 +602,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
     // 2) 表演层：连续情绪（VAD → FACS → role）。没有表演层才走离散配方。
     //    量取景的那几帧强制中性姿势：待机动作会把包围盒撑大，脚就量不准。
-    const engine = performance && !neutralPose ? performance.update(t, dt, frame.face) : null;
+    const engine = performance && !neutralPose ? performance.update(t, dt, frame.face, speechLevel) : null;
     const recipe = neutralPose
       ? {}
       : (engine
@@ -571,15 +632,14 @@ export async function createLive2DBody(base, opts, entry, kit) {
       perf: !!engine, mood: globalThis.__l2dPerf?.dominant ?? null,
     };
 
-    // 4) 口型（说话时以口型为准，但惊讶等表情的张嘴不能被压掉）
-    const gap = face.gap?.[0] ?? 50;
-    const talk = neutralPose ? 0 : clamp(frame.talk ?? 0, 0, 1);
-    const talkOpen = clamp((gap - 44) / 22 + talk * 0.35, 0, 1);
+    // 4) 表情给嘴部底形，气泡口型留到原生动作和物理之后。
     const expressionOpen = engine ? (engine.mouthOpen ?? 0) * 0.85 : (recipe?.mouthOpen ?? 0);
-    writeRole('mouthOpen', neutralPose ? 0 : clamp(Math.max(talkOpen, expressionOpen), 0, 1));
+    const mouth = neutralPose ? null : bubbleMouthPose(face.gap?.[0], frame.talk, expressionOpen, voicePlayback?.gain ?? 1);
+    writeRole('mouthOpen', mouth?.base ?? 0);
 
     // 5) 视线 + 头身跟随（表演层的待机动作叠在宿主跟随之上）
     const look = neutralPose ? [0, 0] : (Array.isArray(frame.look) ? frame.look : [0, 0]);
+    const eyeLook = customGaze && !neutralPose && !previewState ? eyeLookForFrame(look, face, frame, dt) : look;
     const tilt = neutralPose ? 0 : (frame.tilt ?? 0);
     const lean = neutralPose ? 0 : (frame.lean ?? 0);
     const ax = engine?.angleX ?? 0;
@@ -589,8 +649,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
     const ex = engine?.eyeBallX ?? 0;
     const ey = engine?.eyeBallY ?? 0;
     if (engine) {
-      writeRole('eyeBallX', clamp(ex * 0.6 + (look[0] ?? 0) * 0.55, -1, 1));
-      writeRole('eyeBallY', clamp(ey * 0.6 - (look[1] ?? 0) * 0.45, -1, 1));
+      writeRole('eyeBallX', clamp(ex * 0.6 + (eyeLook[0] ?? 0) * 0.55, -1, 1));
+      writeRole('eyeBallY', clamp(ey * 0.6 - (eyeLook[1] ?? 0) * 0.45, -1, 1));
       writeRole('angleX', clamp(ax * 0.75 + (look[0] ?? 0) * 0.4, -1, 1));
       writeRole('angleY', clamp(ay * 0.75 - (look[1] ?? 0) * 0.35, -1, 1));
       writeRole('angleZ', clamp(az + tilt * 0.4, -1, 1));
@@ -601,8 +661,8 @@ export async function createLive2DBody(base, opts, entry, kit) {
       }
       writeRole('breath', Number.isFinite(engine.breath) ? engine.breath : 0.5 + 0.5 * Math.sin(t * 1.6));
     } else {
-      writeRole('eyeBallX', clamp(look[0] ?? 0, -1, 1));
-      writeRole('eyeBallY', clamp(-(look[1] ?? 0), -1, 1));
+      writeRole('eyeBallX', clamp(eyeLook[0] ?? 0, -1, 1));
+      writeRole('eyeBallY', clamp(-(eyeLook[1] ?? 0), -1, 1));
       writeRole('angleX', clamp((look[0] ?? 0) * 0.73, -1, 1));
       writeRole('angleY', clamp(-(look[1] ?? 0) * 0.6, -1, 1));
       writeRole('angleZ', clamp(tilt * 0.67, -1, 1));
@@ -614,6 +674,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     for (const [name, value] of Object.entries(roleOverrides)) {
       if (Number.isFinite(value)) writeRole(name, value);
     }
+    return mouth;
   }
 
   // ---------- 取景 ----------
@@ -800,9 +861,40 @@ export async function createLive2DBody(base, opts, entry, kit) {
   // profile.extent / profile.anchors 仍然可以覆盖（工作台校准后写死）。
   const DEFAULT_EXTENT = [20, 8, 236, 256];
   let extent = profile.extent ?? null;
+  let measuredExtent = null;
   let wardrobeBaseline = null, wardrobeLayoutDirty = false, wardrobeAdjusted = false;
   let silhouette = null;
   let bodyMode = 'idle';
+  let elapsedBetweenDraws = 0;
+  const reduceMotion = doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)');
+  const schemeCrop = (id) => profile.bongo ? normalizeBodyCrop(null) : bodyCropForScheme(profile.crop, id);
+  let crop = schemeCrop(opts.scheme);
+  let cropDisplay = null, cropTransition = null, cropDirty = true;
+  const rawExtent = () => extent ?? DEFAULT_EXTENT;
+  const cropExtent = () => measuredExtent ?? rawExtent();
+  const currentExtent = () => cropDisplay?.extent ?? rawExtent();
+  function updateCrop(dt = 0) {
+    if (!measuredExtent || !cropDirty && !cropTransition) return;
+    const transition = cropTransition;
+    if (transition) transition.elapsed += dt;
+    const progress = transition && !reduceMotion?.matches ? Math.min(1, transition.elapsed / transition.duration) : 1;
+    const shape = interpolateCrop(cropExtent(), transition?.from ?? crop, crop, progress, transition?.shape);
+    cropDisplay = cropPose(shape, silhouette);
+    if (progress === 1) cropTransition = null;
+    cropDirty = false;
+    publishInfo();
+  }
+  function setCrop(value, {immediate = false} = {}) {
+    const next = profile.bongo ? normalizeBodyCrop(null) : normalizeBodyCrop(value);
+    if (Object.keys(next).every(key => next[key] === crop[key]) && !(immediate && cropTransition)) return;
+    const duration = immediate || reduceMotion?.matches || !measuredExtent ? 0 : next.transition;
+    cropTransition = duration > 0 && (crop.mode === 'upper' || next.mode === 'upper' || cropDisplay)
+      ? { from: crop, shape: cropDisplay?.shape, duration, elapsed: 0 }
+      : null;
+    crop = next;
+    cropDirty = true;
+    updateCrop();
+  }
   const fitCopy=()=>({...fitState,offset:[...(fitState.offset||[0,0])],padding:[...(fitState.padding||[0,0])]});
   const hasWardrobePick = () => Object.values(wardrobe.state()).some(value => value && value !== 'default');
   function changeWardrobe(update) {
@@ -819,15 +911,19 @@ export async function createLive2DBody(base, opts, entry, kit) {
       applyFit();
       let measured = measureNeutralExtent();
       if (!measured) throw Error('外观轮廓不可见');
-      if (wardrobe.grounding()) {
-        fitState.offset[1] += (measured[3] - wardrobeBaseline.extent[3]) / 128;
+      const adjusted = hasWardrobePick();
+      const floorOffset = measured[3] - wardrobeBaseline.extent[3];
+      if (adjusted && floorOffset) {
+        fitState.offset[1] += floorOffset / (BOX / 2);
         applyFit();
         measured = measureNeutralExtent();
         if (!measured) throw Error('外观贴地失败');
       }
-      wardrobeAdjusted = hasWardrobePick();
+      wardrobeAdjusted = adjusted;
       extent = wardrobeAdjusted ? measured : profile.extent ?? measured;
-      publishInfo();
+      measuredExtent = measured;
+      cropDirty = true;
+      updateCrop();
     } catch (error) {
       fitState = previousFit;
       ({ hitBands, silhouette } = previousGeometry);
@@ -933,10 +1029,20 @@ export async function createLive2DBody(base, opts, entry, kit) {
         break;
       }
     }
+    const rowUnits = new Map();
+    for (let y = y1; y >= y0; y--) {
+      if (rowMax[y] < rowMin[y]) continue;
+      const level = Math.floor((h - 1 - y) * unit);
+      const left = rowMin[y] * unit, right = (rowMax[y] + 1) * unit;
+      const row = rowUnits.get(level);
+      if (row) { row[1] = Math.min(left, row[1]); row[2] = Math.max(right, row[2]); }
+      else rowUnits.set(level, [level, left, right]);
+    }
     silhouette = {
       headX, headY, headWidth: head.width,
       footX: centerAt(ly0 + lh * .92, trunk.center === undefined ? lower : trunk),
       width: Math.max(trunk.width, lower.width) || lw,
+      rows: [...rowUnits.values()],
     };
     hitBands = [0.14, 0.47, 0.80].map((k, i) => {
       const cy = ly0 + lh * k;
@@ -990,8 +1096,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   }
 
   let extentFrames = 0;
-  const currentExtent = () => extent ?? DEFAULT_EXTENT;
-  const currentHits = () => (!wardrobeAdjusted ? profile.hits : null) ?? hitBands ?? (() => {
+  const currentHits = () => cropDisplay?.hits ?? (!wardrobeAdjusted ? profile.hits : null) ?? hitBands ?? (() => {
     const [x0, y0, x1, y1] = currentExtent();
     const w = x1 - x0;
     const h = y1 - y0;
@@ -1005,15 +1110,58 @@ export async function createLive2DBody(base, opts, entry, kit) {
     ];
   })();
   const currentAnchors = () => {
-    const measured = deriveAnchors(currentExtent(), silhouette);
-    if (!profile.anchors) return measured;
-    return wardrobeAdjusted ? { ...profile.anchors, bubble: measured.bubble } : profile.anchors;
+    const measured = deriveAnchors(cropExtent(), silhouette);
+    const configured = profile.anchors ?? {};
+    const reference = wardrobeBaseline?.silhouette;
+    const moved = wardrobeAdjusted && reference && silhouette;
+    const dx = moved ? silhouette.headX - reference.headX : 0;
+    const dy = moved ? silhouette.headY - reference.headY : 0;
+    const shift = cropDisplay?.shift ?? 0;
+    const anchors = { ...measured, ...configured };
+    if (!dx && !dy && !shift) return anchors;
+    for (const [key, point] of Object.entries(anchors)) {
+      const x = Object.hasOwn(configured, key) ? dx : 0;
+      const y = shift + (Object.hasOwn(configured, key) ? dy : 0);
+      if (key === 'tears') anchors[key] = point.map(([a, b]) => [a + x, b + y]);
+      else if (key === 'hearts') anchors[key] = [point[0] + x, point[1] + x, point[2] + y];
+      else if (Array.isArray(point) && point.length === 2) anchors[key] = [point[0] + x, point[1] + y];
+    }
+    return anchors;
   };
+
+  let emotionEffects, initialEmotionTrigger;
+  const emotionStyle = emotionConfig.default;
+  let emotionEffectsEnabled = emotionStyle !== 'native';
+  function triggerEmotionEffect(word) {
+    if (!emotionEffectsEnabled) return;
+    if (emotionEffects) emotionEffects.trigger(word);
+    else initialEmotionTrigger = word;
+  }
+  function drawEmotionEffects(parent, frame) {
+    if (!emotionEffectsEnabled) return;
+    try {
+      emotionEffects ??= createPetEmotionEffects({
+        doc, parent, art: fo, bounds: currentExtent, style: emotionStyle, size: emotionConfig.emotionEffectSize,
+      });
+      emotionEffects.setTheme(doc.documentElement.dataset.theme);
+      if (initialEmotionTrigger) {
+        emotionEffects.trigger(initialEmotionTrigger);
+        initialEmotionTrigger = undefined;
+      }
+      emotionEffects.draw(frame);
+    } catch (error) {
+      emotionEffectsEnabled = false;
+      emotionEffects?.dispose();
+      emotionEffects = undefined;
+      console.warn('[l2d] 情绪特效已停止', error);
+    }
+  }
 
   const publishInfo = () => {
     globalThis.__l2dInfo = {
       extent: currentExtent(),
-      measured: extent,
+      measured: measuredExtent ?? extent,
+      crop: { ...crop },
       anchors: currentAnchors(),
       hits: currentHits(),
       roles: [...roles.keys()],
@@ -1077,7 +1225,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     __remeasure() {
       try {
         const m = measureNeutralExtent();
-        if (m) { extent = m; publishInfo(); }
+        if (m) { extent = measuredExtent = m; cropDirty = true; updateCrop(); }
         return m;
       } catch { return null; }
     },
@@ -1131,11 +1279,16 @@ export async function createLive2DBody(base, opts, entry, kit) {
       settleWardrobe();
 
       if (opts.preview && previewState) frame = {...frame,face:previewState.word,gesture:null,talk:0,look:[0,0]};
-      const dt = clamp(frame.dt ?? 0.016, 0.001, 0.05);
+      drawEmotionEffects(petG, frame);
+      const dt = clamp(frame.dt ?? (elapsedBetweenDraws || 1 / 60), 0.001, 0.1);
+      elapsedBetweenDraws = 0;
 
       model._model.loadParameters();
       resetNativeBase();
-      applyFrame(face, frame, dt, !extent || Boolean(previewState?.raw));
+      const neutralPose = !extent || Boolean(previewState?.raw);
+      const speech = neutralPose ? null : voicePlayback?.level();
+      const spokenMouth = voicePlayback && voiceMouth.update(speech, voicePlayback.gain, dt);
+      const mouth = applyFrame(face, frame, dt, neutralPose, speech);
       stepMotion(frame, dt);
       stepExpression(frame.face, dt);
       applyPartOpacity(currentId);
@@ -1153,6 +1306,13 @@ export async function createLive2DBody(base, opts, entry, kit) {
       try { model._pose?.updateParameters(model._model, dt); } catch { /* 姿势失败不致命 */ }
       applyCleanParams();
       wardrobe.apply();
+      // Audio owns even quiet samples once blended in. Its tail hands the
+      // parameter back to the same pose the model would use without audio.
+      if (Number.isFinite(roleOverrides.mouthOpen)) writeRole('mouthOpen', roleOverrides.mouthOpen);
+      else {
+        if (mouth?.weight > 0 && spokenMouth?.weight !== 1) writeRole('mouthOpen', mouth.open, mouth.weight);
+        if (spokenMouth && !neutralPose) writeRole('mouthOpen', spokenMouth.open, spokenMouth.weight);
+      }
       if (bongoInput) bongoArt.draw(bongoInput.apply(dt));
       model._model.update();
       render();
@@ -1181,21 +1341,29 @@ export async function createLive2DBody(base, opts, entry, kit) {
         }
         if (m) {
           extent = profile.extent ?? m;
-          wardrobeBaseline = { fit: fitCopy(), extent: m };
+          measuredExtent = m;
+          wardrobeBaseline = { fit: fitCopy(), extent: m, silhouette };
+          cropDirty = true;
+          updateCrop();
           if (changed) wardrobeLayoutDirty = true;
-          publishInfo();
           console.info('[l2d] extent', JSON.stringify(m));
           console.info('[l2d] fit', JSON.stringify(fitState));
         } else if (extentFrames === 3) {
           console.info('[l2d] extent 没量到（画面全透明？）');
         }
       }
+      if (crop.mode === 'upper' && !measuredExtent && extentFrames < 30) fo.setAttribute('visibility', 'hidden');
+      else fo.removeAttribute('visibility');
+      bodyMask.apply(petG, cropDisplay);
     },
 
     dispose() {
       disposed = true;
+      voicePlayback?.dispose();
+      emotionEffects?.dispose();
       clearTimeout(textureDeadline);
       renderNotice?.remove();
+      bodyMask.dispose();
       fo.remove();
       try { performance?.dispose(); } catch { /* 忽略 */ }
       try { model.release?.(); } catch { /* 忽略 */ }
@@ -1220,8 +1388,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
   globalThis.__l2dRemesure = figure.__remeasure;
   globalThis.__l2dAutoFit = () => {
     const m = bongoArt ? measureNeutralExtent() : autoFitExtent();
-    if (m) { extent = m; publishInfo(); }
+    if (m) { extent = measuredExtent = m; cropDirty = true; updateCrop(); }
     return m;
+  };
+  if (opts.preview) globalThis.__l2dCrop = {
+    get: () => ({ ...crop }),
+    set: (value, options) => setCrop({ ...crop, ...value }, options),
   };
   globalThis.__l2dCover = figure.__cover;
   globalThis.__l2dRenderQuality = qualityInfo;
@@ -1229,40 +1401,96 @@ export async function createLive2DBody(base, opts, entry, kit) {
   globalThis.__l2dExpr = figure.__expr;
 
   const bodyHost = bongoInput ? { ...host, start: { ...host.start, facing: 1 } } : host;
-  const body = kit.createBody(bodyHost, { figure, words, css: 'foreignObject{pointer-events:none}' });
+  // The kit mounts its stage-coordinate particles after the transformed art group.
+  const hideNativeEffects = emotionEffectsEnabled ? 'svg.kit > ellipse.shadow + g + g{display:none}' : '';
+  const body = kit.createBody(bodyHost, { figure, words, css: 'foreignObject{pointer-events:none}' + hideNativeEffects });
+  if (customGaze) {
+    const pointerBase = body.pointer.bind(body);
+    body.pointer = (type, point) => {
+      if (type === 'move' || type === 'down') pointerInside = true;
+      else if (type === 'leave' && !body.layout().pressing) pointerInside = false;
+      return pointerBase(type, point);
+    };
+    const setBase = body.set.bind(body);
+    body.set = (state) => {
+      if (typeof state?.listening === 'boolean') listening = state.listening;
+      if (typeof state?.still === 'boolean') still = state.still;
+      return setBase(state);
+    };
+  }
+  if (emotionEffectsEnabled) {
+    const cueBase = body.cue.bind(body);
+    body.cue = (kind) => { cueBase(kind); triggerEmotionEffect(kind); };
+  }
+  if (!opts.preview) voicePlayback = createFigureVoicePlayback(doc, resolveAsset);
   const shadow = host.root.querySelector('svg.kit > ellipse.shadow');
+  let fittedShadow;
+  function drawShadow() {
+    if (!shadow || !silhouette || bongoArt?.hasBackground) return;
+    if (!fittedShadow) {
+      fittedShadow = shadow.cloneNode(false);
+      shadow.before(fittedShadow);
+      // The kit can cache its values. Never feed our fitted radii back into it.
+      shadow.setAttribute('visibility', 'hidden');
+    }
+    const support = cropDisplay ?? silhouette;
+    const rx = Number(shadow.getAttribute('rx'));
+    const ry = Number(shadow.getAttribute('ry'));
+    const widthScale = clamp(support.width / 164, .16, 1.4);
+    let cx = Number(shadow.getAttribute('cx'));
+    if (bodyMode !== 'air' && bodyMode !== 'drag') {
+      const transform = fo.parentNode?.getCTM?.();
+      if (transform && Number.isFinite(transform.a) && Number.isFinite(transform.c)) {
+        cx += transform.a * (support.footX - BOX / 2) + transform.c * (currentExtent()[3] - BOX);
+      }
+    }
+    fittedShadow.setAttribute('cx', String(cx));
+    fittedShadow.setAttribute('rx', String(rx * widthScale));
+    fittedShadow.setAttribute('ry', String(1 + (ry - 1) * widthScale));
+    for (const name of ['cy', 'opacity']) fittedShadow.setAttribute(name, shadow.getAttribute(name) ?? '0');
+  }
   const step = body.step.bind(body);
-  body.step = (dt) => {
+  body.step = (dt, draw = true) => {
     if (!renderFailure) {
-      if (texturesReady) settleWardrobe();
-      step(dt);
+      const delta = Number.isFinite(dt) && dt > 0 ? dt : 0;
+      elapsedBetweenDraws = Math.min(0.1, elapsedBetweenDraws + delta);
+      if (texturesReady && draw) settleWardrobe();
+      updateCrop(delta);
+      step(dt, draw);
     }
     if (renderFailure) {
       // Coo switches to its built-in figure when a running body reports an error.
       if (!opts.preview) throw Error(renderFailure);
       return;
     }
-    if (!shadow || !silhouette || bongoArt?.hasBackground) return;
-    const rx = Number(shadow.getAttribute('rx'));
-    const ry = Number(shadow.getAttribute('ry'));
-    // Keep the kit's ground line and lift fade while matching the new silhouette.
-    const widthScale = clamp(silhouette.width / 164, .16, 1.4);
-    shadow.setAttribute('rx', String(rx * widthScale));
-    shadow.setAttribute('ry', String(1 + (ry - 1) * widthScale));
-    if (bodyMode !== 'air' && bodyMode !== 'drag') {
-      const scaleX = fo.parentNode?.getCTM?.()?.a;
-      if (Number.isFinite(scaleX)) {
-        const cx = Number(shadow.getAttribute('cx'));
-        shadow.setAttribute('cx', String(cx + scaleX * (silhouette.footX - BOX / 2)));
-      }
-    }
+    if (draw) drawShadow();
   };
-  body.setScheme=async id=>{changeWardrobe(()=>wardrobe.scheme(id));if(texturesReady)settleWardrobe();};
+  body.setScheme = async (id) => {
+    changeWardrobe(() => wardrobe.scheme(id));
+    if (texturesReady) settleWardrobe();
+    setCrop(schemeCrop(id));
+  };
+  const layoutBase = body.layout.bind(body);
+  body.layout = () => {
+    const layout = layoutBase();
+    if (!cropDisplay) return layout;
+    const { x, y, w, h } = layout.box;
+    return { ...layout, side: { x: x + w / 2, y: y + h / 2, reach: w / 2 } };
+  };
   globalThis.__l2dWardrobe=()=>wardrobe.state();
   if(opts.preview)globalThis.__l2dWardrobeValues=()=>wardrobe.inspect();
-  if (native) {
+  if (native || emotionEffectsEnabled) {
     const doBase = body.do.bind(body);
-    body.do = (word) => { const accepted = doBase(word); if (accepted !== false) native.trigger(word); return accepted; };
+    body.do = (word) => {
+      const accepted = doBase(word);
+      if (accepted !== false) {
+        native?.trigger(word);
+        triggerEmotionEffect(word);
+      }
+      return accepted;
+    };
+  }
+  if (native) {
     globalThis.__l2dNativeSample = (id, time, word, generic = false, size = 384) => {
       if (!texturesReady) return null;
       model._model.loadParameters();
@@ -1322,12 +1550,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
         return body;
       }
       const stepBase = body.step.bind(body);
-      body.step = (dt) => {
+      body.step = (dt, draw) => {
         try {
           const l = body.layout?.();
           if (l?.mode === 'idle' && !l.pressing && !l.busy) body.place(l.x, 1);
         } catch { /* ignore */ }
-        stepBase(dt);
+        stepBase(dt, draw);
       };
     }
   }

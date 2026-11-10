@@ -1,3 +1,41 @@
+function openFigureDialog(parent, title, body, { closeLabel, variant = '', onClose, locked = () => false } = {}) {
+  const doc = parent.ownerDocument;
+  const previous = doc.activeElement;
+  const dialog = doc.createElement('dialog');
+  dialog.className = `l2d-modal l2d-popup ${variant}`.trim();
+  dialog.setAttribute('aria-label', title);
+  dialog.setAttribute('aria-modal', 'true');
+  const card = doc.createElement('div'); card.className = 'l2d-popup-card';
+  const head = doc.createElement('header'); head.className = 'l2d-popup-head';
+  const heading = doc.createElement('h3'); heading.textContent = title;
+  const close = doc.createElement('button'); close.type = 'button';
+  close.className = 'l2d-btn quiet l2d-modal-close'; close.textContent = '×';
+  close.setAttribute('aria-label', closeLabel || 'Close');
+  const content = doc.createElement('div'); content.className = 'l2d-popup-body';
+  let closed = false;
+  function dispose() {
+    if (closed) return;
+    closed = true;
+    dialog.close(); dialog.remove();
+    onClose?.();
+    previous?.focus?.({preventScroll:true});
+  }
+  const requestClose = () => { if (!locked()) dispose(); };
+  close.addEventListener('click', requestClose);
+  // Keep Escape inside this layer so a host drawer beneath it keeps its draft.
+  dialog.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); event.stopPropagation(); requestClose();
+  });
+  dialog.addEventListener('cancel', event => {
+    event.preventDefault(); event.stopPropagation(); requestClose();
+  });
+  dialog.addEventListener('click', event => { if (event.target === dialog) requestClose(); });
+  content.append(body); head.append(heading, close); card.append(head, content); dialog.append(card);
+  parent.append(dialog); dialog.showModal(); close.focus({preventScroll:true});
+  return {el:dialog,dispose};
+}
+
 // A host overlay outside showModal() is inert. Keep discard confirmation in the same top layer.
 function bindingDiscardPrompt(parent,zh=true,options={}) {
   const doc=parent.ownerDocument,previous=doc.activeElement,t=(a,b)=>zh?a:b;
@@ -50,7 +88,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   const restoreAll=el('button','l2d-btn quiet sm',t('全部恢复通用','Reset all to generic'));restoreAll.disabled=true;
   const skipImages=el('button','l2d-btn',t('跳过图片','Skip images'));skipImages.hidden=true;
   footer.append(footInfo,restoreAll,cancel,skipImages,save);card.append(head,layout,footer);modal.append(card);ctx.root.append(modal);modal.showModal();
-  let closed=false,saving=false,saveSequence=0,skippingImages=false,dirty=false,data,bindings=[],word='happy',resource=null,rawMode=false,serial=0,previewTimer,sampleSet=0,discardPrompt=null,leaseTimer,sessionValid=true;
+  let closed=false,saving=false,saveSequence=0,skippingImages=false,dirty=false,data,bindings=[],word='happy',resource=null,rawMode=false,serial=0,previewTimer,sampleSet=0,discardPrompt=null,leaseTimer,sessionValid=true,previewDialog=null;
   let page='actions',groups=[],picks={},groupId=null,optionId='default',closeGroupDialog;const pageState={actions:{resource:null,filter:'all',search:''},wardrobe:{resource:null,filter:'all',search:''}};
   const uid=prefix=>prefix+(win.crypto?.randomUUID?.().replaceAll('-','')||Math.random().toString(16).slice(2)).slice(0,12);
   const signature=items=>JSON.stringify(items.map(({word,resource,release})=>({word,resource,...(release?{release}:{})})).sort((a,b)=>a.word.localeCompare(b.word)));
@@ -72,7 +110,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   };
   const changed=()=>{dirty=signature(bindings)!==signature(data.bindings||[])||JSON.stringify(groups)!==JSON.stringify(data.wardrobe||[]);syncControls();};
   const alive=()=>!closed&&!ctx.signal?.aborted;
-  const release=()=>{if(closed)return;closed=true;win.clearInterval(leaseTimer);closeGroupDialog?.();discardPrompt?.dispose();leave?.dispose?.();ctx.signal?.removeEventListener('abort',release);stopPreviewUpdates();gallery.replaceChildren();modal.close();modal.remove();onClosed?.();const token=data?.token||requestedToken;if(token&&!ctx.signal?.aborted)ctx.invoke('manualClose',[token]).catch(()=>{});previous?.focus?.();};
+  const release=()=>{if(closed)return;closed=true;win.clearInterval(leaseTimer);closeGroupDialog?.();discardPrompt?.dispose();previewDialog?.dispose();leave?.dispose?.();ctx.signal?.removeEventListener('abort',release);stopPreviewUpdates();gallery.replaceChildren();modal.close();modal.remove();onClosed?.();const token=data?.token||requestedToken;if(token&&!ctx.signal?.aborted)ctx.invoke('manualClose',[token]).catch(()=>{});previous?.focus?.({preventScroll:true});};
   const requestClose=async()=>{
     if(closed||saving||discardPrompt)return;
     if(dirty){discardPrompt=bindingDiscardPrompt(modal,zh);const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive())return;}
@@ -81,12 +119,11 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   close.onclick=cancel.onclick=requestClose;modal.addEventListener('cancel',e=>{e.preventDefault();void requestClose();});modal.addEventListener('click',e=>{if(e.target===modal)void requestClose();});
   const leave=ctx.guardLeave?.(()=>alive()&&(dirty||saving)?t('动作绑定尚未保存，确定离开？','Bindings are not saved. Leave?'):null);
   ctx.signal?.addEventListener('abort',release,{once:true});
-  const loadPreview=(candidate=false,groundOverride)=>{
+  const loadPreview=(candidate=false)=>{
     if(!canEdit()||!alive())return;
     const preview=structuredClone(groups),selected={...picks},g=preview.find(g=>g.id===groupId);
     if(candidate&&page==='wardrobe'&&resource&&!resource.wardrobeError&&g&&!wardrobeConflict(resource,g.id)){
-      const ground=groundOverride??g.options.find(o=>o.id===optionId)?.ground;
-      g.options=g.options.slice(0,15);g.options.push({id:'preview',name:resource.title,resource:resource.id,...(ground?{ground:true}:{})});selected[g.id]='preview';
+      g.options=g.options.slice(0,15);g.options.push({id:'preview',name:resource.title,resource:resource.id});selected[g.id]='preview';
     }
     const request={page,word,resource:page==='actions'?resource?.id:null,raw:rawMode,bindings:structuredClone(bindings),groups:preview,picks:selected,sampleSet,previewSize:Number(resolution.value)};
     const generation=++serial;win.clearTimeout(previewTimer);retry.hidden=true;setPreviewBusy(true);
@@ -96,7 +133,23 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
         const result=await ctx.invoke('manualPreview',[data.token,request]);if(!alive()||generation!==serial)return;
         if(!Array.isArray(result.frames)||!result.frames.length||result.frames.length>3)throw Error(t('预览图片不完整','Incomplete preview'));
         const labels={default:t('默认','Default'),generic:t('通用表现','Generic'),appearance:t('当前装扮','Current appearance'),native:t('原生效果','Native'),combined:t('组合效果','Combined')};
-        const figures=result.frames.map(item=>{if(!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(item.png||''))throw Error(t('预览图片无效','Invalid preview image'));const figure=el('figure','l2d-bind-shot'),image=el('img'),caption=el('figcaption',null,(labels[item.kind]||'')+(item.resource&&item.time?' · '+item.time.toFixed(2)+'s':''));image.src=item.png;image.alt=caption.textContent;image.width=image.height=request.previewSize;figure.append(image,caption);return figure;});
+        const figures = result.frames.map(item => {
+          if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(item.png || '')) throw Error(t('预览图片无效','Invalid preview image'));
+          const captionText = (labels[item.kind] || t('对照图','Comparison')) + (item.resource && item.time ? ' · ' + item.time.toFixed(2) + 's' : '');
+          const figure = el('figure','l2d-bind-shot');
+          const button = el('button','l2d-bind-shot-button'); button.type = 'button';
+          button.setAttribute('aria-label', t('放大 ','Enlarge ') + captionText); button.setAttribute('aria-haspopup','dialog');
+          const image = el('img'); image.src = item.png; image.alt = ''; image.width = image.height = request.previewSize;
+          button.addEventListener('click', () => {
+            if (closed || previewDialog) return;
+            const large = el('img','l2d-large-cover'); large.src = item.png; large.alt = captionText;
+            previewDialog = openFigureDialog(modal, captionText, large, {
+              closeLabel:t('关闭','Close'), variant:'l2d-image-popup', onClose() { previewDialog = null; },
+            });
+          });
+          button.append(image); figure.append(button, el('figcaption', null, captionText));
+          return figure;
+        });
         gallery.replaceChildren(...figures);gallery.dataset.count=String(figures.length);gallery.dataset.previewInfo=JSON.stringify({quality:result.quality,frames:result.frames.map(({png,...frame})=>frame)});
         hint.textContent=page==='actions'?(resource?label(word)+' · '+resource.title:t('通用表现','Generic behavior')):t('静态外观对照','Appearance comparison');
       }catch(error){
@@ -196,11 +249,8 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     const current=g.options.find(o=>o.id===optionId),name=el('input','l2d-input');name.value=current?.name||resource?.title||'';name.maxLength=60;name.placeholder=t('选项名称，例如戴上','Option name, e.g. wear');name.setAttribute('aria-label',t('装扮选项名称','Wardrobe option name'));binding.append(name);
     const conflict=resource&&wardrobeConflict(resource,g.id);if(conflict)binding.append(el('p','l2d-bind-warning',t('与动作或其他装扮组共用参数，请调整绑定。','Shares controls with actions or another wardrobe group.')));
     const add=el('button','l2d-btn primary',current?t('保存选项','Update option'):t('添加选项','Add option'));
-    const groundLabel=el('label','l2d-bind-ground'),ground=el('input','l2d-switch');ground.type='checkbox';ground.setAttribute('role','switch');ground.setAttribute('aria-label',t('切换后贴地','Ground after switching'));ground.checked=current?.ground===true;ground.disabled=!canEdit()||!resource||!!conflict;
-    groundLabel.title=t('改变体型时启用；保持大小，仅在切换后测量并贴地。','For shape changes: keep scale, measure and ground on switching.');groundLabel.append(ground,el('span',null,t('切换后贴地','Ground on switch')));
     const canAdd=()=>canEdit()&&resource&&!resource.wardrobeError&&!conflict&&!!name.value.trim()&&(!!current||g.options.length<16);add.disabled=!canAdd();name.oninput=()=>{add.disabled=!canAdd();};
-    ground.onchange=()=>{if(ground.disabled)return;if(current){if(ground.checked)current.ground=true;else delete current.ground;changed();sendWardrobe();}else if(resource){const preview=structuredClone(groups),group=preview.find(p=>p.id===g.id);group.options=group.options.slice(0,15);group.options.push({id:'preview',name:resource.title,resource:resource.id,...(ground.checked?{ground:true}:{})});loadPreview(true,ground.checked);}};
-    add.onclick=()=>{if(!canAdd()||discardPrompt)return;const o={id:current?.id||uid('v'),name:name.value.trim(),resource:resource.id,...(ground.checked?{ground:true}:{})};if(current)g.options=g.options.map(p=>p.id===o.id?o:p);else g.options.push(o);optionId=o.id;picks[g.id]=o.id;changed();paintTargets();paintResources();sendWardrobe();};const actions=el('div','l2d-bind-option-actions');actions.append(add,groundLabel);binding.append(actions);
+    add.onclick=()=>{if(!canAdd()||discardPrompt)return;const o={id:current?.id||uid('v'),name:name.value.trim(),resource:resource.id};if(current)g.options=g.options.map(p=>p.id===o.id?o:p);else g.options.push(o);optionId=o.id;picks[g.id]=o.id;changed();paintTargets();paintResources();sendWardrobe();};binding.append(add);
     if(current){const remove=el('button','l2d-btn quiet',t('移除选项','Remove option'));remove.disabled=!canEdit();remove.onclick=()=>{if(!canEdit())return;g.options=g.options.filter(o=>o.id!==current.id);picks[g.id]='default';optionId='default';resource=null;changed();paintTargets();paintResources();sendWardrobe();};binding.append(remove);}
     binding.append(el('p','l2d-bind-note',t('每组可选一个选项。保存并安装后可在 Coo 装扮页切换。','Pick one option per group. Save and install to switch them in Coo.')));
   }

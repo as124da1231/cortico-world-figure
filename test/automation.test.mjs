@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {FigureAutomation,FIGURE_TOOL_DECLS} from '../src/automation.mjs';
 import {findModels,inspectNative,nativeConfig,validateBindings,curveSummary} from '../workbench/tools/native-catalog.mjs';
+import {resolveModelAsset} from '../workbench/tools/model-assets.mjs';
 import {compileCurve,createNativeActions,applyNativeValues} from '../workbench/pack/backends/native-actions.js';
 import {LIVE2D} from '../src/index.ts';
 import {makeCtx,fixtureManifest} from './_ctx.mjs';
@@ -42,6 +43,14 @@ function approveInChat(f,plan,{index=0,question=plan.question}={}){
  const askId='real-ask';f.events.push({cursor:f.events.length+1,source:'desktop-pet',type:'desktop-pet.self',meta:{kind:'ask',askId,question,options:plan.options}});
  const answer={cursor:f.events.length+1,source:'desktop-pet',type:'desktop-pet.answer',meta:{askId,index}};f.events.push(answer);return answer.cursor;
 }
+
+test('missing declared model assets are reported before asking to install', async t => {
+ const f=await automation(t);
+ await rm(join(f.dir,'角色.moc3'));
+ await assert.rejects(f.auto.prepare(f.model.id,f.bindings),/模型缺少必要文件：角色\.moc3/);
+ assert.equal(f.auto.pending().length,0);
+ assert.equal(f.executions.length,0);
+});
 
 test('depth policy is inactive outside explicit image mode and defaults to standard',()=>{
  assert.equal(analysisPolicy({assistGear:'text',assistDepth:'deep'}).depth,null);
@@ -239,6 +248,24 @@ test('bounded generic discovery finds Chinese Animation/Exp3 and keeps unique st
  const pose=f.catalog.resources.find(r=>r.title.includes('打开'));assert(pose.release);assert.equal(f.catalog.resources.find(r=>r.id===pose.release).title,'抚胸关闭');
  const limited=await findModels(f.root,{maxEntries:1});assert.equal(limited.truncated,true);
 });
+test('Chinese resource references are resolved consistently for conversion and approval',async t=>{
+ const f=await fixture(t);
+ const textureFolder=join(f.dir,'贴图 Café');
+ const texture=join(textureFolder,'纹理.png');
+ const mocRef=' 角色.moc3 ',textureRef='./贴图 Cafe\u0301\\纹理.png';
+ await mkdir(textureFolder);
+ await writeFile(texture,'texture');
+ await json(join(f.dir,f.model.file),{FileReferences:{FileReferences:{MocFile:mocRef,Textures:[textureRef]}}});
+ assert.equal(resolveModelAsset(f.dir,mocRef),join(f.dir,'角色.moc3'));
+ assert.equal(resolveModelAsset(f.dir,textureRef),texture);
+ assert.equal(resolveModelAsset(f.dir,' .. /角色.moc3'),null);
+ const initial=await inspectNative(f.model);
+ assert.deepEqual(initial.missingRequiredAssets,[]);
+ await writeFile(texture,'changed texture');
+ assert.notEqual((await inspectNative(f.model)).fingerprint,initial.fingerprint);
+ await rm(texture);
+ assert.deepEqual((await inspectNative(f.model)).missingRequiredAssets,[textureRef]);
+});
 test('resources escaping the model root and directory links are never followed',async t=>{
  const f=await fixture(t);await writeFile(join(f.root,'outside.exp3.json'),'{}');
  await json(join(f.dir,'角色.model3.json'),{FileReferences:{Expressions:[{File:'../outside.exp3.json'}]}});
@@ -307,9 +334,16 @@ test('concurrent execution and cancellation do not duplicate or commit an unappr
  const next=await f.auto.prepare(f.model.id,f.bindings);await f.auto.approve(next.id);const stop=new AbortController();stop.abort();await assert.rejects(f.auto.install(next.id,null,stop.signal),/abort/i);
 });
 test('full-auto skips uncertain mappings and does not bypass pending appearance consent',async t=>{
- const f=await automation(t);f.cfg.assistAuto=true;
+ const f=await automation(t);delete f.cfg.assistAuto;
  const p=await f.auto.prepare(f.model.id,[{...f.bindings[0],confidence:.2}]);assert.equal(p.bindings.length,0);assert.deepEqual(p.skipped,['happy']);
- await f.auto.install(p.id);assert.equal(f.executions.length,1);
+ assert.equal(p.automatic,true);
+ f.cfg.assistConfirmFallback=true;
+ assert.equal(f.auto.publicPlan(f.auto.plans.get(p.id)).automatic,false);
+ await assert.rejects(f.auto.install(p.id),/真实同意/);assert.equal(f.executions.length,0);
+ await f.auto.install(p.id,approveInChat(f,p));assert.equal(f.executions.length,1);
+ const mapped=await f.auto.prepare(f.model.id,f.bindings);assert.equal(mapped.automatic,true);
+ const old=f.auto.plans.get(mapped.id);delete old.autoAtCreation;
+ assert.equal(f.auto.publicPlan(old).automatic,false);
 });
 test('image analysis falls back honestly and enforces a six-frame per-call budget',async t=>{
  const f=await automation(t,{evidence:async(_c,_n,samples)=>samples.map(s=>({...s,png:'data:image/png;base64,iVBORw0KGgo='}))});f.cfg.assistGear='image';
@@ -323,6 +357,55 @@ test('motion-based faces trigger once on face changes and invalid expression ble
  for(let i=0;i<20;i++)player.update({face:'happy'},.1);
  assert.equal(player.state().motion,null);assert.deepEqual(player.failed,['bad']);
  player.update({face:'neutral'},.1);player.update({face:'happy'},.1);assert.equal(player.state().motion,'face');
+});
+
+test('native motion priority is explicit and preemption crossfades shared channels directly', () => {
+ const resources = [
+  { id:'a', kind:'motion', seconds:1, data:motion(.9,.9) },
+  { id:'b', kind:'motion', seconds:1, data:{ Curves:[
+   {Target:'Parameter',Id:'ParamArm',Segments:[0,.1,0,1,.1]},
+   {Target:'PartOpacity',Id:'PartNew',Segments:[0,1,0,1,1]},
+  ] } },
+  { id:'c', kind:'motion', seconds:1, data:motion(.4,.4) },
+ ];
+ const player = createNativeActions({ resources, bindings:[
+  {word:'wave',resource:'a'}, {word:'shake',resource:'b'}, {word:'happy',resource:'c'},
+ ] });
+ const arm = values => values.find(value => value.id === 'ParamArm');
+ const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, String(actual));
+ player.update({face:'happy',gesture:{kind:'shake'}}, .075);
+ assert.equal(player.state().motion, 'b');
+ assert.equal(player.trigger('wave'), true);
+ player.update({face:'neutral'}, .075);
+ const full = player.update({face:'happy',gesture:{kind:'shake'}}, .075);
+ assert.equal(player.state().motion, 'a');
+ close(arm(full).value,.9);
+ assert.equal(player.trigger('shake'), true);
+ const halfway = player.update({face:'happy'}, .075);
+ close(arm(halfway).value,.5);
+ close(arm(halfway).weight,1);
+ close(halfway.find(value => value.id === 'PartArm').weight,.5);
+ close(halfway.find(value => value.id === 'PartNew').weight,.5);
+ assert.equal(player.trigger('happy'), true);
+ const interrupted = player.update({face:'happy'}, .075);
+ close(arm(interrupted).value,.45);
+ close(arm(interrupted).weight,1);
+});
+
+test('native idle eases in and a held pose crossfades into its release', () => {
+ const player = createNativeActions({ resources:[
+  {id:'idle',kind:'motion',seconds:1,data:motion(.2,.2)},
+  {id:'pose',kind:'motion',classification:'pose',seconds:.2,data:motion(.8,.8)},
+  {id:'release',kind:'motion',seconds:1,data:motion(.2,.2)},
+ ], bindings:[{word:'idle',resource:'idle'},{word:'wave',resource:'pose',release:'release'}] });
+ assert.ok(player.update({mode:'idle'}, .075).every(value => value.weight > 0 && value.weight < .55));
+ player.update({mode:'idle'}, .075);
+ player.trigger('wave');
+ for (let i = 0; i < 16; i++) player.update({mode:'idle'}, .1);
+ assert.equal(player.state().motion,'pose');
+ const release = player.update({mode:'idle'}, .1);
+ assert.equal(player.state().motion,'release');
+ assert.ok(release.every(value => value.value > .2 && value.value < .8 && value.weight > .99));
 });
 test('import notifications are opt-in, source-tagged external data, and deduplicated',async t=>{
  const f=await automation(t);const result={token:'one',models:[{dir:'role'}],packs:[]};

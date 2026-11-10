@@ -16,12 +16,12 @@ import {
 import { dirname, join, basename, relative, resolve, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
-  World, WorldHost, WorldWebUiDecl, ToolDef, WorldStreamSocket,
+  World, WorldHost, WorldWebUiDecl, ToolDef, WorldStreamSocket, RunPhase,
 } from 'cortico/core/types.ts';
 import type { ConfigGroup } from 'cortico/core/config-schema.ts';
-import { adaptationSummary, assertRegularTree, buildPack, dirSize, editPack, installPack, packDetail, scanModel, type ScanSummary } from './pipeline.ts';
+import { adaptationSummary, assertRegularTree, buildPack, dirSize, editPack, installPack, packDetail, refreshPackRuntime, scanModel, setPackEmotionEffect, type ScanSummary } from './pipeline.ts';
 import { canonicalPath, containsPath } from './paths.ts';
-import { readPackManifest } from './pack-manifest.ts';
+import { parseFigureJson, readPackManifest } from './pack-manifest.ts';
 import { PackImporter, filesFromBundle, filesFromZip, thumbOf } from './import.ts';
 import { captureCover, captureWardrobeThumbnails, type CoverResult } from './cover.ts';
 import { readClipboardPaths } from './clipboard.ts';
@@ -31,9 +31,11 @@ import {ManualSessions,LIBRARY,writeNativePack} from './manual.ts';
 import {findModels,inspectNative,nativeConfig} from '../workbench/tools/native-catalog.mjs';
 import {packFingerprint} from './pack-fingerprint.ts';
 import { qualityPolicy } from '../workbench/pack/backends/render-quality.js';
+import { EMOTION_EFFECTS, EMOTION_EFFECT_SIZES, normalizeEmotionEffect, normalizeEmotionEffectSize } from '../workbench/tools/emotion-effect.mjs';
 import {previewSize} from './manual-preview.ts';
 import {wardrobeConfig} from '../workbench/pack/backends/wardrobe.js';
 import {GEAR_THEMES,GEAR_PARTICLES,UI_MATERIALS,UI_MODES,UI_CORNERS,UI_GLOWS,UI_STYLES,UI_BUTTON_FILLS,normalizeAppearance} from './gear-appearance.mjs';
+import { FigureVoice, type VoiceConfig } from './voice.ts';
 import {
   CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
   coreState, ensureCore,
@@ -41,11 +43,12 @@ import {
 
 const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url));
 const WORKBENCH_DIR = join(PACKAGE_DIR, 'workbench');
+const RUNTIME_DIR = join(WORKBENCH_DIR, 'pack');
 const VERSION = JSON.parse(await readFile(join(PACKAGE_DIR, 'package.json'), 'utf8')).version as string;
 // Bump only when the notice changes, independently of the package version.
 const NOTICE_REVISION = 1;
 
-export interface Live2dSection {
+export interface Live2dSection extends VoiceConfig {
   enabled: boolean;
   modelDir?: string;
   figuresDir?: string;
@@ -58,6 +61,8 @@ export interface Live2dSection {
   texture?: string;
   quality?: string;
   previewSize?: string;
+  emotionEffect?: string;
+  emotionEffectSize?: string;
   gearTheme?: string;
   particleEffect?: string;
   uiMaterial?: string;
@@ -72,6 +77,7 @@ export interface Live2dSection {
   assistGear?: string;
   assistDepth?: string;
   assistAuto?: boolean;
+  assistConfirmFallback?: boolean;
   modelRoots?: string;
 }
 
@@ -140,6 +146,9 @@ export class Live2dWorld implements World {
     getConfig: () => Live2dSection;
     persist: (patch: Record<string, unknown>) => void;
     dataDir: string;
+    botDir?: string;
+    secret?: (name: string) => string;
+    storeSecret?: (name: string, value: string) => void;
   };
   private state: Persisted = { modelDir: '' };
   private steps = { scan: { ...IDLE }, build: { ...IDLE }, install: { ...IDLE } };
@@ -156,10 +165,17 @@ export class Live2dWorld implements World {
   private host: WorldHost | null = null;
   private automation: FigureAutomation;
   private manual: ManualSessions;
+  private voice: FigureVoice;
   private pendingImages?: PendingImages;
+  private cropCapture?: { id: string; controller: AbortController; task: Promise<{image:string|null}> };
 
   constructor(opts: Live2dWorld['opts']) {
     this.opts = opts;
+    this.voice = new FigureVoice({
+      config: opts.getConfig, persist: opts.persist, botDir: opts.botDir,
+      secret: opts.secret, storeSecret: opts.storeSecret,
+      figures: join(opts.dataDir, 'figures'),
+    });
     this.manual = new ManualSessions(this.workRoot(),WORKBENCH_DIR);
     this.automation = new FigureAutomation({
       getConfig: () => this.opts.getConfig(), getHost: () => this.host, dataDir: opts.dataDir,
@@ -175,7 +191,17 @@ export class Live2dWorld implements World {
   }
 
   tools(): ToolDef[] {
-    return this.automation.tools() as ToolDef[];
+    const tools = this.automation.tools() as ToolDef[];
+    const speak = this.voice.syncTool();
+    return speak ? [...tools, speak] : tools;
+  }
+
+  outputTap() {
+    return this.voice.outputTap();
+  }
+
+  onRunPhase(phase: RunPhase) {
+    this.voice.onRunPhase(phase);
   }
 
   async start(_host: WorldHost): Promise<void> {
@@ -201,10 +227,15 @@ export class Live2dWorld implements World {
     this.coreReady = (await coreState(this.coreDir())).ok;
     await this.automation.start();
     await this.importer.pruneAutomationInputs(join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
+    await this.voice.start(_host);
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
+    const cropCapture = this.cropCapture;
+    cropCapture?.controller.abort();
+    await cropCapture?.task.catch(() => {});
+    await this.voice.stop();
     this.pendingImages?.controller.abort();
     await this.activeAction?.catch(() => {});
     await this.automation.stop();
@@ -223,7 +254,7 @@ export class Live2dWorld implements World {
       for (const e of await readdir(dir, { withFileTypes: true })) {
         if (!e.isDirectory()) continue;
         try {
-          const m = JSON.parse(await readFile(join(dir, e.name, 'figure.json'), 'utf8'));
+          const m = parseFigureJson(await readFile(join(dir, e.name, 'figure.json'), 'utf8'));
           out.set(String(m.id ?? e.name), String(m.version ?? ''));
         } catch { /* 不是模型包 */ }
       }
@@ -237,7 +268,6 @@ export class Live2dWorld implements World {
     return {
       label: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
       badges: [
-        { label: zh ? '版本' : 'Version', value: `v${VERSION}`, tone: 'plain' },
         { label: zh ? '模型' : 'Model', value: s.scan ? `${s.scan.params}/${s.scan.roles}` : '—', tone: s.scan ? 'on' : 'plain' },
         { label: zh ? '包' : 'Pack', value: s.build ? `${(s.build.bytes / 1048576).toFixed(1)}M` : '—', tone: s.build ? 'on' : 'plain' },
         ...(s.build?.words ? [{ label: zh ? '词' : 'Words', value: s.build.words, tone: 'plain' as const }] : []),
@@ -259,10 +289,12 @@ export class Live2dWorld implements World {
       ],
       panels: [{
         id: 'workbench',
-        title: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
+        title: zh ? '工作台' : 'Workbench',
         description: zh ? '拖入、粘贴或选择文件夹 / ZIP，一键打包' : 'Drop, paste or choose a folder / ZIP, then pack',
       }, {id:'settings',title:zh?'模型设置':'Model settings',description:zh?'画质、适配与安装':'Quality, adaptation and installation'},
-      {id:'appearance',title:zh?'外观':'Appearance',description:zh?'配色、材质与光效':'Colour, materials and light'}],
+      {id:'appearance',title:zh?'外观':'Appearance',description:zh?'配色、材质与光效':'Colour, materials and light'},
+       {id:'effects',title:zh?'特效':'Effects',description:zh?'预览并选择桌宠特效':'Preview and choose desktop pet effects'},
+      {id:'voice',title:zh?'文字转语音':'Text to speech',description:zh?'配置语音提供商、模型和音色':'Configure speech providers, models and voices'}],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
       stream: (panel, socket) => {
         if (panel !== 'workbench') return;
@@ -276,8 +308,17 @@ export class Live2dWorld implements World {
   }
 
   private async invoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'settings', 'assistState', 'manualPreview', 'manualClose', 'manualKeepAlive', 'manualSkipImages', 'skipImportCover'].includes(method);
+    const readOnly = ['state', 'list', 'license', 'core', 'detail', 'coverPreview', 'cropPreview', 'settings', 'assistState', 'manualPreview', 'manualClose', 'manualKeepAlive', 'manualSkipImages', 'skipImportCover'].includes(method);
     if (this.stopping) throw new Error('扩展正在停止');
+    if (panel === 'voice' || panel === 'settings') {
+      if (method === 'voiceState') return this.voice.state();
+      if (panel === 'voice' && method === 'voiceSave') return this.voice.save(args);
+      if (panel === 'voice' && method === 'voiceTest') return this.voice.test(args);
+      if (panel === 'voice' && method === 'voiceRemove') return this.voice.remove(args[0]);
+      if (method === 'voiceControls') return this.voice.controls(args[0]);
+      if (method === 'voiceAudition') return this.voice.audition();
+      if (method === 'voiceStop') return this.voice.stopAudition();
+    }
     if (readOnly) return this.dispatch(panel, method, args);
     if (panel === 'workbench' && method === 'assistApprove') {
       await this.automation.approve(String(args[0] || ''));
@@ -295,7 +336,7 @@ export class Live2dWorld implements World {
   }
 
   private async dispatch(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    if (panel !== 'workbench' && !(['appearance','settings'].includes(panel) && ['settings','state'].includes(method))) throw new Error(`未知面板：${panel}`);
+    if (panel !== 'workbench' && !(['appearance','settings','effects','voice'].includes(panel) && ['settings','state'].includes(method))) throw new Error(`未知面板：${panel}`);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();
 
     if (method === 'state') {
@@ -303,9 +344,11 @@ export class Live2dWorld implements World {
     }
     if (method === 'settings') {
       const cfg = this.opts.getConfig();
-      return { cover: cfg.cover !== false, texture: cfg.texture || 'original', quality: qualityPolicy(cfg).mode, previewSize:String(previewSize(cfg.previewSize)), ...normalizeAppearance(cfg),clean: Boolean(cfg.clean),
+      return { cover: cfg.cover !== false, texture: cfg.texture || 'original', quality: qualityPolicy(cfg).mode, previewSize:String(previewSize(cfg.previewSize)),
+        emotionEffect: normalizeEmotionEffect(cfg.emotionEffect), emotionEffectSize: normalizeEmotionEffectSize(cfg.emotionEffectSize),
+        ...normalizeAppearance(cfg), clean: Boolean(cfg.clean),
         autoDelete: Boolean(cfg.autoDelete), figuresDir: cfg.figuresDir || '',
-        adaptationMode: adaptationMode(cfg), assistMotions: aiEnabled(cfg), assistGear: automationMode(cfg).gear, assistDepth: automationMode(cfg).configuredDepth, assistAuto: cfg.assistAuto === true, modelRoots: cfg.modelRoots || '' };
+        adaptationMode: adaptationMode(cfg), assistMotions: aiEnabled(cfg), assistGear: automationMode(cfg).gear, assistDepth: automationMode(cfg).configuredDepth, assistAuto: automationMode(cfg).automatic, assistConfirmFallback: cfg.assistConfirmFallback === true, modelRoots: cfg.modelRoots || '' };
     }
     if (method === 'manualPreview') return this.manual.preview(String(args[0]),args[1]);
     if (method === 'manualClose') { await this.manual.close(String(args[0])); return {ok:true}; }
@@ -404,7 +447,7 @@ export class Live2dWorld implements World {
       let committed = false;
       try {
         const packDir = await installPack(source, parent);
-        const manifest = JSON.parse(await readFile(join(packDir, 'figure.json'), 'utf8'));
+        const manifest = parseFigureJson(await readFile(join(packDir, 'figure.json'), 'utf8'));
         const at = Date.now();
         const record = {
           id: `${manifest.id}-${at}-${randomUUID().slice(0, 8)}`,
@@ -531,10 +574,15 @@ export class Live2dWorld implements World {
       await this.notifyImported(r);
       return r;
     }
-    if (method === 'detail') {
+    if (method === 'detail' || method === 'coverPreview' || method === 'cropPreview') {
       const id = String(args[0] ?? '');
       const rec = (this.state.builds ?? []).find((b) => b.id === id);
       if (!rec || !existsSync(rec.packDir)) throw new Error('没有这份打包产物');
+      if (method === 'coverPreview') {
+        const manifest = parseFigureJson(await readFile(join(rec.packDir, 'figure.json'), 'utf8'));
+        return {image: await thumbOf(rec.packDir, manifest.thumb)};
+      }
+      if (method === 'cropPreview') return this.previewCrop(rec);
       return packDetail(rec.packDir);
     }
     if (method === 'edit') {
@@ -556,6 +604,26 @@ export class Live2dWorld implements World {
       return { state: this.snapshot(), builds: await this.listBuilds() };
     }
     throw new Error(`未知方法：${panel}.${method}`);
+  }
+
+  private async previewCrop(record: BuildRecord) {
+    const detail = await packDetail(record.packDir);
+    if (!detail.crop) return {image:null};
+    const cover = await thumbOf(record.packDir, 'thumb/cover.png');
+    if (cover) return {image:cover};
+    if (!record.manualAvailable || this.stopping) return {image:null};
+    if (this.cropCapture) return this.cropCapture.id === record.id ? this.cropCapture.task : {image:null};
+    const controller = new AbortController();
+    const task = (async () => {
+      await assertRegularTree(record.packDir);
+      const entry = await readFile(join(record.packDir, 'figure.js'));
+      if (!entry.equals(await readFile(join(RUNTIME_DIR, 'figure.js')))) return {image:null};
+      const result = await captureCover(record.packDir, WORKBENCH_DIR, 14000, [], controller.signal, {imageOnly:true});
+      return {image:result.image ?? null};
+    })();
+    this.cropCapture = {id:record.id, controller, task};
+    try { return await task; }
+    finally { if (this.cropCapture?.task === task) this.cropCapture = undefined; }
   }
 
   private async doScan(dir: string): Promise<unknown> {
@@ -623,7 +691,9 @@ export class Live2dWorld implements World {
       const render = qualityPolicy(this.opts.getConfig());
       const maxTexture = render.textureLimit;
       const clean = this.opts.getConfig().clean === true;
-      let packDir = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+      const emotionEffect = normalizeEmotionEffect(this.opts.getConfig().emotionEffect);
+      const emotionEffectSize = normalizeEmotionEffectSize(this.opts.getConfig().emotionEffectSize);
+      let packDir = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, maxTexture, clean, emotionEffect, emotionEffectSize, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
       temporary.add(packDir);
       push(`初版包就绪 · ${Date.now() - t0} ms`);
 
@@ -642,14 +712,14 @@ export class Live2dWorld implements World {
       let finalDir = packDir;
       if (shot.fit) {
         t0 = Date.now();
-        const rebuilt = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, fit: shot.fit, maxTexture, clean, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+        const rebuilt = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, fit: shot.fit, maxTexture, clean, emotionEffect, emotionEffectSize, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
         temporary.add(rebuilt);
         // 封面跟着走
         const thumb = join(packDir, 'thumb');
         if (existsSync(thumb)) {
           await cp(thumb, join(rebuilt, 'thumb'), { recursive: true });
           const file = join(rebuilt, 'figure.json');
-          const manifest = JSON.parse(await readFile(file, 'utf8'));
+          const manifest = parseFigureJson(await readFile(file, 'utf8'));
           manifest.thumb = 'thumb/cover.png';
           if (Array.isArray(manifest.axes) && manifest.axes[0]?.options?.[0]) {
             manifest.axes[0].options[0].thumb = 'thumb/opt-model.png';
@@ -743,11 +813,14 @@ export class Live2dWorld implements World {
       : this.state.build;
     if (!chosen || !existsSync(chosen.packDir)) throw new Error('先打包，再安装');
     this.steps.install = { phase: 'loading', hint: '安装中…' };
+    let resumeVoice: (() => void) | undefined;
     try {
       const figures = await this.installDirectory();
+      resumeVoice = await this.voice.suspend();
+      const { emotionEffect, emotionEffectSize } = this.opts.getConfig();
       const target = await installPack(chosen.packDir, figures, {
         backupRoot: join(dirname(figures), 'figure-backups'),
-        keep: 2,
+        keep: 2, prepare: pending => prepareFigureRuntime(pending, emotionEffect, emotionEffectSize),
         signal, beforeSwap,
       });
       this.steps.install = { phase: 'done', hint: target, at: Date.now() };
@@ -769,6 +842,8 @@ export class Live2dWorld implements World {
       this.steps.install = { phase: 'error', hint: errText(e) };
       this.say(`安装失败 · ${errText(e)}`);
       throw e;
+    } finally {
+      resumeVoice?.();
     }
   }
 
@@ -829,14 +904,16 @@ export class Live2dWorld implements World {
     let committed=false;
     try{
       await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
-      for(const file of ['live2d.js','native-actions.js','wardrobe.js','wardrobe-slots.js','render-config.js','render-quality.js','role-values.js','soullink.js','bongo.js'])await cp(join(WORKBENCH_DIR,'pack','backends',file),join(target,'backends',file));
+      await refreshPackRuntime(RUNTIME_DIR, target);
+      const { emotionEffect, emotionEffectSize } = this.opts.getConfig();
+      await setPackEmotionEffect(target, emotionEffect, emotionEffectSize);
       await writeNativePack(target,session.catalog,bindings,false,wardrobe);
       const warn = await this.captureWardrobe(target, undefined, controller.signal);
       await readPackManifest(target);
       if(await packFingerprint(session.pack)!==session.hash)throw Error('形象包已变化，请重新打开编辑');
       const old=this.state.builds?.find(b=>b.id===session.buildId);if(!old)throw Error('原打包产物已移除');
       if (old.packDir !== session.pack) throw Error('形象包已变化，请重新打开编辑');
-      const rec={...old,packDir:target,bytes:await dirSize(target),words:JSON.parse(await readFile(join(target,'figure.json'),'utf8')).vocab.length,at:Date.now()};
+      const rec={...old,packDir:target,bytes:await dirSize(target),words:parseFigureJson(await readFile(join(target,'figure.json'),'utf8')).vocab.length,at:Date.now()};
       const previous={build:this.state.build,builds:this.state.builds};
       this.state.builds=(this.state.builds||[]).map(b=>b.id===old.id?rec:b);this.state.build=rec;
       try{await this.save();}catch(e){Object.assign(this.state,previous);throw e;}
@@ -865,6 +942,7 @@ export class Live2dWorld implements World {
 
   private async queueAnalysis(result: {token:string;models?:Array<{dir:string}>;packs?:Array<{dir:string}>},repeat=false) {
     if(!aiEnabled(this.opts.getConfig())||!result.token)return {queued:false};
+    if (!result.models?.length && !result.packs?.length) return { queued: false };
     const paths=await this.importer.preserveForAutomation(result.token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
     return this.automation.imported(result,(_token:string,dir:string)=>{
       const source=paths.get(dir),file=this.importer.modelFile(result.token,dir);
@@ -904,7 +982,7 @@ export class Live2dWorld implements World {
       if (model.kind === 'pack') {
         const figures=await this.installDirectory();
         const target = await installPack(model.dir, figures, {backupRoot:join(dirname(figures),'figure-backups'),keep:2,signal,expectedFingerprint:fingerprint,beforeSwap});
-        const manifest = JSON.parse(await readFile(join(target,'figure.json'),'utf8'));
+        const manifest = parseFigureJson(await readFile(join(target,'figure.json'),'utf8'));
         this.state.install = {target,at:Date.now()};
         let warning;
         try { await this.save(); } catch (error) { warning = `形象已安装，但安装记录保存失败：${errText(error)}`; this.say(`! ${warning}`); }
@@ -915,7 +993,7 @@ export class Live2dWorld implements World {
       if (!aiEnabled(this.opts.getConfig())) throw new Error('AI 自动适配已关闭，打包产物保留，尚未安装');
       const record = this.state.builds?.find(item => item.id === built.buildId);
       if (!record) throw new Error('打包未产出可安装模型');
-      const manifest = JSON.parse(await readFile(join(record.packDir,'figure.json'),'utf8'));
+      const manifest = parseFigureJson(await readFile(join(record.packDir,'figure.json'),'utf8'));
       signal?.throwIfAborted();
       const installed = await this.doInstall(model.dir,record.id,signal,beforeSwap);
       const warning = [built.warn, installed.warn].filter(Boolean).join('。');
@@ -935,18 +1013,26 @@ export class Live2dWorld implements World {
       let nameZh = '';
       let nameEn = '';
       let adaptation;
-      try { adaptation = adaptationSummary(JSON.parse(await readFile(join(b.packDir, 'build.json'), 'utf8'))); }
+      let kind: 'live2d' | 'bongocat' | undefined;
+      try {
+        const report = parseFigureJson(await readFile(join(b.packDir, 'build.json'), 'utf8'));
+        kind = report.sourceFormat === 'bongocat' ? 'bongocat'
+          : report.tool === 'cortico-live2d-pack' ? 'live2d' : undefined;
+        adaptation = adaptationSummary(report);
+      }
       catch { /* older or imported packs may not include a build report */ }
       try {
-        const m = JSON.parse(await readFile(join(b.packDir, 'figure.json'), 'utf8'));
+        const m = parseFigureJson(await readFile(join(b.packDir, 'figure.json'), 'utf8'));
         if (!thumb) thumb = await thumbOf(b.packDir, m.thumb) ?? '';
         packId = typeof m.id === 'string' ? m.id : '';
         nameZh = typeof m.name?.zh === 'string' ? m.name.zh : '';
         nameEn = typeof m.name?.en === 'string' ? m.name.en : '';
+        if (!kind && (m.sourceFormat === 'live2d' || m.sourceFormat === 'bongocat')) kind = m.sourceFormat;
+        if (!kind && existsSync(join(b.packDir, 'sdk', CORE_FILE))) kind = 'live2d';
       } catch { /* 读不到就用 id */ }
       out.push({
         id: b.id, packId, nameZh, nameEn, bytes: b.bytes, words: b.words, cover: b.cover, fit: b.fit, at: b.at,
-        exists: true, thumb,
+        exists: true, thumb, kind,
         adaptation, manualAvailable: b.manualAvailable === true && existsSync(join(b.packDir,LIBRARY)),
       });
     }
@@ -1145,13 +1231,42 @@ async function resolveFigures(cfg: Live2dSection, dataDir: string): Promise<stri
   return fallback;
 }
 
+async function prepareFigureRuntime(dir: string, emotionEffect: unknown, emotionEffectSize: unknown) {
+  // Only refresh packs generated by this converter with the same body entry.
+  const owned = await readFile(join(dir, 'build.json'), 'utf8').then(parseFigureJson).catch(() => null);
+  if (owned?.tool !== 'cortico-live2d-pack' || !existsSync(join(dir, 'backends', 'live2d.js'))) return;
+  const entry = await readFile(join(dir, 'figure.js')).catch(() => null);
+  if (!entry?.equals(await readFile(join(RUNTIME_DIR, 'figure.js')))) return;
+  const voice = await readFile(join(dir, 'figure-voice.json'), 'utf8').then(parseFigureJson).catch(() => null);
+  const cropConfig = join('backends', 'crop-config.js');
+  const installedCrop = await readFile(join(dir, cropConfig)).catch(() => null);
+  const effectsAdapter = join('backends', 'emotion-effects', 'index.js');
+  const installedEffects = await readFile(join(dir, effectsAdapter)).catch(() => null);
+  const voiceBackend = join('backends', 'voice-playback.js');
+  const installedVoice = await readFile(join(dir, voiceBackend)).catch(() => null);
+  const bodyBackend = join('backends', 'live2d.js');
+  const installedBody = await readFile(join(dir, bodyBackend)).catch(() => null);
+  const wardrobeBackend = join('backends', 'wardrobe.js');
+  const installedWardrobe = await readFile(join(dir, wardrobeBackend)).catch(() => null);
+  if (voice?.version !== 3 || !installedEffects?.equals(await readFile(join(RUNTIME_DIR, effectsAdapter)))
+      || !existsSync(join(dir, 'backends', 'body-crop.js'))
+      || !existsSync(join(dir, 'backends', 'gaze-config.js'))
+      || !installedVoice?.equals(await readFile(join(RUNTIME_DIR, voiceBackend)))
+      || !installedCrop?.equals(await readFile(join(RUNTIME_DIR, cropConfig)))
+      || !installedBody?.equals(await readFile(join(RUNTIME_DIR, bodyBackend)))
+      || !installedWardrobe?.equals(await readFile(join(RUNTIME_DIR, wardrobeBackend)))) {
+    await refreshPackRuntime(RUNTIME_DIR, dir);
+  }
+  await setPackEmotionEffect(dir, emotionEffect, emotionEffectSize);
+}
+
 function CONFIG_GROUP(zh: boolean): ConfigGroup {
   return {
     id: 'figure',
     owner: 'world:figure',
     schema: {
       type: 'object',
-      title: zh ? 'Live2D 模型一键安装' : 'Live2D One-Click Install',
+      title: zh ? '通用配置' : 'General configuration',
       description: zh
         ? '面板里选目录、打包、安装；这里只放高级项。'
         : 'Use the panel for folder, pack and install; this tab keeps advanced options.',
@@ -1164,6 +1279,8 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
         },
         'worlds.figure.quality': {type:'string',enum:['economy','balanced','high','original'],title:zh?'画质':'Quality',description:zh?'流畅／标准／高清／原图；原图不设软件精度上限，仅受设备能力限制':'Smooth / Standard / HD / Original; Original has no software resolution cap, subject to device limits','x-hot':true},
         'worlds.figure.previewSize': {type:'string',enum:['256','512','1024'],title:zh?'预览精度':'Preview resolution',description:zh?'仅用于人工对照图，默认 512；正式打包画质独立':'Manual comparison images only; defaults to 512, independent of pack quality','x-hot':true},
+        'worlds.figure.emotionEffect': {type:'string',enum:[...EMOTION_EFFECTS],title:zh?'桌宠特效':'Pet effects','x-hot':true},
+        'worlds.figure.emotionEffectSize': {type:'string',enum:[...EMOTION_EFFECT_SIZES],title:zh?'特效大小':'Effect size',description:zh?'仅用于 Figure 自带的特效。':'Applies to Figure’s own effects.','x-hot':true},
         'worlds.figure.gearTheme': {type:'string',enum:GEAR_THEMES.map(t=>t.id),title:zh?'主题配色':'Theme colour','x-hot':true},
         'worlds.figure.particleEffect': {type:'string',enum:GEAR_PARTICLES.map(p=>p.id),title:zh?'粒子效果':'Particle effect','x-hot':true},
         ...Object.fromEntries([
@@ -1203,7 +1320,8 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
         'worlds.figure.assistMotions': {type:'boolean',title:zh?'AI 自动适配':'AI action mapping',description:zh?'让 Coo 分析原生动作、生成方案并协助安装':'Let Coo inspect native actions, prepare a proposal and install it','x-hot':true},
         'worlds.figure.assistGear': {type:'string',enum:['auto','text','image'],title:zh?'分析方式':'Analysis mode','x-hot':true},
         'worlds.figure.assistDepth': {type:'string',enum:['quick','standard','deep'],title:zh?'适配深度':'Adaptation depth',description:zh?'仅文本＋图片时生效：基础取样、针对性补查或映射对照复核':'Only active with text + images: basic sampling, targeted inspection or mapping comparison','x-hot':true},
-        'worlds.figure.assistAuto': {type:'boolean',title:zh?'自动安装':'Automatic installation',description:zh?'满足安装条件后自动执行；需要确认时暂停':'Install confident mappings directly; keep generic behavior for uncertain actions','x-hot':true},
+        'worlds.figure.assistAuto': {type:'boolean',title:zh?'自动安装':'Automatic installation',description:zh?'满足安装条件后自动执行；需要确认时暂停':'Install when requirements are met; pause for confirmation when needed','x-hot':true},
+        'worlds.figure.assistConfirmFallback': {type:'boolean',title:zh?'降级前确认':'Confirm fallback',description:zh?'需要沿用通用表现时先确认，默认直接继续':'Ask before keeping generic behavior. Off by default.','x-hot':true},
         'worlds.figure.modelRoots': {type:'string',title:zh?'模型搜索目录':'Model search folders',description:zh?'每行一个目录，仅在这些目录和最近使用的模型目录内按名字查找':'One folder per line; name searches stay within these and recent model folders','x-hot':true},
       },
     },

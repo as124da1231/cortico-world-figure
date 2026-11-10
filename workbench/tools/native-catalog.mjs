@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {createReadStream} from 'node:fs';
 import {lstat,readFile,readdir,realpath} from 'node:fs/promises';
 import {basename,dirname,isAbsolute,join,relative,resolve,sep} from 'node:path';
+import {resolveModelAsset} from './model-assets.mjs';
 import {compileCurve} from '../pack/backends/native-actions.js';
 
 export const FACE_WORDS=['neutral','happy','wink','love','shy','surprised','angry','sad','sleepy','thinking','smug','pout','worried','determined','flustered','scared','excited','cry','confused'];
@@ -147,7 +148,11 @@ export async function inspectNative(model,{signal}={}){
   try{
    const matches=[...discovered].filter(p=>basename(p).toLowerCase()===basename(rel).toLowerCase());
    const located=!rel.includes('/')&&matches.length===1?matches[0]:rel;
-   const file=await localFile(root,located),canonical=await realpath(file),key=process.platform==='win32'?canonical.toLowerCase():canonical;
+   const file=await localFile(root,located).catch(error=>{
+    const resolved=error.code==='ENOENT'?resolveModelAsset(root,located,{allowBasename:false,max:4*1048576}):null;
+    if(!resolved)throw error;
+    return resolved;
+   }),canonical=await realpath(file),key=process.platform==='win32'?canonical.toLowerCase():canonical;
    if(seenFiles.has(key))continue;seenFiles.add(key);
    const raw=await readFile(file),json=JSON.parse(raw.toString('utf8').replace(/^\uFEFF/,''));
    const kind=/\.exp3\.json$/i.test(rel)?'expression':'motion';
@@ -173,17 +178,20 @@ export async function inspectNative(model,{signal}={}){
   const opposite=resources.filter(b=>reversePose(a,b));
   if(opposite.length===1)a.release=opposite[0].id;
  }
- const assets=[];
- for(const name of [refs.Moc,refs.Physics,refs.Pose,refs.DisplayInfo,...(refs.Textures||[])].filter(v=>typeof v==='string')){
+ const assets=[],missingRequiredAssets=[];
+ const moc=refs.Moc ?? refs.MocFile,textures=Array.isArray(refs.Textures)?refs.Textures:[];
+ const required=new Set([moc,...textures]);
+ for(const name of [moc,refs.Physics,refs.Pose,refs.DisplayInfo,...textures].filter(v=>typeof v==='string')){
   signal?.throwIfAborted();
   try{
-   const file=await localFile(root,name,512*1048576),hash=createHash('sha256');
+   const file=resolveModelAsset(root,name,{max:512*1048576}),hash=createHash('sha256');
+   if(!file)throw Error('找不到模型资源');
    for await (const chunk of createReadStream(file,{signal})) hash.update(chunk);
    assets.push([name,hash.digest('hex')]);
-  }catch(e){signal?.throwIfAborted();assets.push([name,'missing']);}
+  }catch(e){signal?.throwIfAborted();assets.push([name,'missing']);if(required.has(name)&&!missingRequiredAssets.includes(name))missingRequiredAssets.push(name);}
  }
  const fingerprint=digest(JSON.stringify({model:await readFile(await localFile(root,model.file),'utf8'),assets,metadataHashes,resources:resources.map(r=>[r.file,r.hash])}));
- return {model,fingerprint,resources,warnings,truncated:scanned>3000||resources.length>=256};
+ return {model,fingerprint,resources,warnings,missingRequiredAssets,truncated:scanned>3000||resources.length>=256};
 }
 
 export function validateBindings(catalog,bindings){
