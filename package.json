@@ -46,7 +46,7 @@
         "description": "Import Live2D and BongoCat models, generate covers, and install them into Coo."
       }
     },
-    "webUiClient": "dist/webui-5e184a0a1808.js",
+    "webUiClient": "dist/webui-3c4d0c890e11.js",
     "webUiStyle": "dist/webui-dbbbc28303fa.css",
     "describe": "describe.json"
   },

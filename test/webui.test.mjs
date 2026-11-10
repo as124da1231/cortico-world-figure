@@ -389,7 +389,7 @@ test('the version opens a bounded notice and restores focus after consent', asyn
   version.click();button('我已知晓，不再分发').click();await tick();
   assert(version.classList.contains('ack'));assert.equal(version.title,'查看须知');
   assert.equal(document.activeElement,version);assert.equal(root.querySelector('dialog'),null);
-  version.click();assert.match(root.querySelector('dialog').textContent,/Live2D Cubism Core/);
+  version.click();assert.match(root.querySelector('dialog').textContent,/Cubism Core、Framework 和着色器/);
   assert.equal(button('我已知晓，不再分发').hidden,true);
   assert.equal(calls.filter(c=>c.method==='noticeAccept').length,1);
 });

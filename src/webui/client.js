@@ -6,8 +6,8 @@
  * 原始模型打包、现成形象包入库，均保留卡片上的安装操作。
  */
 const NOTICE_TEXT = {
-  zh: '生成的形象包可能包含 Live2D Cubism Core，仅供本机使用。请保留模型、贴图和第三方组件各自的许可。',
-  en: 'Generated figure packs may include Live2D Cubism Core for local use. Keep the separate licenses for models, textures and third-party components.',
+  zh: 'Live2D 运行组件从官方来源获取并保存在本机。生成的 Live2D 形象包包含 Cubism Core、Framework 和着色器，仅供本机使用。请保留模型、贴图和第三方组件各自的许可。',
+  en: 'Live2D runtime components are obtained from official sources and stored locally. Generated Live2D figure packs include Cubism Core, Framework and shaders for local use only. Keep the licenses for models, textures and third-party components.',
 };
 function figureProviderChrome(root) {
   const chrome = root.previousElementSibling;
