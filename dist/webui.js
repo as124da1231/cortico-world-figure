@@ -1926,7 +1926,7 @@ export default {
         }
         const state = { dir: '', busy: false, builds: [], installed: null, figuresDir: '' };
 
-        // ---- Live2D 核心组件：不随扩展分发，同意许可后从官方地址取 ----
+        // ---- Live2D 运行组件：Core 和 Framework 共用已有许可流程 ----
         const coreCard = el('div', 'l2d-license l2d-license-core');
         const coreTitle = el('strong', 'l2d-license-title', 'Live2D');
         const coreText = el('span');
@@ -1965,15 +1965,15 @@ export default {
           if (coreReady()) {
             const kb = Math.round((core.bytes || 0) / 1024);
             coreText.textContent = t(
-              `核心已就绪 · ${core.version || ''} · ${kb} KB · 已校验`,
-              `Core ready · ${core.version || ''} · ${kb} KB · verified`,
+              `运行组件已就绪 · ${core.version || ''} · ${kb} KB · 已校验`,
+              `Runtime ready · ${core.version || ''} · ${kb} KB · verified`,
             );
             coreGet.hidden = true;
           } else {
-            coreText.textContent = t(
-              '本扩展不附带 Live2D 核心组件。点「同意并获取」后，从 Live2D Inc. 官方服务器取同一份文件并校验 SHA-256；核心不随扩展分发。',
-              'This extension does not ship the Live2D core. "Agree & fetch" downloads the same file from Live2D Inc. and verifies its SHA-256.',
-            );
+            coreText.textContent = core.consentAt
+              ? t('已同意许可。首次使用时会自动补齐运行组件，也可在这里重试。', 'License accepted. Missing runtime components are restored on use, or you can retry here.')
+              : t('阅读 Core 和 SDK 许可后，点击「同意并获取」。扩展从 Live2D 官方来源获取组件并校验 SHA-256。', 'Read both licenses, then choose “Agree & fetch” to verify and prepare the runtime from official Live2D sources.');
+            coreGet.textContent = core.consentAt ? t('获取运行组件', 'Get runtime') : t('同意并获取', 'Agree & fetch');
             coreGet.hidden = false;
           }
         }
@@ -1983,13 +1983,15 @@ export default {
           if (state.busy || !flow) return;
           flow.saving = true;
           flow.error.textContent = '';
-          setBusy(true, t('获取核心…', 'Fetching core…'));
+          setBusy(true, t('准备 Live2D 运行组件…', 'Preparing Live2D runtime…'));
           try {
-            core = await ctx.invoke('coreAccept', [true]);
+            core = await (core.consentAt ? ctx.invoke('coreRestore', []) : ctx.invoke('coreAccept', [true]));
             paintCore();
-            log.append(t('已获取 Live2D 核心并校验', 'Live2D core fetched and verified'), 'dim');
+            log.append(t('Live2D 运行组件已校验', 'Live2D runtime verified'), 'dim');
           } catch (e) {
-            flow.error.textContent = t('获取失败，可以重试或打开官网。', 'Could not fetch the core. Retry or open the download page. ') + text(e);
+            const status = await ctx.invoke('core', []).catch(() => null);
+            if (status) { core = status; paintCore(); }
+            flow.error.textContent = t('获取失败，可以重试或打开官网。', 'Could not prepare the runtime. Retry or open the download page. ') + text(e);
             log.append('! ' + text(e), 'warn');
           } finally {
             setBusy(false);
@@ -2047,6 +2049,23 @@ export default {
         versionCorner.addEventListener('click', () => openNotice());
         function ensureNotice(resume, needsCore = false) {
           if (notice?.acknowledged && (!needsCore || coreReady())) return true;
+          if (notice?.acknowledged && needsCore && core.consentAt && !state.busy) {
+            setBusy(true, t('准备 Live2D 运行组件…', 'Preparing Live2D runtime…'));
+            void ctx.invoke('coreRestore', []).then(result => {
+              if (disposed) return;
+              if (result?.ok !== true) throw new Error(t('Live2D 运行组件未就绪', 'Live2D runtime is unavailable'));
+              core = result;
+              setBusy(false);
+              paintCore();
+              resume();
+            }).catch(error => {
+              if (disposed) return;
+              setBusy(false);
+              openNotice(resume, needsCore);
+              if (noticeDialog) noticeDialog.error.textContent = text(error);
+            });
+            return false;
+          }
           openNotice(resume, needsCore);
           return false;
         }
@@ -2346,7 +2365,7 @@ export default {
             for (const [method,label] of review ? [['assistReject',t('暂不安装','Not now')],['assistApprove',plan.status==='approved'?t('重试安装','Retry installation'):t('同意安装','Approve & install')]] : []) {
               const button = el('button','l2d-btn sm'+(method==='assistApprove'?' primary':''),label);
               button.addEventListener('click',async()=>{
-                if(state.busy || method === 'assistApprove' && !ensureNotice(() => button.click()))return;
+                if(state.busy || method === 'assistApprove' && !ensureNotice(() => button.click(), plan.needsRuntime === true))return;
                 setBusy(true,t('处理方案…','Processing proposal…'));
                 try { await ctx.invoke(method,[plan.id]); await refresh(); }
                 catch(error){reportResult(t('处理方案失败，可以重试。','Could not process the proposal. Try again.'),[text(error)],true);log.append(text(error),'bad');await refresh().catch(()=>{});}
@@ -2424,7 +2443,7 @@ export default {
           const bits = [];
           if (state.installed?.target) bits.push(t('已安装 ', 'Installed ') + state.installed.target.split(/[\\/]/).pop());
           else if (notice && !notice.acknowledged) bits.push(t('首次使用需确认须知','Read the notice before first use'));
-          else if (notice && !coreReady()) bits.push(t('Live2D 核心待获取','Live2D core is missing'));
+          else if (notice && !coreReady()) bits.push(t('Live2D 运行组件待获取','Live2D runtime is missing'));
           if (!bits.length) bits.push(t('就绪', 'Ready'));
           say(bits.join('　'));
           target.textContent = state.figuresDir ? t('安装到 ', 'Installs to ') + state.figuresDir : '';
@@ -2622,7 +2641,7 @@ export default {
         let bindingEditor = null;
         let bindingOpening = false;
         async function openBindings(method,args,onSaved) {
-          if(state.busy || bindingOpening || bindingEditor || !ensureNotice(() => openBindings(method,args,onSaved)))return;
+          if(state.busy || bindingOpening || bindingEditor || !ensureNotice(() => openBindings(method,args,onSaved), method === 'manualOpen'))return;
           bindingOpening=true;
           try{bindingEditor=await openBindingEditor(ctx,method,args,async result=>{onSaved?.(result);await refresh();},()=>{bindingEditor=null;});}
           catch(error){ui.toast(text(error),'bad');}

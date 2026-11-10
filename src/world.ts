@@ -36,10 +36,8 @@ import {previewSize} from './manual-preview.ts';
 import {wardrobeConfig} from '../workbench/pack/backends/wardrobe.js';
 import {GEAR_THEMES,GEAR_PARTICLES,UI_MATERIALS,UI_MODES,UI_CORNERS,UI_GLOWS,UI_STYLES,UI_BUTTON_FILLS,normalizeAppearance} from './gear-appearance.mjs';
 import { FigureVoice, type VoiceConfig } from './voice.ts';
-import {
-  CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES,
-  coreState, ensureCore,
-} from './core.ts';
+import { CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES } from './core.ts';
+import { cubismRuntimeState, ensureCubismRuntime, restoreCubismFramework } from './cubism-runtime.ts';
 
 const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url));
 const WORKBENCH_DIR = join(PACKAGE_DIR, 'workbench');
@@ -116,7 +114,7 @@ interface Persisted {
   /** 历史打包，最新在前，手动清理前保留。 */
   builds?: BuildRecord[];
   install?: { target: string; at: number; buildId?: string };
-  /** 用户同意 Live2D 许可、并取到核心组件的时间。 */
+  /** 用户同意 Live2D Core / SDK 许可的时间。 */
   coreConsentAt?: number;
   distributionNotice?: { revision: number; at: number };
 }
@@ -158,8 +156,9 @@ export class Live2dWorld implements World {
   private stopping = false;
   private saveQueue: Promise<void> = Promise.resolve();
   private streams = new Set<WorldStreamSocket>();
-  /** 核心组件是否就绪（start 时探一次，取到后更新）。 */
+  /** Live2D 运行组件是否就绪。 */
   private coreReady = false;
+  private readonly cubismPreparation = new Map<string, ReturnType<typeof ensureCubismRuntime>>();
   /** 导入待装清单（zip / 文件夹）。 */
   private importer = new PackImporter();
   private host: WorldHost | null = null;
@@ -224,7 +223,12 @@ export class Live2dWorld implements World {
       const dir = (this.opts.getConfig().modelDir ?? '').trim();
       if (dir) this.state.modelDir = dir;
     }
-    this.coreReady = (await coreState(this.coreDir())).ok;
+    const sdk = this.coreDir();
+    if (this.state.coreConsentAt && !(await cubismRuntimeState(sdk)).ok) {
+      try { await restoreCubismFramework(sdk, await this.previousFrameworkDirs()); }
+      catch (error) { this.say(`! 暂未恢复 Live2D 缓存：${errText(error)}`); }
+    }
+    this.coreReady = (await cubismRuntimeState(sdk)).ok;
     await this.automation.start();
     await this.importer.pruneAutomationInputs(join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
     await this.voice.start(_host);
@@ -280,7 +284,7 @@ export class Live2dWorld implements World {
           : []),
         ...(this.coreReady
           ? []
-          : [{ label: zh ? '核心' : 'Core', value: zh ? '待获取' : 'missing', tone: 'off' as const }]),
+          : [{ label: zh ? '运行组件' : 'Runtime', value: zh ? '待获取' : 'missing', tone: 'off' as const }]),
       ],
       lamps: [
         { label: zh ? '扫描' : 'Scan', state: lamp(this.steps.scan), hint: this.steps.scan.hint },
@@ -467,13 +471,16 @@ export class Live2dWorld implements World {
         if (!committed) await rm(parent, { recursive: true, force: true }).catch(() => {});
       }
     }
-    if (method === 'coreAccept') {
-      if (args[0] !== true) throw new Error('需要先同意 Live2D 许可');
-      this.say('获取 Live2D 核心组件…');
-      await ensureCore(this.coreDir(), (line) => this.say(line));
-      this.state.coreConsentAt = Date.now();
-      this.coreReady = true;
-      await this.save();
+    if (method === 'coreAccept' || method === 'coreRestore') {
+      if (method === 'coreAccept') {
+        if (args[0] !== true) throw new Error('需要先同意 Live2D 许可');
+        if (!this.state.coreConsentAt) {
+          this.state.coreConsentAt = Date.now();
+          try { await this.save(); }
+          catch (error) { delete this.state.coreConsentAt; throw error; }
+        }
+      }
+      await this.prepareCubismRuntime();
       return this.corePayload();
     }
     if (method === 'importStage') {
@@ -655,9 +662,8 @@ export class Live2dWorld implements World {
     opts.signal?.throwIfAborted();
     this.guard(dir);
     this.requireNotice();
-    // Core 不随包分发：没下载/没校验过就不打包，别产出跑不起来的形象包
-    const core = await coreState(this.coreDir());
-    if (!core.ok) throw new Error('缺少 Live2D 核心组件：先在面板上方同意许可并获取');
+    const core = await this.prepareCubismRuntime();
+    opts.signal?.throwIfAborted();
     const logs: string[] = [];
     const push = (line: string) => { logs.push(line); this.say(line); };
     const temporary = new Set<string>();
@@ -862,8 +868,7 @@ export class Live2dWorld implements World {
     if(!source||!file)throw Error('这次导入已过期，请重新选择模型');
     const found=await findModels(join(source,file)),model=found.models.find((m:any)=>m.kind==='live2d');
     if(!model)throw Error('没有找到 Live2D 模型');
-    const catalog=await inspectNative(model),core=await coreState(this.coreDir());
-    if(!core.ok)throw Error('请先获取 Live2D 核心组件');
+    const catalog=await inspectNative(model),core=await this.prepareCubismRuntime();
     const scratch=join(this.workRoot(),'manual-input-'+randomUUID());
     try{
       const render={mode:'economy',textureLimit:1024,canvasLimit:1024,strict:false};
@@ -961,8 +966,8 @@ export class Live2dWorld implements World {
   private actionEvidence(model: AutomationModel, native: unknown, samples: Array<{id:string;time:number;word?:string;generic?:boolean}>, signal?: AbortSignal) {
     return this.exclusive(async () => {
       signal?.throwIfAborted();
-      const core = await coreState(this.coreDir());
-      if (!core.ok) throw new Error('尚未获取 Live2D Core，使用文本分析');
+      const core = await this.prepareCubismRuntime();
+      signal?.throwIfAborted();
       const scratch = join(this.workRoot(), `analysis-${randomUUID()}`);
       try {
         this.say('生成动作关键帧…');
@@ -1130,9 +1135,38 @@ export class Live2dWorld implements World {
     return this.opts.getConfig().workDir?.trim() || join(this.opts.dataDir, 'figure');
   }
 
-  /** 核心组件的缓存目录；清旧打包只删 builds/，不会碰到它。 */
+  /** 运行组件的缓存目录；清旧打包只删 builds/。 */
   private coreDir(): string {
     return join(this.workRoot(), 'sdk');
+  }
+
+  private async previousFrameworkDirs(): Promise<string[]> {
+    const known = [...(this.state.builds ?? []).map(record => record.packDir)];
+    if (this.state.install?.target) known.unshift(this.state.install.target);
+    const figures = await resolveFigures(this.opts.getConfig(), this.opts.dataDir).catch(() => null);
+    if (figures) {
+      const installed = await readdir(figures, { withFileTypes: true }).catch(() => []);
+      for (const entry of installed) if (entry.isDirectory()) known.push(join(figures, entry.name));
+    }
+    return known.map(pack => join(pack, 'sdk'));
+  }
+
+  private async prepareCubismRuntime() {
+    const dir = this.coreDir();
+    const state = await cubismRuntimeState(dir);
+    this.coreReady = state.ok;
+    if (state.ok) return state;
+    if (!this.state.coreConsentAt) throw new Error('请先在「须知」中同意 Live2D Core / SDK 许可并获取运行组件');
+    let pending = this.cubismPreparation.get(dir);
+    if (!pending) {
+      pending = this.previousFrameworkDirs()
+        .then(previous => ensureCubismRuntime(dir, previous, line => this.say(line)))
+        .finally(() => this.cubismPreparation.delete(dir));
+      this.cubismPreparation.set(dir, pending);
+    }
+    const prepared = await pending;
+    if (dir === this.coreDir()) this.coreReady = true;
+    return prepared;
   }
 
   private noticePayload(): { revision: number; acknowledged: boolean } {
@@ -1143,9 +1177,9 @@ export class Live2dWorld implements World {
     if (!this.noticePayload().acknowledged) throw new Error('请先阅读并确认面板右上角的形象包分发须知');
   }
 
-  /** 面板要的核心状态：文件是否就绪、版本、官方地址、同意时间。 */
+  /** 面板显示运行组件是否就绪，并复用之前的许可确认。 */
   private async corePayload(): Promise<Record<string, unknown>> {
-    const state = await coreState(this.coreDir());
+    const state = await cubismRuntimeState(this.coreDir());
     return {
       ...state,
       notice: this.noticePayload(),

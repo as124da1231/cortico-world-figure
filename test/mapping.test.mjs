@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
@@ -143,7 +143,7 @@ test('real DeepSeek physics and reference packs retain working semantic behavior
 }, async () => {
   globalThis.__dirname = process.cwd(); globalThis.require = createRequire(import.meta.url);
   vm.runInThisContext(await readFile(process.env.L2D_CORE, 'utf8'));
-  const { CubismFramework, CubismUserModel } = await import('../workbench/pack/sdk/framework.js');
+  const { CubismFramework, CubismUserModel } = await import(pathToFileURL(resolve(dirname(process.env.L2D_CORE), 'framework.js')).href);
   CubismFramework.startUp(); CubismFramework.initialize();
   const dir = process.env.L2D_MAPPING_MODEL;
   const json = async name => JSON.parse(await readFile(join(dir, name), 'utf8'));

@@ -1,17 +1,11 @@
-﻿# Live2D Cubism 运行时（随包）
+# Live2D Cubism 运行组件
 
-这个目录**包含**预览和运行所需的 Cubism 运行时，不属于 AGPL：
+扩展安装包在此目录保留 Live2D 许可文本。Core、Framework 和着色器存入扩展的本机 `sdk/` 缓存。
 
-- `live2dcubismcore.min.js` — Cubism Core
-  - **不随扩展分发**。首次使用前由扩展在你同意 Live2D 许可后，从 Live2D Inc. 的官方托管地址下载，校验 SHA-256 后落在本地缓存（`<工作目录>/sdk/`），打包时再拷进每个形象包。
-  - 官方下载页：<https://www.live2d.com/en/sdk/download/web/>（「Cubism Core for Web — for hosting use」）
-  - 许可：Live2D Proprietary Software License，完整文本见本目录 `LICENSE-live2d-core.txt`
-- `framework.js`、`shaders.js` — Live2D Cubism SDK for Web 的预构建 / 内联着色器
-  - Live2D Open Software License
-  - 完整文本：本目录 `LICENSE-live2d-components.txt`
+- `live2dcubismcore.min.js` 从 [Live2D 官方托管地址](https://www.live2d.com/en/sdk/download/web/) 下载。
+- `framework.js` 和 `shaders.js` 从 [官方 CubismWebFramework 5-r.5 固定提交](https://github.com/Live2D/CubismWebFramework/commit/198a3769c26ca3d7b600e932590433badd392edd) 的源码在本机生成。
 
-使用、复制、分发这些文件时，必须同时遵守 Live2D Inc. 的许可。完整第三方说明见根目录 `NOTICE`。
-Core 的版本与完整性由扩展校验，不应以其他 SDK 文件直接覆盖缓存。
+两套许可使用同一个确认入口。官方下载和缓存文件均校验 SHA-256。已确认许可的用户会复用已验证的旧文件，缺失时在首次使用前补齐。预览、封面和打包均使用本机准备好的运行组件。生成的 Live2D 形象包含运行组件及其许可文本，仅供本机使用。
 
 ## 沙箱约束（Coo 侧）
 

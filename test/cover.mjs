@@ -10,7 +10,7 @@ const wb = join(import.meta.dirname, '..', 'workbench');
 const out = await mkdtemp(join(tmpdir(), 'figure-cover-'));
 
 console.time('build');
-if (!process.env.L2D_CORE) throw new Error('设置 L2D_CORE 指向已同意许可的 Core 文件');
+if (!process.env.L2D_CORE) throw new Error('设置 L2D_CORE 指向准备好的 Live2D 运行组件缓存中的 Core 文件');
 const pack = await buildPack(wb, MODEL, out, { corePath: process.env.L2D_CORE });
 console.timeEnd('build');
 

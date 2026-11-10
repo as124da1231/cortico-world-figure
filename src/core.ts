@@ -7,7 +7,7 @@
  * 官方下载页把「Cubism Core for Web — for hosting use」的地址直接列出来供复制，
  * 这里用的是其中固定到 Cubism 5.3 的那条，避开 latest 漂移。
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { get } from 'node:https';
@@ -78,7 +78,7 @@ export async function coreState(dir: string): Promise<CoreState> {
 }
 
 /** 单次 GET，跟三层以内的重定向。 */
-function fetchOnce(url: string, redirects = 4): Promise<Buffer> {
+export function fetchRuntimeFile(url: string, maxBytes: number, redirects = 4): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const req = get(url, { headers: { 'user-agent': 'cortico-world-figure' } }, (res) => {
       const code = res.statusCode ?? 0;
@@ -86,7 +86,11 @@ function fetchOnce(url: string, redirects = 4): Promise<Buffer> {
       if (code >= 300 && code < 400 && location) {
         res.resume();
         if (redirects <= 0) { reject(new Error('重定向次数过多')); return; }
-        fetchOnce(new URL(location, url).toString(), redirects - 1).then(resolve, reject);
+        const next = new URL(location, url);
+        if (next.protocol !== 'https:' || next.hostname !== new URL(url).hostname) {
+          reject(new Error('下载重定向超出官方来源')); return;
+        }
+        fetchRuntimeFile(next.href, maxBytes, redirects - 1).then(resolve, reject);
         return;
       }
       if (code !== 200) { res.resume(); reject(new Error(`HTTP ${code}`)); return; }
@@ -94,7 +98,7 @@ function fetchOnce(url: string, redirects = 4): Promise<Buffer> {
       let bytes = 0;
       res.on('data', (c: Buffer) => {
         bytes += c.length;
-        if (bytes > CORE_BYTES) { req.destroy(new Error('核心下载超过预期大小')); return; }
+        if (bytes > maxBytes) { req.destroy(new Error('下载超过预期大小')); return; }
         chunks.push(c);
       });
       res.on('end', () => resolve(Buffer.concat(chunks)));
@@ -118,13 +122,13 @@ export async function ensureCore(
 
   await mkdir(dir, { recursive: true });
   const target = coreFile(dir);
-  const tmp = `${target}.part`;
+  const tmp = `${target}.${randomUUID()}.part`;
 
   let lastError = '';
   for (const url of CORE_URLS) {
     try {
       say(`下载 Live2D 核心组件 · ${new URL(url).host}`);
-      const buf = await fetchOnce(url);
+      const buf = await fetchRuntimeFile(url, CORE_BYTES);
       if (buf.length !== CORE_BYTES) {
         lastError = `长度不符：${buf.length} ≠ ${CORE_BYTES}`;
         say(`! ${lastError}`);

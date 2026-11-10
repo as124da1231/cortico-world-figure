@@ -18,7 +18,8 @@ Copyright (C) 2026 as124da1231
    上游及集成说明见该目录 README；保留原有构建产物、版权和许可，不改为 AGPL。
 
 3. Live2D Cubism SDK for Web
-   文件：pack/sdk/framework.js、shaders.js；版权属于 Live2D Inc.。
+   Framework 和着色器不随扩展 npm 包分发。源自 Live2D 官方 CubismWebFramework 5-r.5。
+   首次使用校验固定源码压缩包并在本机生成 framework.js 与 shaders.js。版权属于 Live2D Inc.。
    许可：Live2D Open Software License，原文见 pack/sdk/LICENSE-live2d-components.txt。
    官方：https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html
 
@@ -30,9 +31,10 @@ Copyright (C) 2026 as124da1231
    打包时会复制进用户生成的形象包；不得把该生成包当作可公开上传的扩展安装包。
    这些文件不受本项目 AGPL 或 Steamworks 附加许可的重新许可。
 
-5. fflate、pngjs 与 Cortico
+5. fflate、pngjs、esbuild 与 Cortico
    fflate 0.8.3 为 MIT 运行依赖，原文见 ../licenses/fflate-MIT.txt。
    pngjs 7.0.0 为 MIT 运行依赖，原文见 ../licenses/pngjs-MIT.txt。
+   esbuild 0.28.2 为 MIT 运行依赖，用于本机编译，原文见 ../licenses/esbuild-MIT.txt。
    Cortico 为 MIT 框架开发依赖，原文见 ../licenses/Cortico-MIT.txt。
    依赖安装包各自保留版权和许可证；不因为与 Coo 使用相同接口而改为 AGPL。
 

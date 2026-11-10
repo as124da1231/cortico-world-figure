@@ -47,7 +47,7 @@ if (!MODEL_DIR || !existsSync(MODEL_DIR)) {
   process.exit(2);
 }
 const RUNTIME = resolve(arg('runtime', join(HERE, '..', 'pack')));
-/** 用户同意 Live2D 许可后由扩展下载并校验过的 Cubism Core；扩展不随包分发它。 */
+/** 运行组件缓存中的 Cubism Core 路径，Framework 和着色器位于同一目录。 */
 const CORE_PATH = arg('core');
 const DRY = flag('dry-run');
 const JSON_OUT = flag('json');
@@ -747,27 +747,20 @@ for (const rel of ['figure.js', 'figure-voice.json', 'backends/voice-playback.js
 }
 await cp(join(RUNTIME, 'backends', 'emotion-effects'), join(OUT, 'backends', 'emotion-effects'), { recursive: true });
 await writeFile(join(OUT, 'backends', 'emotion-style.js'), emotionStyleModule(emotionEffect, overrides.emotionEffectSize), 'utf8');
-for (const rel of await readdir(join(RUNTIME, 'sdk'))) {
-  // Core 单独处理：它不随扩展分发
-  if (rel === 'live2dcubismcore.min.js') continue;
-  const src = join(RUNTIME, 'sdk', rel);
-  if ((await stat(src)).isFile()) {
-    await mkdir(join(OUT, 'sdk'), { recursive: true });
-    await copyFile(src, join(OUT, 'sdk', rel));
-  }
-}
-// Cubism Core：优先用 --core（扩展下载并校验过的那份）；没有就报错，绝不静默产出跑不起来的包
-{
-  const out = join(OUT, 'sdk', 'live2dcubismcore.min.js');
-  const src = CORE_PATH || join(RUNTIME, 'sdk', 'live2dcubismcore.min.js');
-  if (!existsSync(src)) {
-    console.error(CORE_PATH
-      ? `--core 指向的文件不存在：${CORE_PATH}`
-      : '缺少 Live2D 核心组件：先用 --core 指定已校验的 live2dcubismcore.min.js');
-    process.exit(3);
-  }
-  await mkdir(join(OUT, 'sdk'), { recursive: true });
-  await copyFile(src, out);
+// The extension verifies its shared cache before invoking the converter.
+const sdkTarget = join(OUT, 'sdk');
+const core = CORE_PATH && resolve(CORE_PATH);
+if (!core) throw Error('缺少 Live2D 运行组件：用 --core 指定已校验的缓存');
+const sdkSources = [
+  ['live2dcubismcore.min.js', core],
+  ['framework.js', join(dirname(core), 'framework.js')],
+  ['shaders.js', join(dirname(core), 'shaders.js')],
+  ...['LICENSE-live2d-core.txt', 'LICENSE-live2d-components.txt'].map(file => [file, join(RUNTIME, 'sdk', file)]),
+];
+await mkdir(sdkTarget, { recursive: true });
+for (const [file, source] of sdkSources) {
+  if (!existsSync(source)) throw Error(`缺少 Live2D 运行组件：${file}，请检查本机缓存或重新获取`);
+  await copyFile(source, join(sdkTarget, file));
 }
 // SoulLink 表演引擎（Apache-2.0，随包分发，含许可证）
 const vendorDir = join(RUNTIME, 'vendor', 'soullink');

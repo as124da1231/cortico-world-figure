@@ -1,5 +1,5 @@
 import { cp, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 /** 测试共用的模型目录：由环境变量提供，没有就跳过。 */
 export const MODEL = (process.env.L2D_MODEL || '').trim();
 
@@ -34,12 +34,17 @@ export function makeCtx(tmp, cfg, id = 'figure') {
   };
 }
 
-/** Test-only: reuse a Core file whose license was already accepted, never download it. */
-export async function prepareWorld(world, workDir) {
+/** Real-model tests reuse an accepted, prepared runtime and work offline. */
+export async function copyTestCubismRuntime(workDir) {
   const source = (process.env.L2D_CORE || '').trim();
   if (!source) throw new Error('设置 L2D_CORE 指向已同意许可并校验的 Core 文件后重跑');
   await mkdir(join(workDir, 'sdk'), { recursive: true });
   await cp(source, join(workDir, 'sdk', 'live2dcubismcore.min.js'));
+  for (const file of ['framework.js', 'shaders.js']) await cp(join(dirname(source), file), join(workDir, 'sdk', file));
+}
+
+export async function prepareWorld(world, workDir) {
+  await copyTestCubismRuntime(workDir);
   await world.start({});
   const invoke = world.webUi('zh').invoke;
   const state = await invoke('workbench', 'state', []);

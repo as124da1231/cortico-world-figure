@@ -47,7 +47,7 @@ async function mount(t, opts = {}) {
       }
       const notice = { acknowledged: ack, revision: 1 };
       if (method === 'state') return { notice, version: opts.version ?? '1.4.2' };
-      if (method === 'core') return { ok: opts.core ?? true, version: 'Cubism 5.3' };
+      if (method === 'core') return { ok: opts.core ?? true, version: 'Cubism 5.3', consentAt: opts.coreConsentAt };
       if (method === 'noticeAccept') { ack = true; return { acknowledged: true, revision: 1 }; }
       if (method === 'list') return { dir: '', figuresDir: 'E:/test/figures', builds: opts.builds ?? [], installed: null, automation: opts.automation ?? {enabled:false,plans:[]} };
       if (method === 'detail') return { nameZh: '名字', aboutZh: '简介' };
@@ -425,11 +425,29 @@ test('an acknowledged upgrade shows no inline notice or core banner',async t=>{
 
 test('acknowledged users can fetch a missing Core in the popup without repeating consent',async t=>{
   const {root,button}=await mount(t,{ack:true,core:false});
-  assert.match(root.querySelector('.l2d-status').textContent,/核心待获取/);
+  assert.match(root.querySelector('.l2d-status').textContent,/运行组件待获取/);
   assert.equal(root.querySelector('.l2d-license'),null);
   root.querySelector('.l2d-version-corner').click();
   assert.equal(button('同意并获取').hidden,false);
   assert.equal(button('我已知晓，不再分发').hidden,true);
+});
+
+test('an existing SDK consent automatically restores missing runtime files before packing',async t=>{
+  const {root,button,calls,dom}=await mount(t,{
+    ack:true,core:false,coreConsentAt:1,
+    invoke(method){
+      if(method==='importPaths')return {token:'sdk-cache',models:[{dir:'role',title:'角色',kind:'live2d'}],packs:[]};
+      if(method==='coreRestore')return {ok:true,consentAt:1};
+      if(method==='importBuild')return {buildId:'role',log:[]};
+    },
+  });
+  paste(dom, root.querySelector('.l2d-drop-zone'), 'G:/models/role');
+  await tick();
+  button('一键打包').click();
+  await tick();
+  assert.deepEqual(calls.filter(call=>['coreRestore','coreAccept','importBuild'].includes(call.method)).map(call=>call.method),
+    ['coreRestore','importBuild']);
+  assert.equal(root.querySelector('dialog.l2d-notice-popup'),null);
 });
 
 test('settings save only changed fields through the host configuration contract', async t => {

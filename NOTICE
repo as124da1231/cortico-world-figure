@@ -7,12 +7,11 @@ opts.kit.createBody，和 Coo 自带的形象、鲸鱼包、酒狐包走同一�
 本仓库 workbench/vendor/coo-kit/ 只是工作台在浏览器里单独预览时用的副本，
 不进入生成的形象包。
 
-随包附带的第三方组件（Live2D Cubism SDK for Web、SoulLink Emotion Engine、Coopanion
-desktop-pet kit 与预览 frame）的清单、许可边界与许可文本见 workbench/NOTICE、
+第三方组件（Live2D Cubism SDK for Web、SoulLink Emotion Engine、Coopanion
+desktop-pet kit 与预览 frame）的来源、分发范围与许可文本见 workbench/NOTICE、
 workbench/vendor/coo-preview/ 与 workbench/pack/sdk/。
 
-Live2D Cubism Core（live2dcubismcore.min.js）**不随本包分发**：首次使用前由扩展在用户
-同意 Live2D 许可后，从 Live2D Inc. 的官方托管地址获取并校验 SHA-256，存到本地缓存。
+Cubism Core、Framework 和着色器均不随扩展安装包分发。用户确认 Live2D 许可后，扩展校验官方下载并在本机准备运行组件。已确认许可的用户可自动恢复已校验的旧副本。
 
 The optional TTS provider adapters and playback sampling are adapted from
 DSH Live2D Body (2026, AGPL-3.0-or-later). Its provider catalog follows AstrBot's
@@ -25,7 +24,7 @@ The emotion painters in workbench/pack/backends/emotion-effects/emotion-*.js
 are from cortico-world-image-figure 3.10.0 by as124da1231 (AGPL-3.0-or-later).
 Source revision: e637c53, engine/runtime/emotion-*.js.
 
-本包作为 Coo 扩展分发时，同样适用以上边界；pack/sdk 下的 Live2D 文件不属于 AGPL。
+Live2D 运行组件分别适用 Live2D 的许可，许可文本随扩展保留。
 
 生成的 Live2D 形象包包含 Live2D Cubism Core，仅供本机使用。
 Generated Live2D figure packs contain Live2D Cubism Core and are for local use only.

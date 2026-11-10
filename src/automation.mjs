@@ -160,7 +160,7 @@ export class FigureAutomation{
    if (fallback) reviewWarnings.push(plan.bindings.length ? '有候选动作将沿用通用表现' : '没有采用原生绑定，这个模型将使用通用表现');
    // A new default must not convert previously prepared manual plans into automatic approvals.
    const automatic = autoInstallEnabled(cfg) && plan.autoAtCreation === true && !requiresConfirmation;
-   return {id:plan.id,model:plan.model.title,status:plan.status,error:plan.error||'',bindings:plan.bindings,summary:plan.summary||[],wear:plan.wear,question:plan.question,options:plan.options,skipped:plan.skipped||[],installed:plan.result||null,analysis:plan.analysis,reviewWarnings,requiresConfirmation,automatic};
+   return {id:plan.id,model:plan.model.title,needsRuntime:plan.model.kind==='live2d',status:plan.status,error:plan.error||'',bindings:plan.bindings,summary:plan.summary||[],wear:plan.wear,question:plan.question,options:plan.options,skipped:plan.skipped||[],installed:plan.result||null,analysis:plan.analysis,reviewWarnings,requiresConfirmation,automatic};
  }
  pending(){return [...this.plans.values()].filter(p=>['pending','approved','validating','executing','done','interrupted'].includes(p.status)&&Date.now()-p.created<30*60000).map(p=>this.publicPlan(p));}
  waitingModels(request){return request.models.filter(m=>![...this.plans.values()].some(p=>p.model.id===m.id&&p.created>=request.at&&(p.status==='done'||['pending','approved','validating','executing'].includes(p.status)&&Date.now()-p.created<30*60000)));}

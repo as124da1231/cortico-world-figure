@@ -9,7 +9,7 @@ import { buildPack, editPack, installPack, scanModel } from '../src/pipeline.ts'
 import { coreState } from '../src/core.ts';
 import { captureCover } from '../src/cover.ts';
 import { LIVE2D } from '../src/index.ts';
-import { makeCtx, fixtureManifest } from './_ctx.mjs';
+import { copyTestCubismRuntime, makeCtx, fixtureManifest } from './_ctx.mjs';
 
 const bytes = (value) => Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
 async function fixture(t) {
@@ -258,6 +258,7 @@ test('external model diagnostics remain data when the generated profile loads',a
  const header=Buffer.alloc(64);header.write('MOC3');await writeFile(join(source,'role.moc3'),header);
  await writeFile(join(source,'texture.png'),Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jnoYAAAAASUVORK5CYII=','base64'));
  const core=join(root,'core.js');await writeFile(core,'// synthetic converter fixture');
+ for (const file of ['framework.js','shaders.js']) await writeFile(join(root,file),'// synthetic converter fixture');
  const output=await buildPack(workbench,source,root,{corePath:core,maxTexture:0});
  const profile=await readFile(join(output,'models','source','profile.js'),'utf8');
  assert.doesNotMatch(profile,/__figureAuditMarker/);
@@ -313,8 +314,7 @@ test('core cache rejects corruption; cover handles browser spawn error without c
 test('real model: scan, Core verification, packing, cover and installation', { skip: !process.env.L2D_MODEL || !process.env.L2D_CORE }, async (t) => {
   const root = await fixture(t);
   const cfg = { enabled: true, figuresDir: join(root, 'figures'), workDir: join(root, 'figure'), cover: true, emotionEffect: 'kaomoji' };
-  await mkdir(join(cfg.workDir, 'sdk'), { recursive: true });
-  await cp(process.env.L2D_CORE, join(cfg.workDir, 'sdk', 'live2dcubismcore.min.js'));
+  await copyTestCubismRuntime(cfg.workDir);
   const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({}); t.after(() => world.stop());
   const inv = (m, a = []) => world.webUi().invoke('workbench', m, a);
   assert.equal((await inv('core')).ok, true);
