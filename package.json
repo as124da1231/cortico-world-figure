@@ -48,7 +48,7 @@
         "displayName": "Live2D One-Click Install"
       }
     },
-    "webUiClient": "dist/webui-8f6049d224a8.js",
+    "webUiClient": "dist/webui-60084500f70f.js",
     "webUiStyle": "dist/webui-71069866022b.css",
     "describe": "describe.json"
   },

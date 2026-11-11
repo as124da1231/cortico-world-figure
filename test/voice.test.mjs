@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { FigureVoice } from '../src/voice.ts';
+import { synthesizeVoice } from '../src/voice-providers.mjs';
 import { createVoiceMouthEnvelope, voiceLevel } from '../workbench/pack/backends/voice-playback.js';
 
 test('mouth sampling follows audio position and closes for silence', () => {
@@ -52,6 +53,25 @@ test('audio mouth blends back to the underlying pose and resumes without snappin
   assert.ok(next.open < tail.open);
   assert.equal(mouth.update(null, 1, .13), null);
   assert.equal(mouth.update(0, 1, 1 / 60).open, 0);
+});
+
+test('local GPT-SoVITS preset posts to the OpenAI-compatible endpoint without auth', async () => {
+  const requests = [];
+  const wav = Buffer.alloc(44);
+  wav.write('RIFF', 0, 'ascii');
+  wav.write('WAVE', 8, 'ascii');
+  const request = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(wav, { status: 200, headers: { 'content-type': 'audio/wav', 'content-length': String(wav.length) } });
+  };
+  const audio = await synthesizeVoice('sovitsLocal', { endpoint: 'http://127.0.0.1:9880', voice: '', speed: 1.2 }, '', '本地音色测试', { request });
+  assert.deepEqual(audio, wav);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'http://127.0.0.1:9880/audio/speech');
+  assert.equal(requests[0].options.headers.Authorization, undefined);
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    model: 'gpt-sovits', input: '本地音色测试', voice: '', response_format: 'wav', speed: 1.2,
+  });
 });
 
 test('existing provider profiles become saved service cards without rewriting settings or keys', async () => {
