@@ -1,4 +1,4 @@
-const FIGURE_UI_VERSION = "4.0.0";
+const FIGURE_UI_VERSION = "4.0.1";
 const GEAR_THEMES = [
   {id:'purple',name:'紫色',en:'Purple',color:'#9654ff',fill:'linear-gradient(105deg,#343bdc 0%,#7957f5 36%,#bd75ff 65%,#8c52ff 100%)',glow:'#ece0ff90'},
   {id:'red',name:'红色',en:'Red',color:'#d63c43',fill:'linear-gradient(105deg,#b91c3c 0%,#e83e50 36%,#ff7c66 65%,#e53e3e 100%)',glow:'#ffe3df90'},

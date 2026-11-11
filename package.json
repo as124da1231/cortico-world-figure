@@ -1,10 +1,10 @@
 {
   "name": "cortico-world-figure",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "type": "module",
-  "description": "导入 Live2D 和 BongoCat 模型，生成封面并打包安装到 Coo。 / Import Live2D and BongoCat models, generate covers, and install them into Coo.",
+  "description": "把本地 Live2D 和 BongoCat 模型一键打包安装到 Coo。\n\n## 一、导入与打包\n1. 拖入模型文件夹或 ZIP。\n2. 打包时可生成封面，按需选择贴图画质。\n3. 在工作台预览、编辑和管理形象包。\n\n## 二、适配 Live2D 动作与表情\n1. 用通用配方快速适配常用表情。\n2. 先预览模型原有的动作与表情，再手动绑定。\n3. 也可让 AI 分析原生资源，生成适配方案。\n\n## 三、桌宠个性化\n1. 切换装扮，调整全身或半身取景。\n2. 配置桌宠特效、语音朗读和随音频变化的口型。",
   "license": "AGPL-3.0-or-later",
-  "author": "lian0721",
+  "author": "as124da1231",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/as124da1231/cortico-world-figure.git"
@@ -21,7 +21,11 @@
     "avatar",
     "marionette",
     "vtuber",
-    "local-tool"
+    "local-tool",
+    "bongocat",
+    "桌宠",
+    "模型导入",
+    "动作适配"
   ],
   "engines": {
     "node": ">=22"
@@ -33,20 +37,18 @@
     "displayName": "Live2D 模型一键安装",
     "icon": "assets/icon.svg",
     "tags": [
-      "experimental",
+      "companion",
       "voice"
     ],
     "locales": {
       "zh": {
-        "displayName": "Live2D 模型一键安装",
-        "description": "导入 Live2D 和 BongoCat 模型，生成封面并打包安装到 Coo。"
+        "displayName": "Live2D 模型一键安装"
       },
       "en": {
-        "displayName": "Live2D One-Click Install",
-        "description": "Import Live2D and BongoCat models, generate covers, and install them into Coo."
+        "displayName": "Live2D One-Click Install"
       }
     },
-    "webUiClient": "dist/webui-67a68e7b479c.js",
+    "webUiClient": "dist/webui-8f6049d224a8.js",
     "webUiStyle": "dist/webui-71069866022b.css",
     "describe": "describe.json"
   },
