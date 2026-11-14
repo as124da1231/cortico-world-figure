@@ -9,6 +9,7 @@ const number = (key,label,value,min,max,step=.1) => field(key,label,value,{type:
 export const VOICE_PROVIDERS = {
   minimax:{name:'MiniMax',auth:true,fields:[address('https://api.minimax.cn/v1/t2a_v2'),model('speech-2.8-turbo'),voice('female-shaonv','音色 ID'),field('groupId','Group ID（可选）'),number('speed','语速',1,.5,2),number('pitch','音调',0,-12,12,1),number('volume','音量',1,.1,10)]},
   openai:{name:'OpenAI 兼容',auth:'optional',fields:[address('https://api.openai.com/v1'),model('gpt-4o-mini-tts'),voice('alloy'),number('speed','语速',1,.25,4),field('instructions','朗读风格（可选）')]},
+  sovitsLocal:{name:'本机 GPT-SoVITS 插件',help:'连接 Coopanion 的 GPT-SoVITS 扩展（OpenAI 兼容接口），无需鉴权，只使用文本、音色和语速；音色留空时使用扩展当前音色。',fields:[address('http://127.0.0.1:9880'),field('voice','音色（可选，留空使用当前音色）'),number('speed','语速',1,.25,4)]},
   mimo:{name:'小米 MiMo',auth:true,fields:[address('https://api.xiaomimimo.com/v1'),model('mimo-v2.5-tts'),voice('mimo_default'),field('style','风格提示（可选）'),field('dialect','方言（可选）'),field('seedText','参考文本（可选）')]},
   fish:{name:'Fish Audio',auth:true,fields:[address('https://api.fish-audio.cn/v1'),model('s2-pro'),voice('','参考音色 ID')]},
   dashscope:{name:'阿里云百炼',auth:true,help:'支持 CosyVoice 和 Qwen TTS。CosyVoice 需要本机 Python 的 dashscope。',fields:[address('https://dashscope.aliyuncs.com/api/v1'),model('cosyvoice-v3-flash'),voice('longanyang')]},

@@ -135,6 +135,7 @@ function runLocal(id, config, key, text, signal, python) {
 }
 
 const xml = value => String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]));
+const openaiSpeech = (c,k,text,{post}) => post(address(c.endpoint,'/audio/speech'),{model:c.model,input:text,voice:c.voice,response_format:'wav',speed:c.speed,...(c.instructions?{instructions:c.instructions}:{})},bearer(k));
 const adapters = {
   async minimax(c,k,text,{json}) {
     const url = new URL(c.endpoint);
@@ -148,8 +149,9 @@ const adapters = {
     if (typeof hex !== 'string' || !hex || hex.length > AUDIO_LIMIT*2 || hex.length%2 || /[^0-9a-f]/i.test(hex)) throw new VoiceError('MiniMax 未返回有效语音');
     return Buffer.from(hex,'hex');
   },
-  openai(c,k,text,{post}) {
-    return post(address(c.endpoint,'/audio/speech'),{model:c.model,input:text,voice:c.voice,response_format:'wav',speed:c.speed,...(c.instructions?{instructions:c.instructions}:{})},bearer(k));
+  openai: openaiSpeech,
+  sovitsLocal(c,k,text,{post}) {
+    return openaiSpeech({...c,model:c.model||'gpt-sovits',voice:c.voice||''},k,text,{post});
   },
   async mimo(c,k,text,{json}) {
     const style = [c.style,c.dialect].filter(Boolean).join(' ');
