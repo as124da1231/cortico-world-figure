@@ -64,6 +64,15 @@ async function mount(t, opts = {}) {
   return { ctx, root, calls, configCalls, toasts, drawers, button, handle, dom, guards };
 }
 
+test('workshop opens separately while the local workbench stays available offline',async t=>{
+  const {root}=await mount(t,{providerHeader:true,fetch:()=>{throw Error('offline');}});
+  const link=root.querySelector('a[href="https://8.148.13.225:8443/?page=figure"]');
+  assert.equal(link.textContent,'形象包创意工坊');
+  assert.equal(link.target,'_blank');
+  assert.match(link.rel,/noopener/);
+  assert.ok(root.querySelector('.l2d-source-pickers'));
+});
+
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
   const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
   assert.equal(root.querySelector('.l2d-voice-controls'),null);

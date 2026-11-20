@@ -677,7 +677,12 @@ export default {
         const introCopy = el('div', 'l2d-workflow-copy');
         introCopy.append(el('h2', null, t('导入一个形象', 'Bring in a figure')),
           el('p', null, t('支持 Live2D、BongoCat，也可以导入已有的形象包。', 'Use a Live2D or BongoCat model, or bring in an existing figure pack.')));
-        intro.append(introCopy, settingsButton);
+        const workshopLink = el('a', 'l2d-btn', t('形象包创意工坊', 'Figure workshop'));
+        workshopLink.href = 'https://8.148.13.225:8443/?page=figure';
+        workshopLink.target = '_blank';
+        workshopLink.rel = 'noopener noreferrer';
+        workshopLink.title = t('在浏览器中用 FFA Hub 浏览、上传和下载素材', 'Browse, upload and download source packs with FFA Hub in your browser');
+        intro.append(introCopy, workshopLink, settingsButton);
         const steps = el('ol', 'l2d-workflow-steps');
         steps.setAttribute('aria-label', t('导入流程', 'Import workflow'));
         const stepsUI = [t('选择素材', 'Choose source'), t('处理模型', 'Prepare figure'), t('前往装扮', 'Wear in Coo')].map((label, index) => {
