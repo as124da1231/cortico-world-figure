@@ -23,4 +23,11 @@ jobs:
       - run: npm ci
       - run: npm run build:ui
       - run: npm run check
-      - run: npm test
+      - name: Run tests
+        shell: pwsh
+        run: |
+          $tempDir = Join-Path $env:RUNNER_TEMP 'figure-tests'
+          New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+          $env:TEMP = $tempDir
+          $env:TMP = $tempDir
+          npm test

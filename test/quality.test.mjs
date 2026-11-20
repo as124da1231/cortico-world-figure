@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, cp, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, readdir, realpath, rm, cp, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -196,7 +196,7 @@ test('world persists notice across restarts, rejects stale ids, installs indepen
   await assert.rejects(inv('detail', ['missing']), /没有/);
   await assert.rejects(inv('edit', ['missing', { nameZh: 'oops' }]), /没有/);
   const installed = await inv('install', ['', 'sample-record']);
-  assert.equal(installed.state.install.target, join(root, 'figures', 'sample'));
+  assert.equal(await realpath(installed.state.install.target), await realpath(join(root, 'figures', 'sample')));
   await world.stop();
 });
 
