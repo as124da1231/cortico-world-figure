@@ -176,8 +176,18 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     return n;
   };
   const body = el('form', 'l2d-settings l2d-dialog-body');
+  const section = (title, className = '') => {
+    const container = el('section', ('l2d-settings-section ' + className).trim());
+    if (title) container.append(el('h3', 'l2d-settings-heading', title));
+    body.append(container);
+    return container;
+  };
+  let fieldsRoot = body;
   cfg={...cfg,assistAuto:cfg.assistAuto !== false,adaptationMode:cfg.adaptationMode || (cfg.assistMotions ? 'ai' : 'none')};
   const dirty = {};
+  const performanceKey = 'worlds.figure.performanceMode';
+  let savedMode = cfg.performanceMode || 'vocab';
+  let toolSyncPending = false;
   const controls = [];
   const fields = new Map();
   const appearance=normalizeAppearance(cfg);
@@ -222,7 +232,7 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
       input = el('input', 'l2d-gear-input');
       input.type = 'range'; input.min = '0'; input.max = String(choices.length - 1); input.step = '1';
       const initial = choices.findIndex(([v]) => v === cfg[key]);
-      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'previewSize' ? '512' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : key === 'adaptationMode' ? 'none' : 'auto')) : initial);
+      input.value = String(initial < 0 ? choices.findIndex(([v]) => v === (key === 'texture' ? 'original' : key === 'previewSize' ? '1024' : key === 'assistDepth' ? 'standard' : key === 'quality' ? 'balanced' : key === 'adaptationMode' ? 'none' : 'auto')) : initial);
       readValue = () => choices[Number(input.value)][0];
       paint = () => {
         const index = Number(input.value), title = choices[index][1];
@@ -242,9 +252,10 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     input.setAttribute('aria-label', title);
     input.addEventListener('change', () => { if (input.disabled) return; paint(); dirty['worlds.figure.' + key] = type === 'checkbox' ? input.checked : readValue ? readValue() : input.value.trim(); });
     fields.set(key,{input,paint,readValue,choices});
-    controls.push(input); row.append(label, control || input); body.append(row); return input;
+    controls.push(input); row.append(label, control || input); fieldsRoot.append(row); return input;
   }
   let depend=()=>{};
+  let performanceSettings;
   if(appearanceOnly){
     const appearanceGroup = title => {
       const section = el('section', 'l2d-appearance-group');
@@ -274,6 +285,7 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     appearanceField(sliders,'particleEffect',t('粒子效果','Particle effect'),t('用于满档滑杆。桌宠演出请到「特效」页选择。','Applies to sliders at their highest setting. Choose pet effects on the Effects tab.'),GEAR_PARTICLES);
     paintAppearance();
   } else {
+  fieldsRoot = section(t('画质与预览', 'Quality and preview'));
   field('cover', t('生成封面', 'Generate cover'), t('同时自动调整模型取景', 'Also fits the model framing'), 'checkbox');
   const quality = field('quality',t('画质','Quality'),t('画布随显示大小调整；原图不设软件精度上限。已有形象需重新打包安装。','Canvas follows display size; Original has no software cap. Repack existing figures to apply.'),'gear',[['economy',t('流畅','Smooth')],['balanced',t('标准','Standard')],['high',t('高清','HD')],['original',t('原图','Original')]]);
   const texture = field('texture', t('贴图精度', 'Texture resolution'), t('原图档可调整；较小的贴图占用更少显存', 'Adjustable in Original mode; smaller textures use less VRAM'), 'gear', ['512','1024','2048','4096','original'].map(value=>[value,value==='original'?t('原精度','Original'):value+' px']));
@@ -295,7 +307,8 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     texture.addEventListener(event,()=>{if(quality.value==='3'){customTexture=fields.get('texture').readValue();syncQuality();}});
   }
   syncQuality();
-  field('previewSize',t('预览精度','Preview resolution'),t('仅影响动作与装扮对照图；默认 512','Only affects action and wardrobe comparison images; default 512'),'gear',['256','512','1024'].map(v=>[v,v+' px']));
+  field('previewSize',t('预览精度','Preview resolution'),t('动作与装扮预览默认 1024；无上限时按设备能力渲染','Action and wardrobe previews default to 1024. Unlimited uses device limits.'),'gear',figurePreviewChoices(t));
+  fieldsRoot = section(t('打包与安装', 'Packing and installation'));
   field('clean', t('清理', 'Clean'), '', 'checkbox');
   field('autoDelete', t('安装后删除打包产物', 'Delete pack after installation'), t('仅在安装成功后执行，保留原始素材', 'Only after a successful install; source files are kept'), 'checkbox');
   const folder = field('figuresDir', t('安装目录', 'Install folder'), t('通常无需修改', 'Usually no change needed'), 'text');
@@ -314,7 +327,7 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     });
     controls.push(browse);
   }
-  body.append(el('h3','l2d-settings-heading',t('动作适配','Action mapping')));
+  fieldsRoot = section(t('动作适配', 'Action mapping'));
   const mode = field('adaptationMode',t('适配方式','Adaptation mode'),t('无：仅通用配方；人工：预览并绑定；AI：交给 Coo 分析','None: generic recipes; Manual: preview and bind; AI: let Coo analyze'),'gear',[['none',t('无','None')],['manual',t('人工','Manual')],['ai','AI']]);
   const gear = field('assistGear',t('分析方式','Analysis mode'),t('图片不受支持时自动使用文本','Falls back to text when the current model cannot use images'),'gear', [['text',t('文本','Text')],['auto',t('自动','Auto')],['image',t('文本＋图片','Text + images')]]);
   const depth = field('assistDepth',t('适配深度','Adaptation depth'),t('仅文本＋图片时启用：基础取样、针对性补查、映射对照复核','Available with text + images: basic sampling, targeted inspection, mapping comparison'),'gear', [['quick',t('快速','Quick')],['standard',t('标准','Standard')],['deep',t('深入','Deep')]]);
@@ -322,6 +335,9 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
   const confirmFallback = field('assistConfirmFallback',t('降级前确认','Confirm fallback'),t('需要沿用通用表现时先确认，默认直接继续','Ask before keeping generic behavior. Off by default.'),'checkbox');
   const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
   roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
+  performanceSettings = mountPerformanceSettings(ctx, section(null, 'l2d-performance-box'), cfg, value => { dirty[performanceKey] = value; });
+  controls.push(...performanceSettings.controls);
+  body.disposePlanner = performanceSettings.dispose;
   depend = () => {
     syncQuality();
     for (const input of [gear,automatic,roots,depth]) {
@@ -345,22 +361,57 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
   actions.append(status, save); body.append(actions);
   let saving = false;
   ctx.guardLeave?.(() => body.isConnected && (saving || Object.keys(dirty).length) ? t('设置尚未保存，确定离开？', 'Settings are not saved. Leave anyway?') : null);
+  async function syncPerformanceTools() {
+    if (!toolSyncPending) return true;
+    status.textContent = t('正在同步会话工具…', 'Updating conversation tools…');
+    performanceSettings?.showSync(status.textContent);
+    try {
+      await ctx.invoke('performanceSync', []);
+      await reloadFigurePrefix(ctx);
+      toolSyncPending = false;
+      performanceSettings?.showSync();
+      return true;
+    } catch {
+      if (!isDisposed()) {
+        status.textContent = t('档位已保存，会话工具待同步。', 'Mode saved. Conversation tools are pending.');
+        performanceSettings?.showSync(t('档位已保存，点下方「重试同步」后再开始对话。', 'Mode saved. Retry tool sync below before chatting.'));
+        save.textContent = t('重试同步', 'Retry sync');
+        save.hidden = false;
+      }
+      return false;
+    }
+  }
   async function persist() {
     if (saving || isDisposed()) return;
-    if (!Object.keys(dirty).length) { if (!autosave) await onSaved?.(); return; }
+    const patch = {...dirty};
+    const keys = Object.keys(patch);
+    if (!keys.length && !toolSyncPending) { if (!autosave) await onSaved?.(); return; }
     saving = true; save.disabled = true;
     if (!autosave) controls.forEach(input => { input.disabled = true; });
-    status.textContent = t('保存中…', 'Saving…');
-    const patch = {...dirty};
     let succeeded = false;
     try {
-      await ctx.setConfig('figure', patch);
-      for (const key of Object.keys(patch)) if (dirty[key] === patch[key]) delete dirty[key];
+      if (keys.length) {
+        status.textContent = t('保存中…', 'Saving…');
+        if (patch[performanceKey] === 'direct') performanceSettings?.showSync(status.textContent);
+        await ctx.setConfig('figure', patch);
+        for (const key of keys) if (dirty[key] === patch[key]) delete dirty[key];
+        const mode = patch[performanceKey];
+        if (mode !== undefined) {
+          toolSyncPending ||= (savedMode === 'direct') !== (mode === 'direct');
+          savedMode = mode;
+        }
+      }
       succeeded = true;
       if (isDisposed()) return;
-      status.textContent = t('已保存', 'Saved'); save.hidden = autosave;
-      await onSaved?.();
+      const synced = await syncPerformanceTools();
+      if (!isDisposed() && synced) {
+        status.textContent = t('已保存', 'Saved');
+        save.textContent = t('保存设置', 'Save settings');
+        save.hidden = autosave;
+        await onSaved?.();
+      }
     } catch (error) {
+      if (patch[performanceKey] === 'direct') performanceSettings?.showSync(t('档位保存失败，点下方重试。', 'Mode could not be saved. Retry below.'));
       if (!isDisposed()) {
         status.textContent = t('保存失败，请重试。', 'Save failed. Please retry.');
         save.hidden = false; if (autosave) save.textContent = t('重试保存', 'Retry save');
@@ -388,7 +439,7 @@ const configuration = {
     shell.setAttribute('aria-label', zh ? '模型设置' : 'Model settings');
     const form = settingsForm(ctx, cfg, {autosave:true});
     shell.append(form); ctx.root.append(shell);
-    return {dispose() { shell.remove();restoreAppearance(); }};
+    return {dispose() { form.disposePlanner?.(); shell.remove();restoreAppearance(); }};
   },
 };
 
@@ -548,6 +599,7 @@ export default {
         const operationBottom = el('div','l2d-operation-bottom');
         sheet.body.append(operation);
         const sharedHeader = figureHeader(ctx);
+        if (sharedHeader) header.hidden = true;
         const versionCorner = sharedHeader?.button ?? el('button', 'l2d-version-corner', '…');
         versionCorner.type = 'button';
         versionCorner.disabled = true;
@@ -621,30 +673,95 @@ export default {
         zipInput.type = 'file';
         zipInput.accept = '.zip,application/zip';
         zipInput.hidden = true;
-        toolbar.prepend(chooseFolder, chooseZip);
+        const intro = el('div', 'l2d-workflow-heading');
+        const introCopy = el('div', 'l2d-workflow-copy');
+        introCopy.append(el('h2', null, t('导入一个形象', 'Bring in a figure')),
+          el('p', null, t('支持 Live2D、BongoCat，也可以导入已有的形象包。', 'Use a Live2D or BongoCat model, or bring in an existing figure pack.')));
+        intro.append(introCopy, settingsButton);
+        const steps = el('ol', 'l2d-workflow-steps');
+        steps.setAttribute('aria-label', t('导入流程', 'Import workflow'));
+        const stepsUI = [t('选择素材', 'Choose source'), t('处理模型', 'Prepare figure'), t('前往装扮', 'Wear in Coo')].map((label, index) => {
+          const step = el('li', 'l2d-workflow-step');
+          const number = el('span', 'l2d-step-number', String(index + 1).padStart(2, '0'));
+          number.setAttribute('aria-hidden', 'true');
+          step.append(number, el('span', 'l2d-step-label', label));
+          steps.append(step);
+          return step;
+        });
+        const glyph = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        glyph.setAttribute('viewBox', '0 0 24 24');
+        glyph.setAttribute('class', 'l2d-drop-icon');
+        glyph.setAttribute('aria-hidden', 'true');
+        const stroke = doc.createElementNS(glyph.namespaceURI, 'path');
+        stroke.setAttribute('d', 'M12 15V4m-4 4 4-4 4 4M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5');
+        glyph.append(stroke);
+        dropZone.prepend(glyph);
+        const pickers = el('div', 'l2d-source-pickers');
+        pickers.append(chooseFolder, chooseZip);
+        const guidance = el('div', 'l2d-workflow-next');
+        guidance.setAttribute('role', 'status');
+        const guidanceText = el('span', 'l2d-workflow-next-copy');
+        const dressLink = wardrobeLink(el, t('前往装扮穿戴', 'Wear in Dress up'), 'l2d-btn sm l2d-workflow-dress');
+        dressLink.hidden = true;
+        guidance.append(guidanceText, dressLink);
         actions.append(pack, installNow);
-        bar.append(dropZone, folderInput, zipInput);
-        operation.append(bar,operationBottom);
+        bar.append(dropZone, pickers, folderInput, zipInput);
+        operation.append(intro, steps, bar, guidance, operationBottom);
         let staged = null;
         let currentCover = null;
+        let installedReceipt = null;
         const completed = new Map();
         const installedSources = new Set();
         function stagedWorkflow(source) {
           const models = source?.models ?? [];
           const packs = source?.packs ?? [];
-          const mode = assistState.enabled ? 'ai' : assistState.adaptationMode === 'manual' ? 'manual' : 'direct';
+          const onlyPacks = packs.length > 0 && models.length === 0;
+          const mode = onlyPacks ? 'direct' : assistState.enabled ? 'ai' : assistState.adaptationMode === 'manual' ? 'manual' : 'direct';
           return {mode, models, packs};
+        }
+        function currentSubmission() {
+          return (assistState.submissions || []).find(r => r.token === staged?.token) ?? staged?.submission;
+        }
+        function paintGuidance() {
+          const {mode, models, packs} = stagedWorkflow(staged);
+          const count = models.length + packs.length;
+          const request = mode === 'ai' && currentSubmission();
+          const isInstalled = Boolean(installedReceipt || count && installedSources.size === count);
+          const stage = isInstalled ? 2 : count ? 1 : 0;
+          for (const [index, step] of stepsUI.entries()) {
+            step.classList.toggle('done', index < stage);
+            if (index === stage) step.setAttribute('aria-current', 'step');
+            else step.removeAttribute('aria-current');
+          }
+          dressLink.hidden = !isInstalled;
+          const next = isInstalled ? t('已安装。前往 Coo 装扮，选中形象才会穿戴。', 'Installed. Open Coo Dress up and select the figure to wear it.')
+            : !count ? t('先选择素材。导入只识别文件，不会自动打包或安装。', 'Choose a source. Import identifies files without packing or installing them.')
+            : request?.error || request?.canRetry ? t('分析尚未完成。查看进展，或重新提交。', 'Analysis did not finish. Check progress or retry.')
+            : request ? t('在「进展与结果」查看分析；如果需要确认，也在那边处理。', 'Check Progress & results for analysis and any decisions.')
+            : completed.size === count ? t('已加入模型包。可以从下方编辑，或直接安装。', 'Added to the library. Edit below or install directly.')
+            : mode === 'manual' ? t('先预览动作和表情，确认绑定后保存模型包。', 'Preview motions and expressions, then save your bindings to a pack.')
+            : mode === 'ai' ? t('提交给 Coo 分析动作和表情，再到「进展与结果」查看方案。', 'Ask Coo to map motions and expressions, then review its proposal in Progress & results.')
+            : !models.length ? t('加入模型包只保存到工作台；一键安装会同时安装到 Coo。', 'Add to library saves the pack here. Install now also installs it in Coo.')
+            : t('想直接穿戴，选「一键安装」；想先编辑或保留模型包，选「一键打包」。', 'Choose Install now to get it into Coo, or Pack models to save and edit first.');
+          if (guidanceText.textContent !== next) guidanceText.textContent = next;
         }
         function paintImportButtons(count) {
           const {mode} = stagedWorkflow(staged);
           const direct = mode === 'direct';
-          const request = mode === 'ai' && (assistState.submissions || []).find(r => r.token === staged?.token);
+          const request = mode === 'ai' && currentSubmission();
           pack.classList.toggle('primary', !direct);
           pack.disabled = state.busy || !count || completed.size === count;
-          pack.textContent = request?.canRetry ? t('重新提交分析','Retry analysis') : mode === 'ai' ? t('提交 AI 适配','Submit to Coo') : mode === 'manual' ? t('预览并绑定','Preview & bind') : t('一键打包','Pack models');
+          pack.textContent = request?.canRetry ? t('重新提交分析','Retry analysis')
+            : request ? (request.waiting?.length ? t('等待 Coo 分析','Awaiting Coo') : t('已生成方案','Proposal ready'))
+              : mode === 'ai' ? t('提交 AI 适配','Submit to Coo')
+                : mode === 'manual' ? t('预览并绑定','Preview & bind') : packsOnlyLabel(staged);
           installNow.hidden = !direct;
           installNow.disabled = state.busy || !count || installedSources.size === count;
           if (request && !request.error && !request.canRetry) pack.disabled = true;
+          paintGuidance();
+        }
+        function packsOnlyLabel(source) {
+          return source?.packs?.length && !source?.models?.length ? t('加入模型包','Add to library') : t('一键打包','Pack models');
         }
         function paintSource() {
           const models = staged?.models ?? [];
@@ -653,9 +770,17 @@ export default {
           const names = [...models.map(m => m.title), ...packs.map(p => (zh ? p.nameZh : p.nameEn) || p.id)];
           sourceTitle.textContent = count ? names.slice(0, 3).join('、') + (count > 3 ? t(` 等 ${count} 项`, ` and ${count - 3} more`) : '') : t('拖入模型或 ZIP', 'Drop a model folder or ZIP');
           sourceTitle.title = names.join('\n');
-          sourceHint.textContent = count
-            ? (stagedWorkflow(staged).mode === 'ai' ? t(`已识别 ${count} 项 · 在「进展与结果」查看 AI 适配`, `${count} recognized · see AI adaptation in Progress & results`) : installedSources.size === count ? t('已安装，可在 Coo 装扮中选择', 'Installed; choose in Coo Dress up') : completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install') : t(`已识别 ${count} 项，可以开始打包`, `${count} recognized; ready to pack`))
-            : t('点击此区域后，按 Ctrl+V 粘贴文件或目录路径', 'Click here, then press Ctrl+V to paste files or a local path');
+          const submission = currentSubmission();
+          const aiHint = submission?.error ? t('提交失败 · 可重新提交分析', 'Submission failed · Retry analysis')
+            : !submission ? t('准备好后提交 AI 适配', 'Submit for AI mapping when ready')
+              : submission.waiting?.length ? t('已交给 Coo · 在「进展与结果」查看', 'Sent to Coo · See Progress & results')
+                : t('方案已生成 · 在「进展与结果」查看', 'Proposal ready · See Progress & results');
+          sourceHint.textContent = !count
+            ? t('点击此区域后，按 Ctrl+V 粘贴文件或目录路径', 'Click here, then press Ctrl+V to paste files or a local path')
+            : stagedWorkflow(staged).mode === 'ai' ? aiHint
+                : installedSources.size === count ? t('已安装 · 在「进展与结果」继续', 'Installed · Continue in Progress & results')
+                : completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install')
+                  : t(`已识别 ${count} 项`, `${count} recognized`);
           dropZone.classList.toggle('ready', count > 0);
           dropZone.setAttribute('aria-disabled', String(state.busy));
           paintImportButtons(count);
@@ -858,7 +983,7 @@ export default {
             if (!request.error && !request.waiting?.length) continue;
             const message = request.error ? t('提交失败：','Submission failed: ') + request.error : t('已提交 Coo，等待方案或聊天中的模型选择：','Sent to Coo; awaiting a proposal or model choice in chat: ') + request.waiting.join('、');
             const waiting=el('div','l2d-assist-submission');waiting.append(el('p','l2d-assist-wait'+(request.error?' has-error':''),message));
-            if(request.canRetry&&request.token===staged?.token){
+            if(request.canRetry&&request.token===staged?.token && stagedWorkflow(staged).mode === 'ai'){
               const retry=el('button','l2d-btn sm',t('重新提交','Retry'));retry.disabled=state.busy;
               retry.addEventListener('click',()=>{if(!pack.disabled) void buildSources();});waiting.append(retry);
             }
@@ -891,7 +1016,11 @@ export default {
               button.addEventListener('click',async()=>{
                 if(state.busy || method === 'assistApprove' && !ensureNotice(() => button.click(), plan.needsRuntime === true))return;
                 setBusy(true,t('处理方案…','Processing proposal…'));
-                try { await ctx.invoke(method,[plan.id]); await refresh(); }
+                try {
+                  const result = await ctx.invoke(method,[plan.id]);
+                  if (method === 'assistApprove' && result.figureId) reportResult(t('安装完成','Installation complete'), [result.warning], false, result.figureId);
+                  await refresh();
+                }
                 catch(error){reportResult(t('处理方案失败，可以重试。','Could not process the proposal. Try again.'),[text(error)],true);log.append(text(error),'bad');await refresh().catch(()=>{});}
                 finally {setBusy(false);}
               }); actions.append(button);
@@ -910,10 +1039,23 @@ export default {
           status.classList.toggle('bad', Boolean(bad));
         }
 
-        function reportResult(heading, lines = [], bad = false) {
+        function reportResult(heading, lines = [], bad = false, figureId) {
           resultFeedback.replaceChildren();
+          installedReceipt = figureId || null;
+          paintGuidance();
           if (heading) resultFeedback.append(el('strong', null, heading));
           for (const line of lines) if (line) resultFeedback.append(el('p', null, line));
+          if (figureId) {
+            const row = el('div', 'l2d-install-next');
+            const dress = wardrobeLink(el, t('前往装扮穿戴', 'Wear in Dress up'), 'l2d-btn sm primary');
+            const configure = el('a', 'l2d-btn sm', t('打开模型设置', 'Open Model settings'));
+            configure.href = '#/provider/world%3Afigure/settings';
+            const feedback = el('p', 'l2d-install-feedback');
+            feedback.setAttribute('role', 'status');
+            feedback.textContent = t('穿戴后可在模型设置选择该形象，启用编排或语音口型。', 'Once worn, select the figure in Model settings to enable planning or audio lip sync.');
+            row.append(dress, configure);
+            resultFeedback.append(row, feedback);
+          }
           resultFeedback.classList.toggle('has-error', bad);
           resultButton.classList.toggle('has-error', bad);
         }
@@ -1023,7 +1165,14 @@ export default {
           const query = search.value.trim().toLocaleLowerCase();
           const builds = state.builds.filter(b => [b.id, b.nameZh, b.nameEn].some(value => String(value || '').toLocaleLowerCase().includes(query)));
           builds.sort((a, b) => sort.value === 'name' ? String(a.nameZh || a.nameEn || a.id).localeCompare(String(b.nameZh || b.nameEn || b.id), zh ? 'zh' : 'en') : b.at - a.at);
-          if (!builds.length) grid.append(el('div', 'l2d-empty', t('没有匹配的模型包', 'No matching packs')));
+          if (!builds.length) {
+            const empty = el('div', 'l2d-empty');
+            empty.append(el('strong', null, t('没有匹配的模型包', 'No matching packs')));
+            const reset = el('button', 'l2d-btn sm', t('清除搜索', 'Clear search'));
+            reset.type = 'button';
+            reset.addEventListener('click', () => { search.value = ''; renderGrid(); search.focus(); });
+            empty.append(reset); grid.append(empty);
+          }
           const kindLabels = new Map([['live2d', 'Live2D'], ['bongocat', 'BongoCat']]);
           for (const b of builds) {
             const card = el('article', 'l2d-card l2d-model-card' + (installedId === b.id ? ' installed' : '') + (editingId === b.id ? ' selected' : ''));
@@ -1097,7 +1246,7 @@ export default {
               } finally { setBusy(false); }
             });
             del.classList.add('quiet');
-            if(b.manualAvailable){const bind=el('button','l2d-btn sm l2d-card-binding',t('动作','Actions'));bind.addEventListener('click',()=>openBindings('manualOpenBuild',[b.id]));card.appendChild(bind);}
+            if(b.manualAvailable){const bind=el('button','l2d-btn sm l2d-card-binding',b.id===state.browserBuildId?t('编辑中','Editing'):t('动作','Actions'));bind.dataset.buildId=b.id;bind.title=t('在浏览器中编辑动作与装扮','Edit actions and wardrobe in the browser');bind.addEventListener('click',()=>openBindings('manualOpenBuild',[b.id]));card.appendChild(bind);}
             row.append(edit, del);
             cardActions.appendChild(row);
             card.appendChild(cardActions);
@@ -1110,6 +1259,7 @@ export default {
           const r = await ctx.invoke('list', []);
           if (disposed) return;
           state.builds = r.builds ?? [];
+          state.browserBuildId = r.browserBuildId;
           state.installed = r.installed ?? null;
           state.figuresDir = r.figuresDir ?? '';
           paintAutomation(r.automation);
@@ -1149,12 +1299,13 @@ export default {
           try {
             const r = kind === 'install' ? await installBuild(id) : await ctx.invoke(kind, [state.dir]);
             if (disposed || !r) return;
-            reportResult(`${label} ✓`, r.warn ? [r.warn] : []);
+            reportResult(kind === 'install' ? t('安装完成','Installation complete') : `${label} ✓`, r.warn ? [r.warn] : [], false, r.figureId);
             for (const line of r.log ?? []) log.append(line, 'dim');
             log.append(`✓ ${label} · ${((performance.now() - startedAt) / 1000).toFixed(1)}s`, 'plain');
             ui.toast(`${label} ✓`, 'ok');
             if (r.warn) log.append('! ' + r.warn, 'warn');
             await refresh().catch(e => log.append(t('操作已完成，列表刷新失败：', 'Completed, but the list could not refresh: ') + text(e), 'warn'));
+            if (kind === 'install' && r.figureId && !disposed && !popup) resultButton.click();
           } catch (e) {
             const s = text(e);
             say(t(`${label}失败 · 查看结果`, `${label} failed · See results`), true);
@@ -1168,10 +1319,83 @@ export default {
 
         let bindingEditor = null;
         let bindingOpening = false;
+        let browserSessionDialog = null;
+        function markBrowserEditor(buildId) {
+          state.browserBuildId = buildId;
+          for (const button of grid.querySelectorAll('.l2d-card-binding')) {
+            button.textContent = button.dataset.buildId===buildId?t('编辑中','Editing'):t('动作','Actions');
+          }
+        }
+        function showBrowserSession(current) {
+          if (browserSessionDialog) return;
+          const body = el('div', 'l2d-browser-session');
+          const title = current.title || t('当前模型','Current model');
+          body.append(el('p', 'l2d-bind-discard-text', t(`「${title}」正在浏览器中编辑。回到原标签页可继续。`, `“${title}” is being edited in the browser. Continue in the original tab.`)));
+          const actions = el('div', 'l2d-dialog-actions');
+          const end = el('button', 'l2d-btn', current.saving?t('正在保存…','Saving…'):t('结束会话','End session'));
+          const back = el('button', 'l2d-btn primary', t('知道了','Done'));
+          let ending = false;
+          end.disabled = current.saving;
+          end.title = t('保留最近一次暂存的草稿','Keep the latest staged draft');
+          actions.append(end, back); body.append(actions);
+          const handle = browserSessionDialog = openFigureDialog(shell, t('已有浏览器编辑页','Browser editor is open'), body, {
+            closeLabel: t('关闭','Close'), locked: () => ending, onClose: () => { browserSessionDialog = null; },
+          });
+          back.onclick = () => handle.dispose();
+          end.onclick = async () => {
+            ending = true; end.disabled = back.disabled = true;
+            try {
+              await ctx.invoke('manualBrowserEnd', [current.token]);
+              if (disposed) return;
+              markBrowserEditor(); handle.dispose();
+              ui.toast(t('编辑会话已结束，可重新打开。','The editing session ended. You can reopen it.'));
+            } catch (error) { if (!disposed) ui.toast(text(error),'bad'); }
+            finally { ending = false; end.disabled = back.disabled = false; }
+          };
+        }
         async function openBindings(method,args,onSaved) {
-          if(state.busy || bindingOpening || bindingEditor || !ensureNotice(() => openBindings(method,args,onSaved), method === 'manualOpen'))return;
+          if (state.busy || bindingOpening || !ensureNotice(() => openBindings(method,args,onSaved), method === 'manualOpen')) return;
+          if (bindingEditor && !bindingEditor.browser) return;
           bindingOpening=true;
-          try{bindingEditor=await openBindingEditor(ctx,method,args,async result=>{onSaved?.(result);await refresh();},()=>{bindingEditor=null;});}
+          try {
+            const current = await ctx.invoke('manualBrowserStatus', []);
+            if (disposed) return;
+            if (current.status === 'open') { markBrowserEditor(current.buildId); showBrowserSession(current); return; }
+            const opened = await ctx.invoke('manualBrowserOpen', [method, args, zh ? 'zh' : 'en']);
+            if (disposed) return;
+            if (opened.fallback) {
+              ui.toast(t('未能打开浏览器，已切换到 Coo 内编辑。', 'Browser unavailable. Editing in Coo.'));
+              bindingEditor = await openBindingEditor(ctx, method, args, async result => { onSaved?.(result); await refresh(); }, () => { bindingEditor = null; });
+              return;
+            }
+            markBrowserEditor(opened.buildId);
+            ui.toast(t('已打开浏览器编辑器', 'Opened the browser editor'), 'ok');
+            let timer, stopped = false;
+            const watcher = {
+              browser: true,
+              dispose() { stopped = true; win.clearTimeout(timer); },
+            };
+            bindingEditor = watcher;
+            const poll = async () => {
+              if (stopped || disposed) return;
+              try {
+                const result = await ctx.invoke('manualBrowserStatus', [opened.token]);
+                if (stopped || disposed) return;
+                if (result.status === 'open') {
+                  timer = win.setTimeout(poll, 1400);
+                  return;
+                }
+                if (result.status === 'saved') {
+                  onSaved?.(result);
+                  await refresh();
+                }
+              } catch (error) {
+                if (!disposed && !stopped) ui.toast(text(error), 'bad');
+              }
+              if (bindingEditor === watcher) { bindingEditor = null; markBrowserEditor(); }
+            };
+            timer = win.setTimeout(poll, 1400);
+          }
           catch(error){ui.toast(text(error),'bad');}
           finally{bindingOpening=false;if(bindingEditor?.closed)bindingEditor=null;}
         }
@@ -1529,6 +1753,9 @@ export default {
             if (disposed) { cancelOwnedImport(result.token); return; }
             activeImportToken = result.token;
             staged = result; completed.clear(); installedSources.clear(); dropZone.classList.remove('bad');
+            if (result.submission) {
+              assistState = { ...assistState, submissions: [...(assistState.submissions || []).filter(r => r.token !== result.token), result.submission] };
+            }
             showAdaptation(null); paintSource();
             const count = (result.models?.length || 0) + (result.packs?.length || 0);
             const problems = (result.problems || []).map(p => p.reason).filter(Boolean);
@@ -1685,6 +1912,7 @@ export default {
           setBusy(true, installAfterBuild ? t('打包并安装…', 'Packing and installing…') : t('打包…', 'Packing…'));
           const failures = [];
           const warnings = [];
+          const newInstalls = [];
           let deferred = 0;
           for (const item of pending) {
             if (disposed) break;
@@ -1712,6 +1940,7 @@ export default {
                 const result = await installBuild(buildId);
                 if (!result) { deferred++; continue; }
                 installedSources.add(key);
+                if (result.figureId) newInstalls.push(result.figureId);
                 for (const line of result.log ?? []) log.append(line, 'dim');
                 if (result.warn) { warnings.push(result.warn); log.append('! ' + result.warn, 'warn'); }
               }
@@ -1727,12 +1956,14 @@ export default {
           sourceHint.textContent = failures.length
             ? t(`${failures.length} 项失败；再次点击只重试未完成项，原因见结果`, `${failures.length} failed; click again to retry unfinished items; see results`)
             : deferred ? t(`${deferred} 项已打包，等待确认替换`, `${deferred} packed; awaiting replacement approval`)
-            : installAfterBuild ? t('已安装，可在 Coo 装扮中选择', 'Installed; choose in Coo Dress up')
+            : installAfterBuild ? t('已安装 · 在「进展与结果」继续', 'Installed · Continue in Progress & results')
             : t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install');
           sourceHint.title = sourceHint.textContent;
           dropZone.classList.toggle('bad', failures.length > 0);
           const done = installAfterBuild ? t('安装完成', 'Installation complete') : t('打包完成', 'Packing complete');
-          reportResult(failures.length || deferred ? sourceHint.textContent : done, [...failures,...warnings], failures.length > 0);
+          reportResult(failures.length || deferred ? sourceHint.textContent : done, [...failures,...warnings], failures.length > 0, newInstalls.length === 1 ? newInstalls[0] : undefined);
+          if (newInstalls.length > 1) resultFeedback.append(wardrobeLink(el, t('打开装扮', 'Open Dress up')));
+          if (newInstalls.length && !popup) resultButton.click();
         }
 
         function accessibleModal(node, title) {
@@ -1881,6 +2112,8 @@ export default {
               resumeHandle = ctx.interval ? ctx.interval(pollResume, 800) : win.setInterval(pollResume, 800);
             } else {
               setBusy(false);
+              const imported = await ctx.invoke('takeDesktopImport', []).catch(() => null);
+              if (!disposed && !activeImportToken && typeof imported?.token === 'string' && Array.isArray(imported.models)) importView.result(imported);
             }
             if (recovering || attempt) ctx.refresh?.().catch(() => {});
           } catch (error) {
@@ -1917,6 +2150,7 @@ export default {
           stopResume();
           assistTimer?.dispose?.();
           bindingEditor?.dispose?.();
+          browserSessionDialog?.dispose();
           cropEditor?.dispose(); cropEditor = null;
           modal?.close(); modal?.remove();
           popup?.dispose(); overlay?.dispose?.();

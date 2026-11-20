@@ -1,4 +1,5 @@
 import {createKaomojiPainter} from './emotion-kaomoji.js';
+import {FIGURE_WOLF_KAOMOJI} from './wolf-kaomoji.js';
 import {createOrbPainter} from './emotion-orb.js';
 import {createParticlePainter} from './emotion-particles.js';
 
@@ -11,6 +12,7 @@ const MOODS = new Map(Object.entries({
   scared:'fear', surprised:'fear', worried:'fear', flustered:'fear',
   content:'calm', sleep:'calm', sleepy:'calm', listening:'calm', thinking:'calm',
 }));
+const KAOMOJI_MOODS = {wink:'joy', smug:'joy', pout:'anger'};
 const ORB_MOODS = new Set(['love','anger','sad']);
 const STILL = {joy:.68, love:1.05, anger:1.13, sad:2.27, fear:.81, calm:1.2};
 const STRENGTH = {restrained:.64, natural:.9, dramatic:1};
@@ -94,14 +96,23 @@ export function createFinalEmotionEffects({make,parent,art,model,media}, style) 
   const cooldown = model.effectProfiles?.[tier]?.cooldown ?? 1.2;
   let theme = parent.ownerDocument.documentElement.dataset.theme || 'light';
   let reduced = !!media?.matches;
-  let pending, cueUntil = -Infinity, active, leaving;
+  let pending, cueUntil = -Infinity, active, leaving, action;
   let opacity = 0, lastPaint = -Infinity, facing;
 
   function draw(frame) {
-    const {face,t} = frame;
+    const {t} = frame;
+    let {face} = frame;
+    if (style === 'kaomoji') {
+      if (pending === 'neutral') action = undefined;
+      else if (Object.hasOwn(FIGURE_WOLF_KAOMOJI, pending)) action = {word:pending, until:t+1.25};
+      if (frame.mode === 'sleep') face = 'sleep';
+      else if (action && t < action.until) face = action.word;
+      else action = undefined;
+    }
     if (pending === 'heard' || pending === 'bounce') cueUntil = t+1.15;
     if (pending === 'neutral') cueUntil = -Infinity;
     let mood = frame.mode === 'dance' ? 'joy' : MOODS.get(face);
+    if (style === 'kaomoji') mood ??= Object.hasOwn(KAOMOJI_MOODS, face) ? KAOMOJI_MOODS[face] : undefined;
     if (!mood && face === 'neutral' && t < cueUntil) mood = 'joy';
     if (style === 'orb' && !ORB_MOODS.has(mood)) mood = undefined;
     const repeat = active && pending === face && t-active.since >= cooldown;
@@ -140,7 +151,7 @@ export function createFinalEmotionEffects({make,parent,art,model,media}, style) 
     // The figure clock drives all styles. Canvas draws at up to 30 Hz, without an extra loop.
     const interval = style === 'kaomoji' ? 0 : 1/30;
     if (lastPaint !== -Infinity && (reduced || t >= lastPaint && t-lastPaint+1e-6 < interval)) return;
-    painter.paint(mood,reduced ? STILL[mood] : age,theme,reduced);
+    painter.paint(mood,reduced ? STILL[mood] : age,theme,reduced,face);
     root.setAttribute('data-reduced',String(reduced));
     lastPaint = t;
   }

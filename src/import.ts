@@ -488,7 +488,7 @@ export class PackImporter {
     token: string,
     dirs: readonly string[],
     replace: readonly string[],
-    opts: { figuresDir: string; backupRoot?: string; keep?: number },
+    opts: { figuresDir: string; backupRoot?: string; keep?: number; install?: (source: string, beforeSwap: (replaces: boolean) => void) => Promise<string> },
   ): Promise<{ installed: Array<{ id: string; target: string }> } | { conflicts: string[] } | { error: string }> {
     const staged = this.staged;
     if (!staged || staged.token !== token) return { error: '这次导入已经过期，重新选一次' };
@@ -514,10 +514,8 @@ export class PackImporter {
     for (const c of chosen) {
       const source = this.resolve(token,c.dir);
       if(!source)return {error:'挑中的目录已失效'};
-      const target = await installPack(source, opts.figuresDir, {
-        ...opts,
-        beforeSwap: replaces => { if (replaces && !replace.includes(c.id)) throw Error('同 ID 形象需要确认替换'); },
-      });
+      const beforeSwap = (replaces: boolean) => { if (replaces && !replace.includes(c.id)) throw Error('同 ID 形象需要确认替换'); };
+      const target = opts.install ? await opts.install(source, beforeSwap) : await installPack(source, opts.figuresDir, { ...opts, beforeSwap });
       out.push({ id: c.id, target });
     }
     // Keep the staged files on failure so users can retry.

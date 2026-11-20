@@ -4,6 +4,8 @@ import { Live2dWorld, type Live2dSection } from './world.ts';
 import { FIGURE_TOOL_DECLS, FIGURE_EVENTS, FIGURE_SUMMARIES } from './automation.mjs';
 import { VOICE_CONTROLS } from './voice-settings.mjs';
 import { FIGURE_SPEAK } from './voice.ts';
+import { PERFORMANCE_TOOLS } from './performance.ts';
+import { DEFAULT_PREVIEW_SIZE } from './manual-preview.ts';
 
 export type { Live2dSection };
 
@@ -18,7 +20,7 @@ export const LIVE2D: WorldDefinition<Live2dSection> = {
     cover: true,
     texture: 'original',
     quality: 'balanced',
-    previewSize: '512',
+    previewSize: String(DEFAULT_PREVIEW_SIZE),
     emotionEffect: 'native',
     emotionEffectSize: 'medium',
     gearTheme: 'red',
@@ -38,11 +40,15 @@ export const LIVE2D: WorldDefinition<Live2dSection> = {
     assistAuto: true,
     assistConfirmFallback: false,
     modelRoots: '',
+    performanceMode: 'vocab',
+    performanceServices: [],
+    performanceService: '',
     ...VOICE_CONTROLS,
   }),
   describe: {
     tools: [
       ...FIGURE_TOOL_DECLS.map(({name,description,parameters,tags}) => ({name,description,parameters,tags,summary:FIGURE_SUMMARIES[name as keyof typeof FIGURE_SUMMARIES]})),
+      ...PERFORMANCE_TOOLS,
       { name: FIGURE_SPEAK.name, description: FIGURE_SPEAK.description, parameters: FIGURE_SPEAK.parameters, tags: FIGURE_SPEAK.tags, summary: 'Start the configured Figure voice alongside the Coo reply bubble.' },
     ],
     events: FIGURE_EVENTS as EventDescribe[],
@@ -52,7 +58,6 @@ export const LIVE2D: WorldDefinition<Live2dSection> = {
       getConfig: () => ctx.cfg,
       persist: (patch) => ctx.persist(patch as never),
       dataDir: ctx.dataDir,
-      botDir: ctx.botDir,
       secret: name => ctx.secret(name),
       storeSecret: (name, value) => ctx.storeSecret(name, value),
     }),

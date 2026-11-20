@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { audioMime } from './voice-providers.mjs';
 
+export type VoiceStarted = (startedAt: number, durationMs?: number) => void;
+
 export interface SystemVoicePlayer {
   readonly canReportStart: boolean;
   warm(): void;
-  play(audio: Buffer, volume: number, signal: AbortSignal, onStarted?: (startedAt: number) => void): Promise<void>;
+  play(audio: Buffer, volume: number, signal: AbortSignal, onStarted?: VoiceStarted): Promise<void>;
   interrupt(): void;
   stop(): Promise<void>;
 }
@@ -29,6 +31,8 @@ const WINMM = Buffer.from([
   '}',
   'function PlayObserved {',
   "  $code = MCI 'set figureVoiceClip time format milliseconds'",
+  '  $length = 0',
+  "  if ($code -eq 0) { try { $length = [long](ReadMCI 'status figureVoiceClip length') } catch {} }",
   "  if ($code -eq 0) { $code = MCI 'play figureVoiceClip' }",
   '  if ($code -ne 0) { return $code }',
   '  $started = $false',
@@ -44,7 +48,7 @@ const WINMM = Buffer.from([
   '      if ($position -gt 0) {',
   '        $started = $true',
   '        $startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $position',
-  "        [Console]::WriteLine(('START ' + $startedAt))",
+  "        [Console]::WriteLine(('START ' + $startedAt + ' ' + $length))",
   '      }',
   '    }',
   '    Start-Sleep -Milliseconds 8',
@@ -78,7 +82,7 @@ type Worker = {
   child: ChildProcessWithoutNullStreams;
   ready: Promise<void>;
   closed: Promise<void>;
-  started?: (startedAt: number) => void;
+  started?: VoiceStarted;
   finish?: (error?: Error) => void;
   close(error: Error): void;
 };
@@ -100,7 +104,7 @@ class DesktopPlayer implements SystemVoicePlayer {
     }
   }
 
-  play(audio: Buffer, volume: number, signal: AbortSignal, onStarted?: (startedAt: number) => void): Promise<void> {
+  play(audio: Buffer, volume: number, signal: AbortSignal, onStarted?: VoiceStarted): Promise<void> {
     signal.throwIfAborted();
     if (this.active) throw new Error('系统播放器正忙');
     if (!Number.isFinite(volume) || volume < 0 || volume > 1) throw new Error('播放音量无效');
@@ -124,7 +128,7 @@ class DesktopPlayer implements SystemVoicePlayer {
     await Promise.all(this.closing);
   }
 
-  private async run(audio: Buffer, volume: number, signal: AbortSignal, onStarted?: (startedAt: number) => void) {
+  private async run(audio: Buffer, volume: number, signal: AbortSignal, onStarted?: VoiceStarted) {
     const mime = audioMime(audio);
     const ext = mime === 'audio/mpeg' ? 'mp3' : mime === 'audio/wav' ? 'wav'
       : this.platform === 'darwin' && mime === 'audio/mp4' ? 'm4a'
@@ -173,10 +177,11 @@ class DesktopPlayer implements SystemVoicePlayer {
     const lines = createInterface({ input: child.stdout });
     lines.on('line', line => {
       if (line === 'READY') { clearTimeout(timer); ready(); }
-      else if (/^START \d+$/.test(line)) {
+      else if (/^START \d+(?: \d+)?$/.test(line)) {
         const started = worker.started;
         worker.started = undefined;
-        try { started?.(Number(line.slice(6))); }
+        const [, at, length] = line.split(' ');
+        try { started?.(Number(at), Number(length) || undefined); }
         catch (error) { worker.close(error instanceof Error ? error : new Error(String(error))); }
       }
       else if (line === 'RESULT 0') worker.finish?.();
@@ -194,7 +199,7 @@ class DesktopPlayer implements SystemVoicePlayer {
     return worker;
   }
 
-  private async playWindows(file: string, volume: number, signal: AbortSignal, onStarted?: (startedAt: number) => void) {
+  private async playWindows(file: string, volume: number, signal: AbortSignal, onStarted?: VoiceStarted) {
     const worker = this.windowsWorker();
     const abort = () => worker.close(signal.reason instanceof Error ? signal.reason : interrupted());
     signal.addEventListener('abort', abort, { once: true });

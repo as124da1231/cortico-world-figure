@@ -1,12 +1,22 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';import {join} from 'node:path';import {tmpdir} from 'node:os';
 import {manualPreviewPlan} from '../src/manual-preview.ts';import {ManualSessions} from '../src/manual.ts';
+import {PNG} from 'pngjs';
+import {previewResult} from '../src/preview-renderer.ts';
 const catalog={model:{title:'test'},resources:[{id:'face',kind:'expression',classification:'expression',seconds:1,raw:{Parameters:[{Id:'Mouth',Value:1}]}},{id:'move',kind:'motion',classification:'gesture',seconds:4,raw:{Curves:[{Id:'Arm',Target:'Parameter',Segments:[0,0,0,4,1]}]}}]};
 const request={page:'actions',raw:false,word:'happy',resource:'face',bindings:[],groups:[],picks:{}};
 test('static plans compare expressions and sample motions; wardrobe picks and requests are validated',()=>{
- const face=manualPreviewPlan(catalog,request);assert.equal(face.size,512);assert.equal(face.samples.length,2);for(const size of [256,512,1024])assert.equal(manualPreviewPlan(catalog,{...request,previewSize:size}).size,size);assert.throws(()=>manualPreviewPlan(catalog,{...request,previewSize:128}),/精度无效/);assert.equal(face.samples[0].resource,undefined);assert.equal(face.samples[1].word,'happy');assert.equal(manualPreviewPlan(catalog,{...request,raw:true}).samples[1].word,undefined);
+ const face=manualPreviewPlan(catalog,request);assert.equal(face.size,1024);assert.equal(face.samples.length,2);for(const size of [1024,2048,'unlimited'])assert.equal(manualPreviewPlan(catalog,{...request,previewSize:size}).size,size);assert.throws(()=>manualPreviewPlan(catalog,{...request,previewSize:512}),/精度无效/);assert.equal(face.samples[0].resource,undefined);assert.equal(face.samples[1].word,'happy');assert.equal(manualPreviewPlan(catalog,{...request,raw:true}).samples[1].word,undefined);
  const move=manualPreviewPlan(catalog,{...request,resource:'move'});assert.deepEqual(move.samples.map(s=>s.time),[.8,2,3.2]);assert.deepEqual(manualPreviewPlan(catalog,{...request,resource:'move',sampleSet:1}).samples.map(s=>s.time),[.4,1.6,2.8]);
  assert.throws(()=>manualPreviewPlan(catalog,{...request,resource:'../file'}),/资源无效/);assert.throws(()=>manualPreviewPlan(catalog,{...request,picks:{unknown:'on'}}),/选择无效/);assert.throws(()=>manualPreviewPlan(catalog,{...request,word:'anything'}),/动作词无效/);
  const groups=[{id:'lookcoat',slot:'outfit',name:'装扮',options:[{id:'on',name:'戴上',resource:'face',ground:true}]}];const appearance=manualPreviewPlan(catalog,{...request,page:'wardrobe',groups,picks:{lookcoat:'on'}});assert.deepEqual(appearance.samples.map(s=>s.picks),[{}, {lookcoat:'on'}]);assert.deepEqual(appearance.groups[0].options[0],{id:'on',name:'戴上',resource:'face'});
+});
+test('uncapped previews accept 2048 px comparison PNGs and require uncapped rendering',()=>{
+ const plan=manualPreviewPlan(catalog,{...request,resource:null,previewSize:'unlimited'});
+ const png='data:image/png;base64,'+PNG.sync.write(new PNG({width:2048,height:2048})).toString('base64');
+ const quality={textureLimit:0,canvasLimit:0,canvas:[2048,2048],maskSize:2048,limits:{canvas:8192,texture:8192}};
+ const result={frames:[{png}],quality};
+ assert.equal(previewResult(plan,result).frames[0].png,png);
+ assert.throws(()=>previewResult(plan,{...result,quality:{...quality,textureLimit:2048}}),/画质上限无效/);
 });
 async function fixture(t,render){const root=await mkdtemp(join(tmpdir(),'figure-static-session-'));t.after(()=>rm(root,{recursive:true,force:true}));const pack=join(root,'pack');await mkdir(join(pack,'models','test'),{recursive:true});await writeFile(join(pack,'figure.json'),JSON.stringify({vocab:[]}));await writeFile(join(pack,'models/test/profile.js'),'export default {\n};\n');const sessions=new ManualSessions(root,new URL('../workbench',import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1'),render);t.after(()=>sessions.stop());return {sessions,opened:await sessions.open(pack,catalog)};}
 test('superseded screenshot jobs abort, cached requests reuse images, and close waits for cleanup',async t=>{

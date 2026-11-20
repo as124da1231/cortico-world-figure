@@ -5,17 +5,22 @@ Copyright (C) 2026 lian0721
 打包产物（figure pack）不复制 body.js / rig.js：包里的 figure.js 只调用宿主传入的
 opts.kit.createBody，和 Coo 自带的形象、鲸鱼包、酒狐包走同一个公共 puppet 引擎。
 本仓库 workbench/vendor/coo-kit/ 只是工作台在浏览器里单独预览时用的副本，
-不进入生成的形象包。
+不进入安装产物。
 
 第三方组件（Live2D Cubism SDK for Web、SoulLink Emotion Engine、Coopanion
 desktop-pet kit 与预览 frame）的来源、分发范围与许可文本见 workbench/NOTICE、
 workbench/vendor/coo-preview/ 与 workbench/pack/sdk/。
 
+`src/vendor/soullink-speaking-planner.js` bundles the speaking-motion planner and its client
+from SoulLink Emotion SDK commit 02cd75ac0a085a87d84d1a885f1b33eca8742d53 under Apache-2.0.
+`src/vendor/soullink-speech-session.js` bundles the original runtime-core session and
+clock module from the same commit. Both import Figure's vendored SoulLink engine. The license is in workbench/pack/vendor/soullink/LICENSE.
+
 Cubism Core、Framework 和着色器均不随扩展安装包分发。用户确认 Live2D 许可后，扩展校验官方下载并在本机准备运行组件。已确认许可的用户可自动恢复已校验的旧副本。
 
 The optional TTS provider adapters and playback sampling are adapted from
-DSH Live2D Body (2026, AGPL-3.0-or-later). Its provider catalog follows AstrBot's
-TTS catalog (AGPL-3.0-or-later). Figure owns its provider settings and playback.
+DSH Live2D Body (2026, AGPL-3.0-or-later). TTS catalog reference: AstrBot
+(AGPL-3.0-or-later).
 The incremental tool-argument reader and Windows system playback approach
 are adapted from cortico-world-streamvoice 0.5.0 by xww (AGPL-3.0-or-later).
 Source: https://github.com/laojingwei/cortico-world-streamvoice
@@ -26,5 +31,5 @@ Source revision: e637c53, engine/runtime/emotion-*.js.
 
 Live2D 运行组件分别适用 Live2D 的许可，许可文本随扩展保留。
 
-生成的 Live2D 形象包包含 Live2D Cubism Core，仅供本机使用。
-Generated Live2D figure packs contain Live2D Cubism Core and are for local use only.
+使用本功能生成的形象包包含 Live2D Cubism Core；请仅在本机使用，不要上传、分享或再次分发。
+Generated figure packs contain Live2D Cubism Core. Use locally; do not upload, share or redistribute them.

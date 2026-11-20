@@ -82,7 +82,7 @@ try {
     }
     const evidence = [];
     for (const sample of __NATIVE_SAMPLES__) {
-      const png = globalThis.__l2dNativeSample?.(sample.id, sample.time, sample.word, sample.generic);
+      const png = globalThis.__l2dNativeSample?.(sample.id, sample.time, sample.word, sample.generic, 384, sample.overlays || []);
       checkRender();
       if (!png) throw new Error('动作取样渲染失败');
       evidence.push({ ...sample, png });
@@ -358,7 +358,7 @@ export function pngOf(raw: unknown, size?: number): Buffer {
   if (buf.length < 45 || !buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
       || buf.readUInt32BE(8) !== 13 || buf.toString('ascii',12,16) !== 'IHDR') throw invalid();
   const width = buf.readUInt32BE(16), height = buf.readUInt32BE(20);
-  if (!width || !height || width > 1024 || height > 1024 || size && (width !== size || height !== size)) throw invalid();
+  if (!width || !height || (size === undefined ? width > 1024 || height > 1024 : width !== size || height !== size)) throw invalid();
   let hasImage = false;
   for (let offset=33; offset+12<=buf.length;) {
     const length = buf.readUInt32BE(offset), end = offset+12+length;

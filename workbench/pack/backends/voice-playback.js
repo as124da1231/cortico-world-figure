@@ -1,4 +1,3 @@
-// DSH Live2D Body uses the same Web Audio output clock and 20 ms RMS sampling.
 export function voiceLevel(buffer, position) {
   if (position < 0 || position >= buffer.duration) return 0;
   const first = Math.floor(position * buffer.sampleRate);

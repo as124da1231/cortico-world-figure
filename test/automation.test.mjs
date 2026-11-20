@@ -113,10 +113,11 @@ test('deep mode requires mapping comparisons even after general inspection and c
  await assert.rejects(f.auto.install(unreviewed.id),/真实同意/);assert.equal(f.executions.length,0);
  const result=JSON.parse((await f.auto.call('figure_actions',{model:f.model.id,review:f.bindings})).text);
  assert.equal(result.review.provided,true);assert(result.evidence.some(e=>e.generic&&e.word==='happy'));assert(result.evidence.some(e=>!e.generic&&e.word==='happy'));
- const reviewed=await f.auto.prepare(f.model.id,f.bindings);assert.equal(reviewed.automatic,true);assert(reviewed.analysis.review.includes(bindingKey(f.bindings[0])));
+ const reviewed=await f.auto.prepare(f.model.id,f.bindings);assert.equal(reviewed.automatic,false);assert(reviewed.analysis.review.includes(bindingKey(f.bindings[0])));
  // Existing unreviewed proposals cannot acquire a later receipt silently.
  await assert.rejects(f.auto.install(unreviewed.id),/真实同意/);
- await f.auto.install(reviewed.id);assert.equal(f.executions.length,1);
+ await assert.rejects(f.auto.install(reviewed.id),/真实同意/);
+ await f.auto.approve(reviewed.id);await f.auto.install(reviewed.id);assert.equal(f.executions.length,1);
 });
 
 test('unsupported, partial or source-changed pictures never authorize automatic installation',async t=>{
@@ -132,7 +133,7 @@ test('unsupported, partial or source-changed pictures never authorize automatic 
 
 test('changing labels invalidates receipts and raising depth cannot bypass confirmation',async t=>{
  const f=await automation(t,{evidence:evidenceFrames});Object.assign(f.cfg,{assistGear:'image',assistDepth:'standard',assistAuto:true});f.host.modelFacts.accepts=()=>true;
- await f.auto.actions(f.model.id);const p=await f.auto.prepare(f.model.id,f.bindings);assert.equal(p.automatic,true);
+ await f.auto.actions(f.model.id);const p=await f.auto.prepare(f.model.id,f.bindings);assert.equal(p.automatic,false);
  f.cfg.assistDepth='deep';assert.equal(f.auto.publicPlan(f.auto.plans.get(p.id)).automatic,false);
  await assert.rejects(f.auto.install(p.id),/真实同意/);
  const reviewed=await f.auto.actions(f.model.id,0,undefined,{review:f.bindings});assert(JSON.parse(reviewed.text).review.provided);

@@ -30,8 +30,9 @@ import { bubbleMouthPose, roleValue } from './role-values.js';
 import { createAdaptiveRenderer, resizeMaskBuffers } from './render-config.js';
 import { createFigureVoicePlayback, createVoiceMouthEnvelope } from './voice-playback.js';
 import { graphicsLimits, displayPixels, resolutionPlan, texturePlan } from './render-quality.js';
-import { createNativeActions, applyNativeValues } from './native-actions.js';
+import { createNativeActions, applyNativeValues, captureMotionLocks } from './native-actions.js';
 import {createWardrobe,wardrobeConfig} from './wardrobe.js';
+import {PROTECTED_PARAMETER} from './performance-plan.js';
 import {createPetEmotionEffects} from './emotion-effects/index.js';
 import * as emotionConfig from './emotion-style.js';
 import {bodyCropForScheme,normalizeBodyCrop} from './crop-config.js';
@@ -44,6 +45,7 @@ const XHTML = 'http://www.w3.org/1999/xhtml';
 /** 角色在 256 logo 方格里的画布。 */
 const BOX = 256;
 const INITIAL_CANVAS_PX = 512;
+const HIGH_PREVIEW_PX = 2048;
 const KIT_LOOK_RATE = 9;
 const KIT_CURSOR_LOOK_RANGE = [5, 4];
 /** 简易模式：只走 role + 通用配方 + SoulLink，不播任何原生 exp3 / motion / Idle。 */
@@ -99,12 +101,17 @@ export async function createLive2DBody(base, opts, entry, kit) {
   } catch {
     throw new Error(`模型 ${entry.id} 缺 profile.js（role 表 / 表情配方 / 取景）`);
   }
-  const previewPixels=opts.preview&&[256,512,1024].includes(opts.previewSize)?opts.previewSize:null;
-  const renderPolicy = previewPixels?{mode:'economy',textureLimit:previewPixels,canvasLimit:previewPixels,strict:false}:profile.render ?? {mode:'original',textureLimit:0,canvasLimit:0,strict:true};
+  const previewPixels = opts.preview && [256, 512, 1024, HIGH_PREVIEW_PX].includes(opts.previewSize) ? opts.previewSize : null;
+  const unlimitedPreview = opts.preview && opts.previewSize === 'unlimited';
+  const capturePixels = opts.preview ? opts.previewCaptureSize : undefined;
+  const renderPolicy = unlimitedPreview ? {mode:'original',textureLimit:0,canvasLimit:0,strict:false}
+    : previewPixels ? {mode:'economy',textureLimit:previewPixels,canvasLimit:previewPixels,strict:false}
+    : profile.render ?? {mode:'original',textureLimit:0,canvasLimit:0,strict:true};
 
   // ---------- 画布（放 kit 的 SVG 组里） ----------
   const canvas = doc.createElementNS(XHTML, 'canvas');
-  canvas.width = previewPixels||Math.min(INITIAL_CANVAS_PX,renderPolicy.canvasLimit||INITIAL_CANVAS_PX);
+  canvas.width = capturePixels || previewPixels || (unlimitedPreview ? HIGH_PREVIEW_PX
+    : Math.min(INITIAL_CANVAS_PX,renderPolicy.canvasLimit||INITIAL_CANVAS_PX));
   canvas.height = canvas.width;
   canvas.style.width = '100%';
   canvas.style.height = '100%';
@@ -129,6 +136,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   });
   if (!gl) throw new Error('这个环境无法启用 WebGL');
   const limits = graphicsLimits(gl);
+  if (opts.preview) canvas.width = canvas.height = Math.min(canvas.width, limits.canvas);
 
   // ---------- 模型（官方双轨回退：优先 fetch 原生 moc3，失败回退到 base64 模块） ----------
   const resolveAsset = (rel) => {
@@ -199,7 +207,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
   // Complex models exceed the SDK's single-buffer limit (36 clipping groups).
   // Overflow aliases masks onto one region, corrupting faces/eyes/clothing.
-  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height, {strict:renderPolicy.strict,maskSize:previewPixels||Math.min(512,renderPolicy.canvasLimit||512)});
+  const renderConfig = createAdaptiveRenderer(model, gl, canvas.width, canvas.height, {strict:renderPolicy.strict,maskSize:capturePixels || previewPixels || unlimitedPreview ? canvas.width : Math.min(512,renderPolicy.canvasLimit||512)});
   const { renderer, maskBuffers } = renderConfig;
   const renderNotice = doc.createElement('div');
   renderNotice.setAttribute('role','status'); renderNotice.hidden = true;
@@ -325,9 +333,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
   let currentExpr = null;
   let expressionOverride = null;
 
-  function stepExpression(face, dt) {
+  function stepExpression(face, dt, muted = false) {
     if (SIMPLE) return;
-    const want = expressionOverride ?? profile.expressions?.[face ?? 'neutral'] ?? null;
+    const legacy = profile.expressions?.[face ?? 'neutral'] ?? null;
+    // A saved native recipe owns expression playback. Do not apply an older
+    // single-expression mapping a second time underneath its additive values.
+    const want = muted ? null : expressionOverride ?? (legacy && native?.hasExpression(face ?? 'neutral') ? null : legacy);
     if (want !== currentExpr) {
       try { model._expressionManager.stopAllMotions(); } catch { /* 忽略 */ }
       currentExpr = null;
@@ -419,7 +430,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     }
     if (items.length) roles.set('mouthOpen', { space: [0, 1], def: 0, items });
   }
-  let voicePlayback;
+  let voicePlayback, performancePlayback;
   const voiceMouth = createVoiceMouthEnvelope();
 
   const driven = new Set();
@@ -469,7 +480,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   for (let i = 0; i < model._model.getPartCount(); i++) {
     partIndex.set(model._model.getPartId(i).getString(), i);
   }
-  let native = profile.native?.version === 1 ? createNativeActions(profile.native) : null;
+  let native = [1,2].includes(profile.native?.version) ? createNativeActions(profile.native) : null;
   const wardrobe=createWardrobe(model._model,paramIndex,partIndex,{parts:{...profile.parts?.base,...profile.clean?.parts},params:profile.clean?.params});
   wardrobe.configure(profile.wardrobe);wardrobe.scheme(opts.scheme);
   let previewState = null;
@@ -594,7 +605,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   }
 
   // ---------- 每帧：base → 表演层 / 表情 → 程序动画 ----------
-  function applyFrame(face, frame, dt, neutralPose = false, speechLevel = null) {
+  function applyFrame(face, frame, dt, neutralPose = false, speechLevel = null, layer = null) {
     const t = frame.t ?? 0;
 
     // 1) 全部 role 回到默认（写默认 == 模型默认姿势，所以是幂等的）
@@ -602,7 +613,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
     // 2) 表演层：连续情绪（VAD → FACS → role）。没有表演层才走离散配方。
     //    量取景的那几帧强制中性姿势：待机动作会把包围盒撑大，脚就量不准。
-    const engine = performance && !neutralPose ? performance.update(t, dt, frame.face, speechLevel) : null;
+    const engine = performance && !neutralPose ? performance.update(t, dt, frame.face, speechLevel, layer) : null;
     const recipe = neutralPose
       ? {}
       : (engine
@@ -719,8 +730,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
     const now = doc.defaultView.performance.now();
     if (now - resolutionCheckedAt < 250 || !fo.isConnected) return true;
     resolutionCheckedAt = now;
-    const pixels = displayPixels(fo.getScreenCTM?.(),fo.getBoundingClientRect(),BOX);
-    const plan = resolutionPlan(pixels,doc.defaultView.devicePixelRatio,renderPolicy,limits);
+    const pixels = capturePixels ?? displayPixels(fo.getScreenCTM?.(),fo.getBoundingClientRect(),BOX);
+    const dpr = capturePixels ? 1 : doc.defaultView.devicePixelRatio || 1;
+    const desired = unlimitedPreview ? Math.max(pixels,HIGH_PREVIEW_PX / dpr) : pixels;
+    const plan = resolutionPlan(desired,dpr,renderPolicy,limits);
     if (plan.warning) showRenderNotice(plan.warning);
     const size = Math.min(plan.size,allocationCeiling), previous = canvas.width;
     if (size === previous) { shrinkTarget = 0; return true; }
@@ -1129,9 +1142,28 @@ export async function createLive2DBody(base, opts, entry, kit) {
     return anchors;
   };
 
-  let emotionEffects, initialEmotionTrigger;
-  const emotionStyle = emotionConfig.default;
+  const effectPicks = emotionConfig.emotionEffectPicks ?? {};
+  const effectPresets = emotionConfig.emotionEffectPresets ?? {};
+  function effectForScheme(scheme) {
+    const pick = Object.hasOwn(effectPresets, scheme)
+      ? effectPresets[scheme]
+      : (scheme || '').split('-').find(id => Object.hasOwn(effectPicks, id));
+    return effectPicks[pick] ?? emotionConfig.default;
+  }
+  let emotionEffects, initialEmotionTrigger, kitSvg;
+  let emotionStyle = effectForScheme(opts.scheme);
   let emotionEffectsEnabled = emotionStyle !== 'native';
+  function setEmotionEffectsEnabled(enabled) {
+    emotionEffectsEnabled = enabled;
+    kitSvg?.classList.toggle('figure-custom-effects', enabled);
+  }
+  function selectEmotionStyle(style) {
+    if (style === emotionStyle) return;
+    emotionEffects?.dispose();
+    emotionEffects = initialEmotionTrigger = undefined;
+    emotionStyle = style;
+    setEmotionEffectsEnabled(style !== 'native');
+  }
   function triggerEmotionEffect(word) {
     if (!emotionEffectsEnabled) return;
     if (emotionEffects) emotionEffects.trigger(word);
@@ -1150,9 +1182,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
       }
       emotionEffects.draw(frame);
     } catch (error) {
-      emotionEffectsEnabled = false;
+      setEmotionEffectsEnabled(false);
       emotionEffects?.dispose();
-      emotionEffects = undefined;
+      emotionEffects = initialEmotionTrigger = undefined;
       console.warn('[l2d] 情绪特效已停止', error);
     }
   }
@@ -1279,30 +1311,46 @@ export async function createLive2DBody(base, opts, entry, kit) {
       settleWardrobe();
 
       if (opts.preview && previewState) frame = {...frame,face:previewState.word,gesture:null,talk:0,look:[0,0]};
-      drawEmotionEffects(petG, frame);
       const dt = clamp(frame.dt ?? (elapsedBetweenDraws || 1 / 60), 0.001, 0.1);
       elapsedBetweenDraws = 0;
+      const layer = performancePlayback?.frame();
+      let nativeValues = [];
+      if (native && extent) {
+        try { nativeValues = native.update(frame, dt); }
+        catch (error) { console.warn('[l2d] Native update failed; generic behavior retained', error); }
+      }
+      const motionTracks = nativeValues.filter(value => value.nativeOnly && (value.target==='PartOpacity' ? partIndex : paramIndex).has(value.id));
+      const plannedIds = new Set(layer?.tracks.map(track => track.id));
+      const animationOnly = motionTracks.length > 0 || Boolean(previewState?.raw);
+      petG.parentElement?.classList.toggle('figure-motion-only', animationOnly);
+      if (animationOnly) {
+        initialEmotionTrigger = undefined;
+        if (emotionEffects) { emotionEffects.dispose(); emotionEffects = undefined; }
+      } else drawEmotionEffects(petG, frame);
 
       model._model.loadParameters();
       resetNativeBase();
-      const neutralPose = !extent || Boolean(previewState?.raw);
+      const neutralPose = !extent || animationOnly;
       const speech = neutralPose ? null : voicePlayback?.level();
       const spokenMouth = voicePlayback && voiceMouth.update(speech, voicePlayback.gain, dt);
-      const mouth = applyFrame(face, frame, dt, neutralPose, speech);
-      stepMotion(frame, dt);
-      stepExpression(frame.face, dt);
-      applyPartOpacity(currentId);
-      let nativeValues = [];
-      if (native && extent) {
-        try { nativeValues = native.update(frame, dt); applyNativeValues(nativeValues.filter(v => !nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex); }
-        catch (error) { console.warn('[l2d] Native update failed; generic behavior retained', error); }
+      const mouth = applyFrame(face, layer?.face ? {...frame,face:layer.face} : frame, dt, neutralPose, speech, layer);
+      if (!animationOnly) stepMotion(frame, dt);
+      else if (currentId) {
+        model._motionManager.stopAllMotions();
+        currentId = lastGesture = null;
+        idlePlaying = false;
       }
+      stepExpression(frame.face, dt, animationOnly);
+      applyPartOpacity(currentId);
+      const blendedValues = nativeValues.filter(value => !value.nativeOnly && !plannedIds.has(value.id));
+      applyNativeValues(blendedValues.filter(v => !nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex);
       wardrobe.apply();
+      const locks = captureMotionLocks([...motionTracks.filter(value => !plannedIds.has(value.id)), ...(layer?.tracks ?? [])], model._model, paramIndex, partIndex);
       model._model.saveParameters();            // ← 必须在 physics 之前
       // Save the authored pose first so the automatic contribution never accumulates.
       if (bongoBreath !== undefined) model._model.addParameterValueByIndex(bongoBreath, bongo.bongoBreathContribution(frame.t ?? 0));
       try { model._physics?.evaluate(model._model, dt); } catch { /* 物理失败不致命 */ }
-      if (nativeValues.length) applyNativeValues(nativeValues.filter(v => nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex);
+      if (blendedValues.length) applyNativeValues(blendedValues.filter(v => nativePhysicsOutputs.has(v.id)), model._model, paramIndex, partIndex);
       try { model._pose?.updateParameters(model._model, dt); } catch { /* 姿势失败不致命 */ }
       applyCleanParams();
       wardrobe.apply();
@@ -1314,8 +1362,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
         if (spokenMouth && !neutralPose) writeRole('mouthOpen', spokenMouth.open, spokenMouth.weight);
       }
       if (bongoInput) bongoArt.draw(bongoInput.apply(dt));
+      applyNativeValues(locks, model._model, paramIndex, partIndex);
       model._model.update();
       render();
+      performancePlayback?.rendered(layer);
 
       globalThis.__l2dMotion = {
         id: currentId,
@@ -1324,6 +1374,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
         expr: currentExpr,
         exprCount: expressions.size,
         native: native?.state() ?? null,
+        nativeOnly: motionTracks.length > 0,
       };
 
       // 贴图就绪后的第 3 帧量一次可见范围（等姿势稳定，别量到眨眼/动作的瞬间）
@@ -1360,6 +1411,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     dispose() {
       disposed = true;
       voicePlayback?.dispose();
+      performancePlayback?.dispose();
       emotionEffects?.dispose();
       clearTimeout(textureDeadline);
       renderNotice?.remove();
@@ -1402,8 +1454,11 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
   const bodyHost = bongoInput ? { ...host, start: { ...host.start, facing: 1 } } : host;
   // The kit mounts its stage-coordinate particles after the transformed art group.
-  const hideNativeEffects = emotionEffectsEnabled ? 'svg.kit > ellipse.shadow + g + g{display:none}' : '';
+  const hideNativeEffects = 'svg.kit.figure-custom-effects > ellipse.shadow + g + g,'
+    + 'svg.kit.figure-motion-only > ellipse.shadow + g + g{display:none}';
   const body = kit.createBody(bodyHost, { figure, words, css: 'foreignObject{pointer-events:none}' + hideNativeEffects });
+  kitSvg = host.root.querySelector('svg.kit');
+  setEmotionEffectsEnabled(emotionEffectsEnabled);
   if (customGaze) {
     const pointerBase = body.pointer.bind(body);
     body.pointer = (type, point) => {
@@ -1418,11 +1473,23 @@ export async function createLive2DBody(base, opts, entry, kit) {
       return setBase(state);
     };
   }
-  if (emotionEffectsEnabled) {
-    const cueBase = body.cue.bind(body);
-    body.cue = (kind) => { cueBase(kind); triggerEmotionEffect(kind); };
-  }
+  const cueBase = body.cue.bind(body);
+  body.cue = (kind) => { cueBase(kind); triggerEmotionEffect(kind); };
   if (!opts.preview) voicePlayback = createFigureVoicePlayback(doc, resolveAsset);
+  if (!opts.preview && !profile.bongo) {
+    try {
+      const {createPerformancePlayback}=await import('./performance-playback.js');
+      const protectedIds = new Set([...nativePhysicsOutputs, ...Object.keys(profile.clean?.params ?? {}),
+        ...(roles.get('mouthOpen')?.items ?? []).map(item => item.handle.getString()),
+        ...[...paramIndex.keys()].filter(id => PROTECTED_PARAMETER.test(id)),
+        ...(profile.wardrobe?.resources ?? []).flatMap(resource => (resource.tracks ?? []).filter(track => track.target !== 'PartOpacity').map(track => track.id)),
+      ]);
+      performancePlayback=createPerformancePlayback({asset:resolveAsset,model:model._model,paramIndex,protectedIds,host,position:()=>body.layout()});
+      const move = body.move?.bind(body), stop = body.stopWalk?.bind(body);
+      body.move=(args,id)=>performancePlayback.direct(args,id) || (move?.(args,id) ?? false);
+      body.stopWalk=id=>performancePlayback.cancel(id) || stop?.(id);
+    } catch (error) { console.warn('[l2d] Figure performance unavailable', error); }
+  }
   const shadow = host.root.querySelector('svg.kit > ellipse.shadow');
   let fittedShadow;
   function drawShadow() {
@@ -1452,6 +1519,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   const step = body.step.bind(body);
   body.step = (dt, draw = true) => {
     if (!renderFailure) {
+      if (draw && texturesReady) performancePlayback?.poll();
       const delta = Number.isFinite(dt) && dt > 0 ? dt : 0;
       elapsedBetweenDraws = Math.min(0.1, elapsedBetweenDraws + delta);
       if (texturesReady && draw) settleWardrobe();
@@ -1466,6 +1534,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     if (draw) drawShadow();
   };
   body.setScheme = async (id) => {
+    selectEmotionStyle(effectForScheme(id));
     changeWardrobe(() => wardrobe.scheme(id));
     if (texturesReady) settleWardrobe();
     setCrop(schemeCrop(id));
@@ -1479,19 +1548,17 @@ export async function createLive2DBody(base, opts, entry, kit) {
   };
   globalThis.__l2dWardrobe=()=>wardrobe.state();
   if(opts.preview)globalThis.__l2dWardrobeValues=()=>wardrobe.inspect();
-  if (native || emotionEffectsEnabled) {
-    const doBase = body.do.bind(body);
-    body.do = (word) => {
-      const accepted = doBase(word);
-      if (accepted !== false) {
-        native?.trigger(word);
-        triggerEmotionEffect(word);
-      }
-      return accepted;
-    };
-  }
+  const doBase = body.do.bind(body);
+  body.do = (word) => {
+    const accepted = doBase(word);
+    if (accepted !== false) {
+      native?.trigger(word);
+      triggerEmotionEffect(word);
+    }
+    return accepted;
+  };
   if (native) {
-    globalThis.__l2dNativeSample = (id, time, word, generic = false, size = 384) => {
+    globalThis.__l2dNativeSample = (id, time, word, generic = false, size = 384, overlays = [], nativeOnly = false) => {
       if (!texturesReady) return null;
       model._model.loadParameters();
       for (let i = 0; i < model._model.getParameterCount(); i++) model._model.setParameterValueByIndex(i, model._model.getParameterDefaultValue(i));
@@ -1502,15 +1569,17 @@ export async function createLive2DBody(base, opts, entry, kit) {
         // Reset and warm the same generic layer for repeatable static comparisons.
         for (let i = 0; i < (word ? 60 : 1); i++) applyFrame({}, {face:word,t:i / 60}, 1 / 60, !word);
         applyPartOpacity(null);
-        if (id !== '__neutral__' && !generic) native.sample(id, time);
+        if (id !== '__neutral__' && !generic) native.sample(id, time, overlays);
         const values = id !== '__neutral__' && !generic ? native.update({},0) : [];
-        applyNativeValues(values.filter(v => !nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
+        if(!nativeOnly)applyNativeValues(values.filter(v => !nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
         wardrobe.apply();
+        const locks=nativeOnly?captureMotionLocks(values,model._model,paramIndex,partIndex):[];
         model._model.saveParameters();
         // Static comparisons use equilibrium, avoiding residual motion from a prior sample.
         try { model._physics?.stabilization(model._model); } catch { /* optional */ }
-        applyNativeValues(values.filter(v => nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
+        if(!nativeOnly)applyNativeValues(values.filter(v => nativePhysicsOutputs.has(v.id)),model._model,paramIndex,partIndex);
         wardrobe.apply();
+        applyNativeValues(locks,model._model,paramIndex,partIndex);
         model._model.update();render();return canvasPng(size);
       }
       finally { native.clearSample(); performance?.dispose(); performance = previousPerformance; }
@@ -1524,15 +1593,19 @@ export async function createLive2DBody(base, opts, entry, kit) {
       performance?.dispose(); performance=performanceFactory?.(profile,console.warn) || null;
       previewState={word:word || 'neutral',raw};
       const selected=bindings.filter(b=>b.word!==word);
-      if(resource)selected.push({...bindings.find(b=>b.word===word&&b.resource===resource),word:word || 'neutral',resource});
+      if(resource){
+        const binding=bindings.find(b=>b.word===word&&b.resource===resource);
+        const motion=profile.native?.resources?.find(item=>item.id===resource)?.kind==='motion';
+        selected.push({...binding,word:word || 'neutral',resource,...(motion&&raw?{nativeOnly:true}:{})});
+      }
       native=createNativeActions({...profile.native,bindings:selected});
       body.do?.(word || 'neutral');
     },
     stop(){previewState=null;native=createNativeActions({...profile.native,bindings:[]});body.do?.('neutral');},
   };
-  if(opts.preview)globalThis.__l2dStaticSample=sample=>{
+  if(opts.preview)globalThis.__l2dStaticSample=(sample,size=previewPixels||512)=>{
     changeWardrobe(()=>wardrobe.select(sample.picks||{}));settleWardrobe();
-    const png=globalThis.__l2dNativeSample(sample.resource||'__neutral__',sample.time,sample.word,false,previewPixels||512);
+    const png=globalThis.__l2dNativeSample(sample.resource||'__neutral__',sample.time,sample.word,false,size,sample.overlays||[],sample.nativeOnly);
     return {png,fit:fitCopy(),picks:wardrobe.state(),values:wardrobe.inspect()};
   };
   const motionKind = bongoInput || profile.motion?.kind === 'stand' ? 'stand' : 'roam';

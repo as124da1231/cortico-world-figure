@@ -7,10 +7,11 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { cp, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { canonicalPath, childPath, containsPath } from './paths.ts';
 import { parseFigureJson, readPackManifest } from './pack-manifest.ts';
 import { packFingerprint } from './pack-fingerprint.ts';
-import { EMOTION_EFFECT_REACH, emotionStyleModule, normalizeEmotionEffect } from '../workbench/tools/emotion-effect.mjs';
+import { EMOTION_EFFECT_THUMBS, emotionStyleModule, normalizeEmotionEffect, setEmotionEffectAxis } from '../workbench/tools/emotion-effect.mjs';
 import { BODY_CROP_AXIS, BODY_CROP_OPTIONS, normalizeBodyCrop } from '../workbench/pack/backends/crop-config.js';
 import { normalizeGazeConfig } from '../workbench/pack/backends/gaze-config.js';
 
@@ -26,35 +27,32 @@ export async function assertRegularTree(root: string): Promise<void> {
   }
 }
 
-const RUNTIME_BACKENDS = ['live2d.js', 'native-actions.js', 'wardrobe.js', 'wardrobe-slots.js', 'render-config.js',
-  'render-quality.js', 'role-values.js', 'soullink.js', 'bongo.js', 'voice-playback.js', 'body-crop.js', 'crop-config.js', 'gaze-config.js'];
+const RUNTIME_BACKENDS = ['live2d.js', 'native-actions.js', 'native-combination.js', 'wardrobe.js', 'wardrobe-slots.js', 'render-config.js',
+  'render-quality.js', 'role-values.js', 'soullink.js', 'bongo.js', 'voice-playback.js', 'body-crop.js', 'crop-config.js', 'gaze-config.js',
+  'performance-plan.js', 'performance-playback.js'];
 
 /** Update the runtime of a private, validated pack copy without changing its model or entry. */
 export async function refreshPackRuntime(runtime: string, pack: string): Promise<void> {
   for (const file of RUNTIME_BACKENDS) await cp(join(runtime, 'backends', file), join(pack, 'backends', file));
   await cp(join(runtime, 'backends', 'emotion-effects'), join(pack, 'backends', 'emotion-effects'), { recursive: true });
+  await cp(join(runtime, 'vendor', 'soullink'), join(pack, 'vendor', 'soullink'), { recursive: true });
   const effectStyle = join(pack, 'backends', 'emotion-style.js');
   if (!existsSync(effectStyle)) await cp(join(runtime, 'backends', 'emotion-style.js'), effectStyle);
   await cp(join(runtime, 'figure-voice.json'), join(pack, 'figure-voice.json'));
 }
 
-/** Stamp the chosen effect into a private copy of a Figure-generated pack. */
+/** Add the effects wardrobe to a private copy of a Figure-generated pack. */
 export async function setPackEmotionEffect(pack: string, value: unknown, size: unknown): Promise<void> {
   const style = normalizeEmotionEffect(value);
   const styleFile = join(pack, 'backends', 'emotion-style.js');
   const manifestFile = join(pack, 'figure.json');
   const manifestText = await readFile(manifestFile, 'utf8');
   const manifest = parseFigureJson(manifestText);
-  const hasOurReach = manifest.effects?.reach === EMOTION_EFFECT_REACH;
-  if (style !== 'native' && !hasOurReach) {
-    manifest.effects = { ...manifest.effects, reach: EMOTION_EFFECT_REACH };
-    await writeFile(manifestFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-  } else if (style === 'native' && hasOurReach) {
-    delete manifest.effects.reach;
-    if (Object.keys(manifest.effects).length === 0) delete manifest.effects;
-    await writeFile(manifestFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-  }
-  await writeFile(styleFile, emotionStyleModule(style, size), 'utf8');
+  setEmotionEffectAxis(manifest, style);
+  const assets = fileURLToPath(new URL('../workbench/pack/' + EMOTION_EFFECT_THUMBS, import.meta.url));
+  await cp(assets, join(pack, EMOTION_EFFECT_THUMBS), { recursive: true });
+  await writeFile(styleFile, emotionStyleModule(style, size, manifest), 'utf8');
+  await writeFile(manifestFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 }
 
 async function profileFiles(root: string): Promise<Array<{file:string;text:string}>> {
@@ -220,7 +218,7 @@ export async function buildPack(
   workbenchDir: string,
   modelDir: string,
   workDir: string,
-  opts: { fit?: unknown; native?: unknown; render?: unknown; emotionEffect?: string; emotionEffectSize?: string; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; signal?: AbortSignal } = {},
+  opts: { fit?: unknown; native?: unknown; render?: unknown; emotionEffect?: string; emotionEffectSize?: string; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; desktopSourceId?: string; signal?: AbortSignal } = {},
 ): Promise<string> {
   const builds = join(workDir, 'builds');
   await mkdir(builds, { recursive: true });
@@ -234,6 +232,7 @@ export async function buildPack(
   ];
   if (opts.corePath) args.push('--core', opts.corePath);
   if (opts.modelFile) args.push('--model-file', opts.modelFile);
+  if (opts.desktopSourceId) args.push('--desktop-source', '--id', opts.desktopSourceId);
   if (opts.clean) args.push('--clean');
   let overrideFile = '';
   if (opts.fit || opts.native || opts.render || opts.emotionEffect || opts.emotionEffectSize) {
@@ -301,11 +300,11 @@ export async function installPack(
     // Copy and verify before touching the installed figure.
     await cp(source, pending, { recursive: true, dereference: false });
     await assertRegularTree(pending);
-    await opts.prepare?.(pending);
     const pendingHash = opts.expectedFingerprint ? await packFingerprint(pending, opts.signal) : undefined;
     if (opts.expectedFingerprint && pendingHash !== opts.expectedFingerprint) {
       throw new Error('形象包内容已改变，请重新分析确认');
     }
+    await opts.prepare?.(pending);
     const copied = await readPackManifest(pending);
     if (copied.id !== id) throw new Error('复制后的形象包校验失败');
     opts.signal?.throwIfAborted();
@@ -319,7 +318,7 @@ export async function installPack(
     if (opts.beforeSwap && occupied.length === 1) {
       const installedHash = await packFingerprint(occupied[0], opts.signal).catch(() => undefined);
       opts.signal?.throwIfAborted();
-      if (installedHash && installedHash === (pendingHash ?? await packFingerprint(pending, opts.signal))) {
+      if (installedHash && installedHash === (!opts.prepare && pendingHash ? pendingHash : await packFingerprint(pending, opts.signal))) {
         replacesOtherPack = false;
         approvedHash = installedHash;
       }

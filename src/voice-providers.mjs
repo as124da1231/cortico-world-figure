@@ -135,7 +135,18 @@ function runLocal(id, config, key, text, signal, python) {
 }
 
 const xml = value => String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]));
-const openaiSpeech = (c,k,text,{post}) => post(address(c.endpoint,'/audio/speech'),{model:c.model,input:text,voice:c.voice,response_format:'wav',speed:c.speed,...(c.instructions?{instructions:c.instructions}:{})},bearer(k));
+
+function openaiSpeech(config, key, text, { post }) {
+  return post(address(config.endpoint, '/audio/speech'), {
+    model: config.model,
+    input: text,
+    voice: config.voice,
+    response_format: 'wav',
+    speed: config.speed,
+    ...(config.instructions ? { instructions: config.instructions } : {}),
+  }, bearer(key));
+}
+
 const adapters = {
   async minimax(c,k,text,{json}) {
     const url = new URL(c.endpoint);
@@ -150,8 +161,8 @@ const adapters = {
     return Buffer.from(hex,'hex');
   },
   openai: openaiSpeech,
-  sovitsLocal(c,k,text,{post}) {
-    return openaiSpeech({...c,model:c.model||'gpt-sovits',voice:c.voice||''},k,text,{post});
+  sovitsLocal(c, _key, text, transport) {
+    return openaiSpeech({ endpoint: c.endpoint, model: 'gpt-sovits', voice: c.voice || '', speed: c.speed || 1 }, '', text, transport);
   },
   async mimo(c,k,text,{json}) {
     const style = [c.style,c.dialect].filter(Boolean).join(' ');

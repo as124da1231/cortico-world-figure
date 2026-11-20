@@ -1,3 +1,4 @@
+import {bindingResourceIds} from './native-combination.js';
 import {compileCurve} from './native-actions.js';
 import {fixedWardrobeGroups} from './wardrobe-slots.js';
 const channel=t=>(t.target||'Parameter')+':'+t.id;
@@ -13,7 +14,11 @@ export function wardrobeTracks(resource){
 export function wardrobeConfig(catalog,groups=[],bindings=[],axisOffset=1){
   groups=fixedWardrobeGroups(groups);
   const resources=new Map(catalog.resources.map(r=>[r.id,r])),used=new Set(),owners=new Map(),ids=new Set();
-  for(const binding of bindings)for(const id of [binding.resource,binding.release].filter(Boolean))for(const key of wardrobeChannels(resources.get(id)))owners.set(key,'动作');
+  for(const binding of bindings){
+    // The native-only motion temporarily owns its curves and releases them at the end.
+    if(binding.nativeOnly===true&&resources.get(binding.resource)?.kind==='motion')continue;
+    for(const id of bindingResourceIds(binding))for(const key of wardrobeChannels(resources.get(id)))owners.set(key,'动作');
+  }
   const clean=groups.map(g=>{
     if(!/^[a-z][a-z0-9]{1,24}$/.test(g.id)||ids.has(g.id)||typeof g.name!=='string'||!g.name.trim()||g.name.length>40||!Array.isArray(g.options)||g.options.length>16)throw Error('装扮分组无效');ids.add(g.id);
     const options=new Set(['default']);return {id:g.id,...(g.slot?{slot:g.slot}:{}),...(g.custom?{custom:true}:{}),name:g.name,...(g.en?{en:g.en}:{}),options:g.options.map(o=>{

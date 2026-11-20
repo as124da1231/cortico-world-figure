@@ -29,10 +29,10 @@ import { readBongoPackage } from './bongo-package.mjs';
 import { shrinkPng } from './shrink-textures.mjs';
 import { copyFile, cp, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, openSync, readSync } from 'node:fs';
-import { basename, dirname, extname, join, resolve } from 'node:path';
+import { closeSync, existsSync, openSync, readSync, realpathSync } from 'node:fs';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { resolveModelAsset } from './model-assets.mjs';
-import { EMOTION_EFFECT_REACH, emotionStyleModule, normalizeEmotionEffect } from './emotion-effect.mjs';
+import { EMOTION_EFFECT_THUMBS, emotionStyleModule, normalizeEmotionEffect, setEmotionEffectAxis } from './emotion-effect.mjs';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -60,6 +60,7 @@ const OVERRIDES_PATH = arg('overrides');
  */
 const MAX_TEX = Math.max(0, Number(arg('max-texture', 2048)) || 0);
 const CLEAN = flag('clean');
+const DESKTOP_SOURCE = flag('desktop-source');
 /** 生成器配方版本：写进 build.json；工作台用它判断包是否过期 */
 const GENERATOR_VERSION = 'rt-2026-11-07.bongo.3';
 /** 简易模式：只做 role + 通用配方，不产出/不引用任何原生 exp3 / motion / pose 绑定。 */
@@ -566,14 +567,20 @@ if (existsSync(OUT)) {
 }
 if (!SIMPLE) await mkdir(join(OUT, 'models', id, 'motions'), { recursive: true });
 await mkdir(join(OUT, 'models', id, 'textures'), { recursive: true });
+const desktopAssets = {};
+const modelRoot = DESKTOP_SOURCE ? realpathSync(modelDir) : modelDir;
+const modelReference = (name, file) => { desktopAssets[`models/${id}/${name}`] = ['model', relative(modelRoot, realpathSync(file))]; };
 
 // 1) moc3 原始文件（供 Coopanion 0.2.14+ 原生 fetch） + base64 模块（旧版本回退）
-await writeFile(join(OUT, 'models', id, 'model.moc3'), mocBytes);
-await writeFile(
+if (DESKTOP_SOURCE) modelReference('model.moc3', mocPath);
+else {
+  await writeFile(join(OUT, 'models', id, 'model.moc3'), mocBytes);
+  await writeFile(
   join(OUT, 'models', id, 'moc3.js'),
   `// ${basename(mocPath)}（base64：旧版本沙箱不能 fetch 二进制时的回退兜底）\nexport default "${mocBytes.toString('base64')}";\n`,
   'utf8',
-);
+  );
+}
 
 // 2) model3 / physics / cdi3 → JS 模块
 await writeFile(join(OUT, 'models', id, 'model3.js'),
@@ -600,7 +607,7 @@ if (!SIMPLE && expressionFiles.length) {
 
 // 3) 贴图（平铺到 textures/）
 const textureFiles = [];
-const textureShrink = MAX_TEX > 0 ? { ok: true, max: MAX_TEX, files: [], skipped: [], bytesBefore: 0, bytesAfter: 0 } : null;
+const textureShrink = !DESKTOP_SOURCE && MAX_TEX > 0 ? { ok: true, max: MAX_TEX, files: [], skipped: [], bytesBefore: 0, bytesAfter: 0 } : null;
 for (const [i, p] of textures.entries()) {
   const name = `texture_${String(i).padStart(2, '0')}${extname(p).toLowerCase() || '.png'}`;
   const target = join(OUT, 'models', id, 'textures', name);
@@ -618,7 +625,10 @@ for (const [i, p] of textures.entries()) {
       throw Error(`无法将贴图 ${basename(p)} 缩到 ${MAX_TEX}px：${error.message}`, { cause: error });
     }
   } else {
-    await copyFile(p, target);
+    if (DESKTOP_SOURCE) {
+      if (!/^\.(png|jpe?g|webp)$/i.test(extname(p))) throw Error(`桌宠不支持贴图格式：${basename(p)}`);
+      modelReference(`textures/${name}`, p);
+    } else await copyFile(p, target);
     if (textureShrink && !size) textureShrink.skipped.push({ file: name, why: '不是 PNG，运行时缩放' });
   }
   if (textureShrink) {
@@ -693,7 +703,7 @@ ${!SIMPLE && Object.keys(nativeMap).length
     : ''}  // 表演层（SoulLink）：情绪词 → 连续参数。不写就用通用默认；
   // 换模型先调这里（强度/过渡），不要改 backends/ 里的渲染代码。
   performance: ${JSON.stringify(performance, null, 2)},
-${overrides.native?.version === 1 ? `  native: ${JSON.stringify(overrides.native)},` : ''}
+${[1,2].includes(overrides.native?.version) ? `  native: ${JSON.stringify(overrides.native)},` : ''}
 };
 `;
 await writeFile(join(OUT, 'models', id, 'profile.js'), profileJs, 'utf8');
@@ -736,7 +746,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'figure-voice.json', 'backends/voice-playback.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/wardrobe.js', 'backends/wardrobe-slots.js', 'backends/bongo.js', 'backends/body-crop.js', 'backends/crop-config.js', 'backends/gaze-config.js']) {
+for (const rel of ['figure.js', 'figure-voice.json', 'backends/voice-playback.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/performance-plan.js', 'backends/performance-playback.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/native-combination.js', 'backends/wardrobe.js', 'backends/wardrobe-slots.js', 'backends/bongo.js', 'backends/body-crop.js', 'backends/crop-config.js', 'backends/gaze-config.js']) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);
@@ -746,7 +756,7 @@ for (const rel of ['figure.js', 'figure-voice.json', 'backends/voice-playback.js
   await copyFile(src, join(OUT, rel));
 }
 await cp(join(RUNTIME, 'backends', 'emotion-effects'), join(OUT, 'backends', 'emotion-effects'), { recursive: true });
-await writeFile(join(OUT, 'backends', 'emotion-style.js'), emotionStyleModule(emotionEffect, overrides.emotionEffectSize), 'utf8');
+await cp(join(RUNTIME, EMOTION_EFFECT_THUMBS), join(OUT, EMOTION_EFFECT_THUMBS), { recursive: true });
 // The extension verifies its shared cache before invoking the converter.
 const sdkTarget = join(OUT, 'sdk');
 const core = CORE_PATH && resolve(CORE_PATH);
@@ -760,7 +770,13 @@ const sdkSources = [
 await mkdir(sdkTarget, { recursive: true });
 for (const [file, source] of sdkSources) {
   if (!existsSync(source)) throw Error(`缺少 Live2D 运行组件：${file}，请检查本机缓存或重新获取`);
-  await copyFile(source, join(sdkTarget, file));
+  if (DESKTOP_SOURCE && file.endsWith('.js')) desktopAssets['sdk/' + file] = ['sdk', file];
+  else await copyFile(source, join(sdkTarget, file));
+}
+if (DESKTOP_SOURCE) {
+  await writeFile(join(OUT, '.desktop-source.json'), JSON.stringify({
+    model: modelRoot, sdk: realpathSync(dirname(core)), assets: desktopAssets,
+  }));
 }
 // SoulLink 表演引擎（Apache-2.0，随包分发，含许可证）
 const vendorDir = join(RUNTIME, 'vendor', 'soullink');
@@ -863,8 +879,9 @@ const figureJson = {
   vocab: [...vocabExpressions, ...(SIMPLE ? [] : vocabMotions)],
   sounds: {},
   can: { walk: motion.kind === 'roam' },
-  ...(emotionEffect === 'native' ? {} : { effects: { reach: EMOTION_EFFECT_REACH } }),
 };
+setEmotionEffectAxis(figureJson, emotionEffect);
+await writeFile(join(OUT, 'backends', 'emotion-style.js'), emotionStyleModule(emotionEffect, overrides.emotionEffectSize, figureJson), 'utf8');
 appendNativeVocab(figureJson.vocab, overrides.native?.bindings ?? [], overrides.native?.resources ?? []);
 await writeFile(join(OUT, 'figure.json'), JSON.stringify(figureJson, null, 2) + '\n', 'utf8');
 await writeFile(join(OUT, 'build.json'), JSON.stringify({

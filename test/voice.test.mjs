@@ -7,8 +7,38 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { FigureVoice } from '../src/voice.ts';
-import { synthesizeVoice } from '../src/voice-providers.mjs';
+import { LIVE2D } from '../src/index.ts';
+import { makeCtx } from './_ctx.mjs';
+import { normalizeVoiceProfile, synthesizeVoice } from '../src/voice-providers.mjs';
 import { createVoiceMouthEnvelope, voiceLevel } from '../workbench/pack/backends/voice-playback.js';
+
+test('stopping an audition before the playback job exists prevents it from starting', async t => {
+  for (const stage of ['availability', 'previous playback cleanup']) await t.test(stage, async () => {
+    const voice = new FigureVoice({ figures: '', systemPlayer: null, config: () => ({}), persist() {} });
+    voice.current = () => ({id:'sovitsLocal', profile:{}, key:''});
+    const deferred = Promise.withResolvers();
+    const entered = Promise.withResolvers();
+    const ready = {system:true, issue:''};
+    voice.availability = async () => {
+      if (stage === 'availability') { entered.resolve(); await deferred.promise; }
+      return ready;
+    };
+    voice.hush = async () => {
+      if (stage === 'previous playback cleanup') { entered.resolve(); await deferred.promise; }
+    };
+    let starts = 0;
+    voice.play = async () => { starts++; };
+
+    const audition = voice.audition();
+    await entered.promise;
+    assert.deepEqual(await voice.stopAudition(), {ok:true});
+    deferred.resolve();
+    assert.deepEqual(await audition, {ok:false});
+    assert.equal(starts, 0);
+    assert.deepEqual(await voice.audition(), {ok:true});
+    assert.equal(starts, 1);
+  });
+});
 
 test('mouth sampling follows audio position and closes for silence', () => {
   const samples = new Float32Array(1000);
@@ -55,23 +85,34 @@ test('audio mouth blends back to the underlying pose and resumes without snappin
   assert.equal(mouth.update(0, 1, 1 / 60).open, 0);
 });
 
-test('local GPT-SoVITS preset posts to the OpenAI-compatible endpoint without auth', async () => {
+test('the local GPT-SoVITS preset uses the plugin speech API and its current voice by default', async t => {
   const requests = [];
-  const wav = Buffer.alloc(44);
-  wav.write('RIFF', 0, 'ascii');
-  wav.write('WAVE', 8, 'ascii');
-  const request = async (url, options) => {
-    requests.push({ url: String(url), options });
-    return new Response(wav, { status: 200, headers: { 'content-type': 'audio/wav', 'content-length': String(wav.length) } });
-  };
-  const audio = await synthesizeVoice('sovitsLocal', { endpoint: 'http://127.0.0.1:9880', voice: '', speed: 1.2 }, '', '本地音色测试', { request });
-  assert.deepEqual(audio, wav);
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, 'http://127.0.0.1:9880/audio/speech');
-  assert.equal(requests[0].options.headers.Authorization, undefined);
-  assert.deepEqual(JSON.parse(requests[0].options.body), {
-    model: 'gpt-sovits', input: '本地音色测试', voice: '', response_format: 'wav', speed: 1.2,
+  const audio = Buffer.from('RIFF0000WAVE');
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push({
+      path: req.url,
+      method: req.method,
+      authorization: req.headers.authorization,
+      body: JSON.parse(Buffer.concat(chunks)),
+    });
+    res.writeHead(200, { 'Content-Type': 'audio/wav' }).end(audio);
   });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  assert.deepEqual(normalizeVoiceProfile('sovitsLocal'), { endpoint: 'http://127.0.0.1:9880', voice: '', speed: 1 });
+
+  const endpoint = 'http://127.0.0.1:' + server.address().port;
+  for (const [path, voice, speed] of [['', '', 1], ['/audio/speech', 'xll', 1.2]]) {
+    const profile = normalizeVoiceProfile('sovitsLocal', { endpoint: endpoint + path, voice, speed });
+    assert.deepEqual(await synthesizeVoice('sovitsLocal', profile, '', '本地语音测试'), audio);
+    assert.deepEqual(requests.at(-1), {
+      path: '/audio/speech', method: 'POST', authorization: undefined,
+      body: { model: 'gpt-sovits', input: '本地语音测试', voice, response_format: 'wav', speed },
+    });
+  }
+  assert.equal(requests.length, 2);
 });
 
 test('existing provider profiles become saved service cards without rewriting settings or keys', async () => {
@@ -133,7 +174,8 @@ test('speech uses the selected service for fresh pet replies, with origin-bound 
   await new Promise(resolve => service.listen(0, '127.0.0.1', resolve));
   const endpoint = 'http://127.0.0.1:' + service.address().port + '/v1';
   const voice = new FigureVoice({
-    config: () => cfg, persist: patch => Object.assign(cfg, patch), figures, botDir: dir,
+    config: () => cfg, persist: patch => Object.assign(cfg, patch), figures, systemPlayer: null,
+    desktopBody: () => ({id:'desktop-pet',figure:'sample'}),
     secret: name => keys.get(name) || '', storeSecret: (name, key) => keys.set(name, key),
   });
   t.after(async () => {
@@ -171,6 +213,7 @@ test('speech uses the selected service for fresh pet replies, with origin-bound 
   await assert.rejects(voice.test([primary, 'openai', { ...profile, endpoint: 'https://api.openai.com/v1' }, '']), /密钥/);
   await voice.controls({ voiceEnabled: true, voiceMouthGain: 2.4 });
   events.push(event(2, 'other event', 'desktop-pet.message'), event(3, 'fresh reply'));
+  voice.onRunPhase({state:'delivering'});
   async function waitFor(check) {
     for (let attempt = 0; attempt < 35; attempt++) {
       const value = await check();
@@ -189,25 +232,27 @@ test('speech uses the selected service for fresh pet replies, with origin-bound 
   assert.deepEqual(requests, [{ path: '/v1/audio/speech', key: 'Bearer local-test-key', text: 'fresh reply' }]);
   assert.deepEqual(await readFile(join(pack, `figure-voice-${published.clip.id}.audio`)), wav);
   await setPet(true);
-  events.push(event(4, 'another reader owns this reply'));
+  await voice.controls({ voiceEnabled: false });
+  events.push(event(4, 'narration is disabled'));
   await waitFor(async () => !(await read()).clip && !(await readdir(pack)).some(name => name.endsWith('.audio')));
   assert.equal(requests.length, 1);
   assert.ok(!(await readdir(pack)).some(name => name.endsWith('.audio')));
-  await assert.rejects(voice.controls({ voiceEnabled: true }), /流式语音播报/);
+  await voice.controls({ voiceEnabled: true });
   await setPet(false);
   const resume = await voice.suspend();
   await json(asset, {version:2});
   resume();
   const tap = voice.outputTap();
-  const first = '这是模型还没写完时先播的一句。';
+  const first = '这是等到气泡入库再播的一句。';
   const second = '这是后来跟上的第二句话。';
   tap.onEvent({type:'response.output_item.added',output_index:0,item:{type:'function_call',id:'tool-1',name:'pet_say'}});
   tap.onEvent({type:'response.function_call_arguments.delta',output_index:0,item_id:'tool-1',delta:'{"script":"'+first});
-  await waitFor(async () => (await read()).clips?.length===1);
-  assert.equal(requests.at(-1).text,first);
+  await delay(750);
+  assert.equal((await read()).clips?.length ?? 0,0);
+  assert.equal(requests.length,1);
   tap.onEvent({type:'response.function_call_arguments.delta',output_index:0,item_id:'tool-1',delta:second+'"}'});
   tap.onEvent({type:'response.function_call_arguments.done',output_index:0,item_id:'tool-1',arguments:JSON.stringify({script:first+second})});
-  tap.onRoundEnd();
+  tap.onRoundEnd?.();
   events.push(event(5, first+second));
   await waitFor(async () => (await read()).clips?.length===2);
   await delay(800);
@@ -220,19 +265,20 @@ test('speech uses the selected service for fresh pet replies, with origin-bound 
     streamTap.onEvent({type:'response.output_item.done',output_index:0,item:{
       type:'function_call',id:'tool-recovery',name:'pet_say',arguments:JSON.stringify({script:text}),
     }});
-    streamTap.onRoundEnd();
+    streamTap.onRoundEnd?.();
     events.push(event(events.at(-1).cursor + 1, text));
     return streamTap;
   }
-  await t.test('accepted bubble narration recovers when every streamed sentence fails', async () => {
+  await t.test('a fully failed synthesis leaves the bubble and does not repeat it', async () => {
     const first = '这是流式合成失败的第一句话。';
     const second = '这是流式合成失败的第二句话。';
     failedSpeech.add(first);
     failedSpeech.add(second);
     const before = requests.length;
     const recovery = acceptedSay(first + second);
-    await waitFor(async () => (await read()).clips?.length === 1);
-    assert.deepEqual(requests.slice(before).map(request => request.text), [first, second, first + second]);
+    await waitFor(() => requests.length >= before+2);
+    assert.deepEqual(requests.slice(before).map(request => request.text), [first, second]);
+    assert.equal((await read()).clips?.length ?? 0,0);
     recovery.onAbort('test cut');
     await waitFor(async () => !(await read()).clips?.length && !(await readdir(pack)).some(name => name.endsWith('.audio')));
   });
@@ -248,10 +294,83 @@ test('speech uses the selected service for fresh pet replies, with origin-bound 
     partial.onAbort('test cut');
     await waitFor(async () => !(await read()).clips?.length && !(await readdir(pack)).some(name => name.endsWith('.audio')));
   });
+  const beforeQuestion = requests.length;
+  events.push({...event(events.at(-1).cursor + 1, '选一个颜色。'), meta:{kind:'ask',options:['红色','蓝色']}});
+  await waitFor(() => requests.length >= beforeQuestion + 2);
+  assert.deepEqual(requests.slice(beforeQuestion).map(request => request.text), ['选一个颜色。','可选，红色、蓝色。']);
+  await voice.stopNarration();
   const removed=await voice.remove(primary);
   assert.equal(removed.controls.voiceEnabled, false);
   assert.equal(removed.selectedId,'');
   assert.deepEqual(removed.services.map(service=>service.id),[secondary]);
+});
+
+test('system voice audition survives polling when the Live2D body has no lip-sync pack', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'figure-voice-body-'));
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ worlds: {
+    'desktop-live2d-pet': { skin: { figure: 'coo' } },
+  } }));
+  const wav = Buffer.from('RIFF0000WAVE');
+  const service = createServer((_req, res) => res.writeHead(200, { 'content-type': 'audio/wav' }).end(wav));
+  await new Promise(resolve => service.listen(0, '127.0.0.1', resolve));
+  const cfg = { voiceEnabled: false };
+  const keys = new Map();
+  let played = false;
+  const voice = new FigureVoice({
+    config: () => cfg, persist: patch => Object.assign(cfg, patch), figures: dir, botDir: dir,
+    desktopBody: () => ({ id: 'desktop-live2d-pet', figure: 'coo' }),
+    secret: name => keys.get(name) || '', storeSecret: (name, key) => keys.set(name, key),
+    systemPlayer: {
+      canReportStart: true, warm() {}, interrupt() {}, async stop() {},
+      async play(bytes, _volume, signal) {
+        assert.deepEqual(bytes, wav);
+        await delay(900, undefined, { signal });
+        played = true;
+      },
+    },
+  });
+  t.after(async () => {
+    await voice.stop();
+    await new Promise(resolve => service.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  });
+  await voice.start({ store: { latestCursor: () => 0, range: () => [] } });
+  const endpoint = `http://127.0.0.1:${service.address().port}/v1`;
+  await voice.save([null, 'openai', 'test', { endpoint, model: 'test', voice: 'test' }, 'test-key', true]);
+  assert.deepEqual(await voice.audition(), { ok: true });
+  assert.equal(played, true);
+  assert.equal((await voice.state()).controls.voiceEnabled, false);
+});
+
+test('the stock desktop pet can play a voice sample while wearing either built-in figure', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'figure-voice-stock-'));
+  const wav = Buffer.from('RIFF0000WAVE');
+  const server = createServer((_req, res) => res.writeHead(200, {'Content-Type':'audio/wav'}).end(wav));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const endpoint = 'http://127.0.0.1:' + server.address().port;
+  const world = LIVE2D.create(makeCtx(dir, { voiceProvider:'sovitsLocal', voiceProfiles:{sovitsLocal:{endpoint}} }));
+  const events = [];
+  let played = 0;
+  world.voice.systemPlayer = {
+    canReportStart: true, warm() {}, interrupt() {}, async stop() {},
+    async play(bytes) { assert.deepEqual(bytes, wav); played++; },
+  };
+  t.after(async () => {
+    await world.stop();
+    await new Promise(resolve => server.close(resolve));
+    await rm(dir, {recursive:true,force:true});
+  });
+  await world.start({store:{latestCursor:()=>events.length, range:({source})=>events.filter(event=>source===event.source)}});
+  const ui = world.webUi('zh');
+  for (const id of ['coo', 'whale']) {
+    events.push({ cursor:events.length+1, source:'desktop-pet', type:'desktop-pet.figure',
+      meta:{figure:{kind:'figure',name:{id}}} });
+    const state = await ui.invoke('voice', 'voiceState', []);
+    assert.equal(state.playbackReady, true);
+    assert.equal(state.bodyReady, false);
+    assert.deepEqual(await ui.invoke('voice', 'voiceAudition', []), {ok:true});
+  }
+  assert.equal(played, 2);
 });
 
 test('bubble timing waits for the player, cancels timeouts and never re-reads the bubble', async t => {
@@ -292,14 +411,16 @@ test('bubble timing waits for the player, cancels timeouts and never re-reads th
   const cfg = {voiceEnabled:true, voiceTiming:'sync'};
   let key = '';
   const voice = new FigureVoice({ config:()=>cfg, persist: patch=>Object.assign(cfg,patch), figures,
-    botDir:dir, secret:()=>key, storeSecret:(_name,value)=>{key=value;}, systemPlayer:player });
+    desktopBody: () => ({id:'desktop-pet',figure:'sample'}),
+    secret:()=>key, storeSecret:(_name,value)=>{key=value;}, systemPlayer:player });
   t.after(async () => {
     await voice.stop();
     await new Promise(resolve => server.close(resolve));
     await rm(dir, {recursive:true,force:true});
   });
-  await voice.start({store:{latestCursor:()=>events.length, range:()=>events}});
-  const bubble = text => events.push({source:'desktop-pet',type:'desktop-pet.self',text,meta:{kind:'say'}});
+  await voice.start({store:{latestCursor:()=>events.length, range:({source,fromCursor=1,toCursor=Infinity})=>
+    events.filter(event => (!source || event.source === source) && event.cursor >= fromCursor && event.cursor <= toCursor)}});
+  const bubble = text => events.push({cursor:events.length+1,source:'desktop-pet',type:'desktop-pet.self',text,meta:{kind:'say'}});
   const wait = async check => {
     for (let i = 0; i < 50; i++) { if (await check()) return; await delay(25); }
     assert.fail('Voice playback did not reach the expected state');
@@ -313,7 +434,7 @@ test('bubble timing waits for the player, cancels timeouts and never re-reads th
 
   const closeTool = (tap, name, callId, args, index) => tap.onEvent({
     type:'response.output_item.done',output_index:index,item:{
-      type:'function_call',id:callId,call_id:callId,name,arguments:JSON.stringify(args),
+      type:'function_call',id:callId,call_id:callId,name,status:'completed',arguments:JSON.stringify(args),
     },
   });
   const pair = (text, id) => {
@@ -387,4 +508,31 @@ test('bubble timing waits for the player, cancels timeouts and never re-reads th
   unpaired.onRoundEnd();
   assert.match(await missingBubble,/语音未开始/);
   assert.equal(plays.length,3);
+
+  const skipped = '已经开始出声，但气泡没有执行。';
+  pair(skipped, 'call-6');
+  const skippedSpeech = voice.syncTool().handler({text:skipped},{callId:'call-6',round:6});
+  await wait(() => plays.length === 4);
+  plays[3].start(Date.now());
+  assert.match(await skippedSpeech,/语音已开始/);
+  const deadline = Date.now() + 4500;
+  while (!plays[3].signal.aborted && Date.now() < deadline) await delay(50);
+  assert.equal(plays[3].signal.aborted,true);
+  await wait(async () => !(await voice.state()).speaking);
+
+  const restore = await voice.suspend();
+  await writeFile(stateFile, '{"version":1}');
+  restore();
+  const bubbleOnly = '本轮只有气泡也要播报。';
+  bubble(bubbleOnly);
+  voice.onRunPhase({state:'delivering'});
+  await wait(() => plays.length === 5);
+  const fallbackStart = Date.now();
+  plays[4].start(fallbackStart);
+  assert.equal((await voice.state()).systemVoiceStartedAt, fallbackStart);
+  voice.onRunPhase({state:'delivering'});
+  assert.equal(plays[4].signal.aborted, false);
+  plays[4].end();
+  await wait(async () => !(await voice.state()).speaking);
+  assert.equal(requests.filter(value => value === bubbleOnly).length, 1);
 });

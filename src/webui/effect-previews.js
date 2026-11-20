@@ -8,7 +8,7 @@ const effectPreviewArt = {
     <path d="M109 37h12l-12 13h12" fill="none" stroke="#c5b5f4" stroke-width="2.3" stroke-linecap="round"/>
   </g>`,
   kaomoji: `<text class="l2d-effect-preview-motion" x="150" y="65" text-anchor="middle"
-    dominant-baseline="middle" fill="#983854" font-size="33" font-family="Segoe UI, Yu Gothic UI, Microsoft YaHei UI, sans-serif">(˶ᵔᵕᵔ˶)</text>`,
+    dominant-baseline="middle" fill="#983854" font-size="33" font-family="Segoe UI, Yu Gothic UI, Microsoft YaHei UI, sans-serif">${FIGURE_WOLF_KAOMOJI.smug}</text>`,
   orb: `<g class="l2d-effect-preview-motion">
     <circle cx="150" cy="60" r="35" fill="#e87fb04d" style="filter:blur(9px)"/>
     <circle cx="150" cy="60" r="31" fill="#b65c914f" stroke="#e6a1c285"/>

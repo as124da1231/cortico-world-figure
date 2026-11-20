@@ -92,7 +92,7 @@ addEventListener('message', async (e) => {
       const make = mod[m.export];
       if (typeof make !== 'function') throw new Error(t('figure.notFunction', { name: m.export }));
       const base = new URL(m.base);
-      body = await make(base, { model: m.model ?? undefined, scheme: m.scheme, preview: true, kit, loadImage, asset: (p) => new URL(p, base), host: { ...host, start: m.start } });
+      body = await make(base, { model: m.model ?? undefined, scheme: m.scheme, preview: true, previewSize: m.previewSize, kit, loadImage, asset: (p) => new URL(p, base), host: { ...host, start: m.start } });
       for (const fn of ['step', 'layout', 'do']) if (typeof body?.[fn] !== 'function') throw new Error(t('figure.missingMethod', { name: fn }));
       post({ t: 'ready', z: body.z ?? null, words: Array.isArray(body.words) ? body.words.filter((w) => typeof w === 'string') : null });
     } else if (m.t === 'preview-play' && body) {
@@ -108,7 +108,7 @@ addEventListener('message', async (e) => {
       // calls that come before the body is ready have nothing to act on
     } else if (m.t === 'tick') {
       body.step(m.dt);
-      if(reportPreview){reportPreview=false;post({t:'preview-info',picks:globalThis.__l2dWardrobe?.(),values:globalThis.__l2dWardrobeValues?.(),quality:globalThis.__l2dRenderQuality?.()});}
+      if(reportPreview){reportPreview=false;post({t:'preview-info',ready:globalThis.__l2dPreviewReady?.(),picks:globalThis.__l2dWardrobe?.(),values:globalThis.__l2dWardrobeValues?.(),quality:globalThis.__l2dRenderQuality?.()});}
       post({ t: 'frame', layout: body.layout(), events, sounds, z: body.z ?? null });
       events = []; sounds = [];
     } else if (m.t === 'scheme') {

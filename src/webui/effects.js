@@ -28,12 +28,12 @@ const effectsGallery = {
     const heading = el('h3', null, t('桌宠特效', 'Pet effects'));
     heading.id = 'l2d-effects-heading';
     intro.append(heading, el('p', null, t(
-      '选一张卡片作为特效风格。打包或从已有卡片重新安装时生效。',
-      'Select an effect style. It applies when packing or reinstalling from an existing card.',
+      '每个形象包都带六种特效。选定初始风格，安装后可以在 Coo 装扮里直接切换。',
+      'Every pack includes all six effects. Choose the starting style, then switch in Coo Dress up after installing.',
     )));
     const sizes = el('fieldset', 'l2d-effect-sizes');
     const sizeChoices = el('div', 'l2d-effect-size-choices');
-    sizes.append(el('legend', null, t('特效大小', 'Effect size')), sizeChoices);
+    sizes.append(el('legend', null, t('Figure 特效大小', 'Figure effect size')), sizeChoices);
     header.append(intro, sizes);
     const gallery = el('div', 'l2d-effects-grid');
     gallery.setAttribute('role', 'radiogroup');
@@ -56,7 +56,6 @@ const effectsGallery = {
         card.classList.toggle('selected', input.checked);
       }
       for (const [size, input] of sizeOptions) input.checked = size === selected.size;
-      sizes.disabled = selected.style === 'native';
       page.dataset.effectSize = selected.size;
     }
     async function saveSelection() {
@@ -121,7 +120,7 @@ const effectsGallery = {
       sizeChoices.append(choice);
       sizeOptions.set(size, input);
       input.addEventListener('change', () => {
-        if (inactive() || sizes.disabled || !input.checked) return;
+        if (inactive() || !input.checked) return;
         selected = {...selected, size};
         paintSelection();
         void saveSelection();

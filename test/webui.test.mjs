@@ -51,6 +51,8 @@ async function mount(t, opts = {}) {
       if (method === 'noticeAccept') { ack = true; return { acknowledged: true, revision: 1 }; }
       if (method === 'list') return { dir: '', figuresDir: 'E:/test/figures', builds: opts.builds ?? [], installed: null, automation: opts.automation ?? {enabled:false,plans:[]} };
       if (method === 'detail') return { nameZh: '名字', aboutZh: '简介' };
+      if (method === 'plannerState') return {services:[], selectedId:''};
+      if (method === 'performanceReadiness') return {state:'ready',body:'desktop-live2d-pet',figure:'Hiyori'};
       if (method === 'settings') return { cover: true, clean: true, texture: 'original', quality: opts.quality ?? 'original', gearTheme:opts.gearTheme,particleEffect:opts.particleEffect,autoDelete: false, figuresDir: '',...opts.appearanceValues };
       return { builds: opts.builds ?? [] };
     },
@@ -75,6 +77,99 @@ test('primary configuration uses the shared gear form and auto-saves only change
   assert.equal(root.querySelector('[aria-label="桌宠特效"]'), null);
   assert.equal(guards[0](),null);
   assert.equal(root.querySelector('.l2d-settings-status').textContent,'已保存');
+  assert.deepEqual([...root.querySelectorAll('[name="figure-performance-mode"]')].map(input=>input.getAttribute('aria-label')), ['默认','主模型编排','独立编排']);
+  assert.equal(root.querySelector('[name="figure-performance-mode"]:checked').value,'vocab');
+  const bar = root.querySelector('.l2d-planner-service-bar');
+  root.querySelector('[aria-label="独立编排"]').click();
+  await tick();
+  assert.equal(root.querySelector('.l2d-planner-service-bar'),bar);
+  assert.match(bar.textContent,/选择一个编排服务/);
+  assert.deepEqual(configCalls.at(-1),{group:'figure',values:{'worlds.figure.performanceMode':'dual'}});
+});
+
+test('performance settings explain which desktop pet needs a Figure pack', async t => {
+  const {root} = await mount(t, { configuration:true, appearanceValues:{performanceMode:'direct'}, invoke(method) {
+    if (method === 'performanceReadiness') return {state:'choose-figure',body:'desktop-live2d-pet',figure:'coo'};
+  } });
+  const status = root.querySelector('.l2d-performance-readiness');
+  assert.match(status.textContent,/Live2D 桌宠 · 内置 Coo/);
+  assert.match(status.textContent,/先在这只桌宠的装扮里穿戴/);
+});
+
+test('entering and leaving main-model planning refreshes the current session tools after saving', async t => {
+  const sequence = [];
+  let unavailable = true;
+  const {root,button,configCalls} = await mount(t, {
+    configuration:true,
+    setConfig:(_group, patch) => { sequence.push('save:' + patch['worlds.figure.performanceMode']); },
+    invoke(method) { if (method === 'performanceSync') { sequence.push('sync'); return {mode:'direct'}; } },
+    fetch:async (url, options) => {
+      assert.equal(new URL(url).pathname, '/api/session/reload-prefix');
+      assert.equal(options.method, 'POST');
+      sequence.push('reload');
+      return {ok:!unavailable};
+    },
+  });
+  root.querySelector('[aria-label="主模型编排"]').click();
+  await tick();
+  assert.deepEqual(sequence, ['save:direct','sync','reload']);
+  assert.match(root.querySelector('.l2d-settings-status').textContent, /会话工具待同步/);
+  unavailable = false;
+  button('重试同步').click();
+  await tick();
+  assert.deepEqual(sequence.slice(-2), ['sync','reload']);
+  assert.equal(configCalls.length,1);
+  assert.equal(root.querySelector('.l2d-settings-status').textContent,'已保存');
+
+  root.querySelector('[aria-label="独立编排"]').click();
+  await tick();
+  assert.deepEqual(sequence.slice(-3), ['save:dual','sync','reload']);
+  root.querySelector('[aria-label="默认"]').click();
+  await tick();
+  assert.deepEqual(sequence.slice(-2), ['reload','save:vocab']);
+});
+
+test('planner services use a bounded editor with provider presets, model lookup and save in one step', async t => {
+  const secondary = {id:'p0',provider:'custom',name:'备用',model:'backup',ready:true,hasKey:false};
+  let services = [secondary];
+  const {root,button,dom,calls} = await mount(t,{configuration:true, invoke(method,[data]){
+    if (method === 'plannerState') return {selectedId:'',services};
+    if (method === 'plannerModels') return ['model-from-service'];
+    if (method === 'plannerTest') return {elapsedMs:123};
+    if (method === 'plannerSave') {
+      services = [secondary,{...data,id:'p1',ready:true,hasKey:false}];
+      return {selectedId:'p1',services};
+    }
+    if (method === 'plannerSelect') return {selectedId:data,services};
+  }});
+  button('管理编排服务').click();
+  const modal = root.querySelector('dialog[open]');
+  assert(modal);
+  button('添加服务').click();
+  const provider = modal.querySelector('select');
+  assert(provider.options.length >= 8);
+  provider.value = 'ollama';
+  provider.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  assert.equal(modal.querySelector('input[type="url"]').value, 'http://127.0.0.1:11434/v1');
+  assert.equal(modal.querySelector('input[type="password"]').required, false);
+  button('获取模型').click();
+  await tick();
+  assert.equal(modal.querySelector('datalist option').value,'model-from-service');
+  modal.querySelector('input[list]').value = 'model-from-service';
+  button('测试连接').click();
+  await tick();
+  assert.match(modal.querySelector('[role="status"]').textContent,/123 ms/);
+  button('保存并使用').click();
+  await tick();
+  assert.equal(calls.find(call => call.method === 'plannerSave').args[0].select, true);
+  assert.match(modal.textContent,/当前使用/);
+  assert.match(root.querySelector('.l2d-planner-service-bar').textContent,/model-from-service/);
+  modal.querySelector('[aria-label="使用 备用"]').click();
+  await tick();
+  assert.deepEqual(calls.find(call => call.method === 'plannerSelect').args,['p0']);
+  assert.match(root.querySelector('.l2d-planner-service-bar').textContent,/backup/);
+  button('完成').click();
+  assert.equal(root.querySelector('dialog[open]'),null);
 });
 
 test('model cards display only the supported model types', async t => {
@@ -107,7 +202,7 @@ test('the effects tab has six preview cards and saves the chosen style with its 
   assert.deepEqual([...root.querySelectorAll('.l2d-effect-card')], cards);
 });
 
-test('effect size stays selected when switching to native and back', async t => {
+test('Figure effect size can be set regardless of the starting style', async t => {
   const {root, configCalls} = await mount(t, {effects:true, appearanceValues:{emotionEffect:'flow',emotionEffectSize:'large'}});
   const sizes = root.querySelector('.l2d-effect-sizes');
   const page = root.querySelector('.l2d-effects-page');
@@ -118,14 +213,15 @@ test('effect size stays selected when switching to native and back', async t => 
   assert.equal(page.dataset.effectSize, 'small');
   root.querySelector('[name="l2d-pet-effect"][value="native"]').click();
   await tick();
-  assert.equal(sizes.disabled, true);
+  assert.equal(sizes.disabled, false);
   sizes.querySelector('[value="large"]').click();
-  assert.equal(checkedSize(), 'small');
+  await tick();
+  assert.equal(checkedSize(), 'large');
   root.querySelector('[name="l2d-pet-effect"][value="orb"]').click();
   await tick();
   assert.equal(sizes.disabled, false);
-  assert.equal(checkedSize(), 'small');
-  assert.deepEqual(configCalls.map(call => call.values['worlds.figure.emotionEffectSize']), ['small','small','small']);
+  assert.equal(checkedSize(), 'large');
+  assert.deepEqual(configCalls.map(call => call.values['worlds.figure.emotionEffectSize']), ['small','small','large','large']);
 });
 
 test('effect card selection rolls back after a failed save and can be retried', async t => {
@@ -162,7 +258,7 @@ test('quick effect changes leave the latest style and size saved', async t => {
   assert.equal(root.querySelector('[name="l2d-pet-effect"]:checked').value, 'flow');
 });
 
-test('speech provider choices stay in the creation dialog and only saved services become cards', async t => {
+test('speech service creation, editing and deletion use the service dialogs', async t => {
   const initial = {
     selectedId: '', services: [], bodyReady: true,
     controls: {voiceEnabled: false, voiceMouthGain: 1, voiceLipSync: true, voiceVolume: 1},
@@ -204,8 +300,8 @@ test('speech provider choices stay in the creation dialog and only saved service
   await tick();
 
   assert.equal(root.querySelector('dialog[open]'), null);
-  assert.equal(cards().length, 1);
-  assert.match(cards()[0].textContent, /日常朗读/);
+  assert.equal(cards().length, 0);
+  assert.match(root.querySelector('.l2d-voice-current').textContent, /日常朗读/);
   const saves = calls.filter(call => call.method === 'voiceSave');
   assert.equal(saves.length, 1);
   const [id, providerId, serviceName, profile, key, select] = saves[0].args;
@@ -213,21 +309,25 @@ test('speech provider choices stay in the creation dialog and only saved service
   assert.equal(enabled.disabled, false);
   assert.equal(button('在桌宠试听').disabled, false);
 
+  button('管理服务').click();
+  assert.equal(cards().length, 1);
+  assert.match(cards()[0].getAttribute('aria-label'), /日常朗读/);
   cards()[0].click();
-  const edit = root.querySelector('dialog[open]');
+  const edit = root.querySelector('dialog.l2d-voice-popup[open]');
   const editName = edit.querySelector('input[name="name"]');
   assert.equal(editName.value, '日常朗读');
   editName.value = '取消的编辑';
   editName.dispatchEvent(new dom.window.Event('input', {bubbles: true}));
   button('取消').click();
   await tick();
-  assert.equal(root.querySelector('dialog[open]'), null);
-  assert.match(cards()[0].textContent, /日常朗读/);
+  assert.ok(root.querySelector('dialog.l2d-voice-library-popup[open]'));
+  assert.equal(root.querySelector('dialog.l2d-voice-popup[open]'), null);
+  assert.match(cards()[0].getAttribute('aria-label'), /日常朗读/);
   assert.equal(calls.filter(call => call.method === 'voiceSave').length, 1);
 
   cards()[0].click();
   button('删除服务').click();
-  assert.equal(root.querySelectorAll('dialog[open]').length, 1);
+  assert.equal(root.querySelectorAll('dialog[open]').length, 2);
   assert.equal(cards().length, 1);
   assert.equal(calls.some(call => call.method === 'voiceRemove'), false);
   button('确认删除').click();
@@ -238,8 +338,66 @@ test('speech provider choices stay in the creation dialog and only saved service
   assert.equal(enabled.disabled, true);
 });
 
+test('the local GPT-SoVITS preset shows its three fields and can be saved with a blank voice', async t => {
+  const state = { selectedId: '', services: [], controls: {} };
+  const { root, dom, button, calls } = await mount(t, {
+    voice: true,
+    invoke(method, args) {
+      if (method === 'voiceState') return state;
+      if (method === 'voiceSave') {
+        const [, provider, name, profile] = args;
+        return { ...state, selectedId: 'local-service', services: [
+          { id: 'local-service', provider, name, profile, hasKey: false, ready: true },
+        ] };
+      }
+    },
+  });
+  button('添加语音服务').click();
+  const dialog = root.querySelector('dialog[open]');
+  const select = dialog.querySelector('select[name="provider"]');
+  select.value = 'sovitsLocal';
+  select.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.deepEqual([...dialog.querySelectorAll('.l2d-voice-edit-content input')].map(input => input.name), ['name', 'endpoint', 'voice', 'speed']);
+  assert.equal(dialog.querySelector('input[name="voice"]').required, false);
+  assert.equal(dialog.querySelector('details').hidden, true);
+  button('保存并使用').click();
+  await tick();
+  const save = calls.find(call => call.method === 'voiceSave');
+  assert.deepEqual(save.args.slice(0, 6), [null, 'sovitsLocal', '', { endpoint: 'http://127.0.0.1:9880', voice: '', speed: 1 }, '', true]);
+  assert.match(root.querySelector('.l2d-voice-current').textContent, /使用插件当前音色/);
+});
+
+test('switching a saved voice keeps the current service on failure and updates it on success', async t => {
+  const services = ['日常','备用'].map((name,index) => ({
+    id: String(index), name, provider:'edge', profile:{voice:'zh-CN-XiaoxiaoNeural'}, ready:true,
+  }));
+  const state = {selectedId:'0',services,playbackReady:true,bodyReady:true,controls:{}};
+  let attempts = 0;
+  const {root,button,calls} = await mount(t,{
+    voice:true,
+    invoke(method) {
+      if (method==='voiceState') return state;
+      if (method==='voiceSave') {
+        if (++attempts===1) throw Error('切换失败，服务未连接');
+        return {...state,selectedId:'1'};
+      }
+    },
+  });
+  button('管理服务').click();
+  const use = () => root.querySelector('[aria-label="使用 备用"]');
+  use().click();
+  await tick();
+  assert.match(root.querySelector('.l2d-voice-current h2').textContent,/日常/);
+  assert.match(root.querySelector('.l2d-voice-library-footer').textContent,/切换失败/);
+  use().click();
+  await tick();
+  assert.equal(root.querySelector('dialog[open]'),null);
+  assert.equal(root.querySelector('.l2d-voice-current h2').textContent,'备用');
+  assert.deepEqual(calls.filter(call=>call.method==='voiceSave').map(call=>call.args[0]),['1','1']);
+});
+
 test('narration timing defaults to fast and saves only the selected mode', async t => {
-  const state = { selectedId: '', services: [], bodyReady: false, timingReady: true, controls: {} };
+  const state = {selectedId:'voice',services:[{id:'voice',provider:'edge',profile:{},ready:true}],bodyReady:false,timingReady:true,controls:{}};
   const {root, dom, calls} = await mount(t, {
     voice: true,
     invoke(method, args) {
@@ -302,9 +460,12 @@ test('a device without timing support preserves a saved sync preference and allo
 
 test('preview resolution is saved independently from formal pack quality',async t=>{
  const {root,dom,configCalls}=await mount(t,{configuration:true,quality:'balanced'}),preview=root.querySelector('[aria-label="预览精度"]');
- assert.equal(preview.value,'1');assert.equal(preview.getAttribute('aria-valuetext'),'512 px');
- preview.value='0';preview.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await tick();
- assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.previewSize':'256'}}]);assert.equal(root.querySelector('[aria-label="画质"]').value,'1');
+ assert.equal(preview.value,'0');assert.equal(preview.getAttribute('aria-valuetext'),'1024 px');
+ preview.value='1';preview.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await tick();
+ assert.equal(preview.getAttribute('aria-valuetext'),'2048 px');
+ preview.value='2';preview.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await tick();
+ assert.equal(preview.getAttribute('aria-valuetext'),'无上限');
+ assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.previewSize':'2048'}},{group:'figure',values:{'worlds.figure.previewSize':'unlimited'}}]);assert.equal(root.querySelector('[aria-label="画质"]').value,'1');
 });
 
 test('auto-save serializes rapid edits and keeps the latest selection', async t => {
@@ -578,8 +739,22 @@ test('queued imports show the wait state and disable duplicate submission',async
  paste(dom,root.querySelector('.l2d-drop-zone'),'G:/models/role');await tick();
  button('进展与结果').click();
  assert.match(root.querySelector('.l2d-assist-dock').textContent,/等待方案/);
- assert.equal(button('提交 AI 适配').disabled,true);
- button('提交 AI 适配').click();assert(!calls.some(c=>c.method==='assistAnalyze'));
+ assert.equal(button('等待 Coo 分析').disabled,true);
+ button('等待 Coo 分析').click();assert(!calls.some(c=>c.method==='assistAnalyze'));
+});
+
+test('install results offer a deliberate wear action and a link to planning settings', async t => {
+  const {root, button, calls} = await mount(t, {ack:true, builds:[{id:'pack',nameZh:'角色',at:1,bytes:1}], invoke(method) {
+    if (method === 'install') return {figureId:'role'};
+  }});
+  button('安装').click();
+  await tick();
+  const result = root.querySelector('dialog[open] .l2d-install-next');
+  assert(result);
+  assert.equal(result.querySelector('a[href$="/settings"]').textContent,'打开模型设置');
+  assert(!calls.some(call => call.method === 'wearInstalled'));
+  assert.equal(result.querySelector('a[href="#/dress"]').textContent,'前往装扮穿戴');
+  assert.match(root.querySelector('.l2d-install-feedback').textContent,/穿戴后/);
 });
 
 test('completed proposals use collapsed history while pending proposals stay directly accessible',async t=>{
@@ -802,7 +977,7 @@ test('folder and ZIP selection are owned by the Coo browser window without the b
     ack: true,
     pickPath: async () => { throw new Error('must not use the backend picker'); },
   });
-  assert.deepEqual([...root.querySelectorAll('.l2d-toolbar button')].map(b => b.textContent), ['选择文件夹', '选择 ZIP', '设置']);
+  assert.deepEqual([...root.querySelectorAll('.l2d-source-pickers button')].map(b => b.textContent), ['选择文件夹', '选择 ZIP']);
   assert.equal(root.querySelector('.l2d-operation .l2d-import-controls button').textContent, '一键打包');
   assert.equal(root.querySelector('.l2d-path'), null);
   assert.equal(button('扫描'), undefined);
@@ -992,4 +1167,39 @@ test('manual actions sit above the unchanged install/edit/delete row',async t=>{
  const card=root.querySelector('.l2d-card');assert.equal(card.querySelector(':scope > .l2d-card-binding').textContent,'动作');
  assert.deepEqual([...card.querySelectorAll('.l2d-card-actions button')].map(b=>b.textContent),['安装','编辑','删除']);
  assert.equal(card.querySelector('.l2d-card-binding').nextElementSibling.className,'l2d-card-actions');
+});
+
+test('workbench explains the current step and keeps the wearing link visible after install', async t => {
+  const {root,dom,button} = await mount(t, {
+    ack:true,
+    invoke(method) {
+      if (method === 'importPaths') return {token:'guided',models:[{dir:'figure',title:'形象'}],packs:[]};
+      if (method === 'importBuild') return {buildId:'figure',log:[]};
+      if (method === 'install') return {figureId:'figure',log:[]};
+    },
+  });
+  const current = () => root.querySelector('[aria-current="step"]').textContent;
+  const guide = root.querySelector('.l2d-workflow-next');
+  assert.match(current(),/选择素材/);
+  assert.match(guide.textContent,/不会自动打包或安装/);
+  paste(dom,root.querySelector('.l2d-drop-zone'),'E:/models/figure');
+  await tick();
+  assert.match(current(),/处理模型/);
+  assert.match(guide.textContent,/一键安装.*一键打包/);
+  button('一键安装').click();
+  await tick();
+  assert.match(current(),/前往装扮/);
+  assert.match(guide.textContent,/选中形象才会穿戴/);
+  assert.equal(guide.querySelector('a').hidden,false);
+});
+
+test('library no-match state provides a keyboard-friendly clear action', async t => {
+  const {root,dom,button} = await mount(t,{ack:true,builds:[{id:'sample',nameZh:'形象',bytes:10,at:2000}]});
+  const search = root.querySelector('.l2d-search');
+  search.value = 'no match';
+  search.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+  assert.equal(root.querySelectorAll('.l2d-card').length,0);
+  button('清除搜索').click();
+  assert.equal(root.querySelectorAll('.l2d-card').length,1);
+  assert.equal(document.activeElement, search);
 });

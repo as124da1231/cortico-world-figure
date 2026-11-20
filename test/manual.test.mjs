@@ -73,7 +73,7 @@ test('upper-body framing stays on the same pack and keeps wardrobe selections in
 test('static sessions keep low-quality private copies, detect changes and release them without exposing asset URLs',async t=>{
  const {root,pack}=await fixture(t),sessions=new ManualSessions(root,new URL('../workbench',import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1'));t.after(()=>sessions.stop());const opened=await sessions.open(pack,catalog,binding);
  assert.equal(opened.resources.length,3);assert(!opened.resources[0].raw);assert.equal(opened.preview,undefined);assert.equal(opened.files,undefined);assert.equal(typeof sessions.asset,'undefined');
- const profile=await readFile(join(sessions.get(opened.token).copy,'models/sample/profile.js'),'utf8');assert.match(profile,/textureLimit:512,canvasLimit:512/);assert.doesNotMatch(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/textureLimit:512/);
+ const profile=await readFile(join(sessions.get(opened.token).copy,'models/sample/profile.js'),'utf8');assert.equal(opened.previewSize,1024);assert.match(profile,/textureLimit:1024,canvasLimit:1024/);assert.doesNotMatch(await readFile(join(pack,'models/sample/profile.js'),'utf8'),/textureLimit:1024/);
  const copy=sessions.get(opened.token).copy;
  assert.match(await readFile(join(copy,'backends','voice-playback.js'),'utf8'),/createFigureVoicePlayback/);
  await assert.rejects(readFile(join(pack,'backends','voice-playback.js')), {code:'ENOENT'});
@@ -105,6 +105,23 @@ async function editableWorld(t){
  t.after(()=>world.stop());const opened=await world.manual.open(f.pack,catalog,[],undefined,record.id);
  return {...f,world,token:opened.token};
 }
+test('opening a second browser editor leaves the current editor and draft intact',async t=>{
+ const {world,token}=await editableWorld(t);
+ let saving=true;
+ world.browserEditors.set(token,{title:'Example',buildId:'existing',isSaving:()=>saving,stop:async()=>{
+   world.browserEditors.delete(token);await world.manual.close(token);
+ }});
+ const ui=world.webUi('zh');
+ await assert.rejects(ui.invoke('workbench','manualBrowserOpen',['manualOpenBuild',['existing'],'zh']),/已有浏览器编辑页/);
+ assert.deepEqual(await ui.invoke('workbench','manualBrowserStatus',[token]),{status:'open'});
+ assert.deepEqual(await ui.invoke('workbench','manualBrowserStatus',[]),{status:'open',token,title:'Example',buildId:'existing',saving:true});
+ await assert.rejects(ui.invoke('workbench','manualBrowserEnd',[token]),/正在保存/);
+ await assert.rejects(ui.invoke('workbench','manualSave',[token,binding]),/浏览器编辑页/);
+ assert.deepEqual([...world.manual.sessions.keys()],[token]);
+ saving=false;
+ assert.deepEqual(await ui.invoke('workbench','manualBrowserEnd',[token]),{status:'closed'});
+ assert.deepEqual(await ui.invoke('workbench','manualBrowserStatus',[]),{status:'closed'});
+});
 test('editing replaces the same card and retrying its receipt never creates another card',async t=>{
  const {world,token}=await editableWorld(t);const first=await world.saveManual(token,binding),pack=world.state.builds[0].packDir;
  assert.equal(first.buildId,'existing');assert.equal(world.state.builds.length,1);assert.equal(world.state.builds[0].id,'existing');
@@ -135,11 +152,19 @@ test('wardrobe saves into host axes and runtime data; clearing axes keeps the re
  const {world,token}=await editableWorld(t),groups=[{id:'lookarms',name:'手部',options:[{id:'raised',name:'抬起',resource:'wave',ground:true}]}];
  await world.saveManual(token,binding,groups);let pack=world.state.builds[0].packDir,m=JSON.parse(await readFile(join(pack,'figure.json')));assert.equal(m.axes[0].id,'lookarms');assert.deepEqual(m.axes[0].options.map(o=>o.id),['default','raised']);
  const profile=await readFile(join(pack,'models/sample/profile.js'),'utf8');assert.match(profile,/wardrobe:.*"axisOffset":0/);const library=JSON.parse(await readFile(join(pack,LIBRARY)));assert.deepEqual(library.wardrobe[0].options[0],{id:'raised',name:'抬起',resource:'wave'});assert.doesNotMatch(profile,/"ground":/);
- const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'装扮');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes,[]);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
+ const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'装扮');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes.map(axis=>axis.id),['figureeffects']);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
 });
 test('failed wardrobe thumbnail rendering keeps the original card and draft for retry',async t=>{
- const {world,token,pack,root}=await editableWorld(t);world.captureWardrobe=async()=>{throw Error('thumbnail renderer unavailable');};
- await assert.rejects(world.saveManual(token,binding,[{id:'lookarm',name:'装扮',options:[{id:'up',name:'抬手',resource:'wave'}]}]),/renderer unavailable/);
+ const {world,token,pack,root}=await editableWorld(t),ui=world.webUi('zh');
+ let started,fail;
+ const rendering=new Promise(resolve=>{started=resolve;});
+ world.captureWardrobe=()=>new Promise((_,reject)=>{fail=reject;started();});
+ const rejected=assert.rejects(ui.invoke('workbench','manualSave',[token,binding,[{id:'lookarm',name:'装扮',options:[{id:'up',name:'抬手',resource:'wave'}]}]]),/renderer unavailable/);
+ await rendering;
+ assert.deepEqual(await ui.invoke('workbench','manualSaveProgress',[token]),{stage:'images'});
+ assert.deepEqual(await ui.invoke('workbench','manualSaveProgress',['other-token']),{stage:null});
+ fail(Error('thumbnail renderer unavailable'));await rejected;
+ assert.deepEqual(await ui.invoke('workbench','manualSaveProgress',[token]),{stage:null});
  assert.equal(world.state.builds[0].packDir,pack);assert.equal(world.state.builds.length,1);assert.equal(world.manual.get(token).saving,false);assert.deepEqual(await readdir(join(root,'work','builds')),[]);
  world.captureWardrobe=async()=>{};await world.saveManual(token,binding,[]);assert.equal(world.state.builds[0].id,'existing');
 });

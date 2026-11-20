@@ -1,3 +1,5 @@
+import {FIGURE_WOLF_KAOMOJI} from './wolf-kaomoji.js';
+
 // Body poses from the approved kaomoji preview. Offsets are in em, then degrees and scale.
 const MOODS = {
   joy: {face:'≧▽≦', light:'#9a4c15', dark:'#ffe6bf', duration:.74,
@@ -37,33 +39,38 @@ export function createKaomojiPainter(make, root, {left, top, height}) {
   const anchor = make('g', {transform:`translate(${x} ${y})`}, root);
   const text = make('text', {'font-size':size, 'font-weight':'500', 'text-anchor':'end', 'dominant-baseline':'central',
     'font-family':'"Segoe UI", "Yu Gothic UI", "Microsoft YaHei UI", "Segoe UI Symbol", sans-serif',
-    'paint-order':'stroke', 'stroke-linejoin':'round', 'stroke-width':size * .052}, anchor);
+    'style':'white-space:pre', 'paint-order':'stroke', 'stroke-linejoin':'round', 'stroke-width':size * .052}, anchor);
   const open = make('tspan',{},text);
   const cheekL = make('tspan',{},text), face = make('tspan',{},text), cheekR = make('tspan',{},text);
   const close = make('tspan',{},text);
   open.textContent = '(';
   close.textContent = ')';
-  let lastMood, lastTheme;
-  return (id, age, theme, reduced) => {
+  let lastMood, lastTheme, lastWord;
+  return (id, age, theme, reduced, word) => {
     const mood = MOODS[id];
-    if (id !== lastMood || theme !== lastTheme) {
+    const exact = Object.hasOwn(FIGURE_WOLF_KAOMOJI, word) ? FIGURE_WOLF_KAOMOJI[word] : '';
+    if (id !== lastMood || theme !== lastTheme || word !== lastWord) {
       const dark = theme === 'dark';
       const quiet = dark ? '#d1c5d6' : '#6b6471';
       const blush = dark ? '#ff9ba9' : '#bd4567';
-      const pink = mood.blush ?? '';
+      const pink = exact ? '' : mood.blush ?? '';
       open.setAttribute('fill', quiet);
       close.setAttribute('fill', quiet);
       cheekL.setAttribute('fill', blush);
       cheekR.setAttribute('fill', blush);
       cheekL.textContent = cheekR.textContent = pink;
-      face.textContent = mood.face;
+      open.textContent = exact ? '' : '(';
+      close.textContent = exact ? '' : ')';
+      face.textContent = exact || mood.face;
       face.setAttribute('fill', dark ? mood.dark : mood.light);
       text.setAttribute('stroke', dark ? '#251f30' : '#fff9fc');
       lastMood = id;
       lastTheme = theme;
+      lastWord = word;
     }
     const [dx,dy,rotate,sx,sy] = reduced ? rest : poseAt(mood,age);
-    const transform = `translate(${size*dx} ${size*dy}) rotate(${rotate}) scale(${sx} ${sy})`;
+    const wordScale = word === 'wink' ? .8 : 1;
+    const transform = `translate(${size*dx} ${size*dy}) rotate(${rotate}) scale(${sx*wordScale} ${sy*wordScale})`;
     if (text.getAttribute('transform') !== transform) text.setAttribute('transform',transform);
   };
 }

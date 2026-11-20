@@ -5,11 +5,12 @@ import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { OutputTap, RunPhase, ToolCallContext, ToolDef, WorldHost } from 'cortico/core/types.ts';
 import { parseFigureJson } from './pack-manifest.ts';
+import { desktopControlFile, desktopEvents, desktopQuestion, desktopReply, FIGURE_ID, isDesktopBody, type DesktopBody, type DesktopBodyId } from './desktop-body.ts';
 import { VOICE_PROVIDERS } from './voice-catalog.mjs';
 import { audioMime, needsVoiceKey, normalizeVoiceProfile, providerSpec, synthesizeVoice, voiceMissingFields } from './voice-providers.mjs';
 import { normalizeVoiceControls, VOICE_CONTROLS } from './voice-settings.mjs';
 import { createVoiceStream, speechSentences } from './voice-stream.ts';
-import { createSystemVoicePlayer, type SystemVoicePlayer } from './voice-system-player.ts';
+import { createSystemVoicePlayer, type SystemVoicePlayer, type VoiceStarted } from './voice-system-player.ts';
 
 type Profile = Record<string, string | number>;
 type Controls = typeof VOICE_CONTROLS;
@@ -30,18 +31,20 @@ const STREAM_AGE = 120_000;
 const MAX_STREAM_CLIPS = 24;
 const MAX_STREAM_BYTES = 24 * 1048576;
 const FIRST_SOUND_MS = 3000;
+const PLANNED_FIRST_SOUND_MS = 6800;
 const PREFETCH_MS = 20_000;
 const PAIR_WAIT_MS = 15_000;
-const PET_SOURCE = 'desktop-pet';
+const BUBBLE_RECEIPT_MS = 2800;
 const clipName = (id: string) => `figure-voice-${id}.audio`;
 const isVoiceFile = /^figure-voice-[0-9a-f-]{36}\.(audio|tmp)$/;
 const known = (id: unknown): id is string => typeof id === 'string' && Object.hasOwn(VOICE_PROVIDERS, id);
 type VoiceProtocol = 1 | 2 | 3;
 const supportsQueue = (protocol?: VoiceProtocol) => protocol === 2 || protocol === 3;
+const comparableSpeech = (text: string) => speechSentences(text).join('').replace(/\s+/gu, '');
 
 export const FIGURE_SPEAK: Omit<ToolDef, 'handler'> = {
   name: 'figure_speak',
-  description: 'Speak the plain text of a desktop-pet reply. In the same assistant response emit figure_speak first and pet_say immediately after it with the same spoken text, without waiting for a tool receipt or starting another response. If voice is unavailable, the following pet_say still displays the text. Use only once for a reply.',
+  description: 'Speak the plain text of a desktop pet reply. In the same response call figure_speak first, then the available pet speech tool (pet_say or live2d_pet_say) immediately with the same spoken text. The pet speech tool still displays the text if voice is unavailable. Use once per reply.',
   parameters: { type: 'object', properties: { text: { type: 'string', description: 'The same spoken text as the following pet_say, without action marks.' } }, required: ['text'], additionalProperties: false },
   tags: ['speak'],
   interruptible: true,
@@ -71,26 +74,28 @@ async function compatiblePack(dir: string, id: string) {
 }
 
 type VoiceClip = { id: string; playBy: number; expiresAt: number; audition: boolean; sampleOnly?: true; startedAt?: number };
-type Active = { dir: string; protocol: VoiceProtocol; clips: VoiceClip[]; signature?: string };
-type Job = { controller: AbortController; task: Promise<void>; audition: boolean; syncTarget?: Availability };
+type Active = { dir: string; body?: DesktopBodyId; protocol: VoiceProtocol; clips: VoiceClip[]; signature?: string };
+type Job = { controller: AbortController; task: Promise<void>; audition: boolean; target?: Availability;
+  bubble?: { body: DesktopBodyId; text: string; after: number; deadline: number } };
 type SelectedVoice = { id: string; profile: Profile; key: string };
-type Availability = { dir?: string; protocol?: VoiceProtocol; figure?: string; system: boolean; issue: string; reader: string };
+type Availability = { dir?: string; body?: DesktopBodyId; protocol?: VoiceProtocol; figure?: string; system: boolean; issue: string };
 type PreparedSpeech = {
   text: string;
   voice: SelectedVoice;
   controller: AbortController;
   audio: Promise<Buffer | undefined>;
 };
-type SpeechPair = { ready: Promise<boolean>; at: number };
-type SayReceipt = { until: number; hasOutput: Promise<boolean> };
+type SpeechPair = { ready: Promise<{script: string; body: DesktopBodyId} | undefined>; at: number };
+type CoordinatePerformance = (prepared: Promise<Buffer | undefined>, signal: AbortSignal,
+  play: (first: Buffer, onStarted: VoiceStarted) => Promise<void>) => Promise<boolean>;
 type StreamJob = {
+  body: DesktopBodyId;
   controller: AbortController;
   voice: SelectedVoice;
   target: Promise<Availability | undefined>;
   synth: Promise<void>;
   play: Promise<void>;
-  calls: Map<string, { hasOutput: boolean }>;
-  count: number;
+  pending: number;
   bytes: number;
 };
 
@@ -99,10 +104,11 @@ export class FigureVoice {
     config: () => VoiceConfig;
     persist: (patch: VoiceConfig) => void;
     figures: string;
-    botDir?: string;
+    desktopBody?(id?: DesktopBodyId): DesktopBody | null | undefined;
     secret?: (name: string) => string;
     storeSecret?: (name: string, value: string) => void;
     systemPlayer?: SystemVoicePlayer | null;
+    coordinatePerformance?: (text: string, script: string, body: DesktopBodyId) => CoordinatePerformance | undefined;
   };
   private host: WorldHost | null = null;
   private cursor = 0;
@@ -110,13 +116,15 @@ export class FigureVoice {
   private timer?: ReturnType<typeof setTimeout>;
   private tick?: Promise<void>;
   private job?: Job;
+  private auditionEpoch = 0;
   private stream?: StreamJob;
-  private coveredSays: SayReceipt[] = [];
   private speechEpoch = 0;
   private readonly systemPlayer: SystemVoicePlayer | null;
   private preparedSpeech = new Map<string, PreparedSpeech>();
   private speechPairs = new Map<string, SpeechPair>();
   private acceptedSpeech = new Set<string>();
+  private pairedBubbles: Array<{ body: DesktopBodyId; text: string; after: number; expires: number }> = [];
+  private systemVoiceStartedAt?: number;
   private speechRound?: number;
   private testing?: { controller: AbortController; task: Promise<unknown> };
   private active?: Active;
@@ -208,13 +216,14 @@ export class FigureVoice {
         return { id, provider, name, profile: normalizeVoiceProfile(provider), hasKey: false, ready: false };
       }
     });
-    const { dir, protocol, system, issue, reader } = await this.availability();
+    const { dir, protocol, system, issue } = await this.availability();
     return {
       selectedId, services: cards, controls: normalizeVoiceControls(cfg),
-      bodyReady: this.syncTiming() ? protocol === 3 : supportsQueue(protocol), playbackReady: Boolean(dir || system), issue, reader,
+      bodyReady: this.syncTiming() ? protocol === 3 : Boolean(protocol), playbackReady: Boolean(dir || system), issue,
       timingReady: this.systemPlayer?.canReportStart === true,
       syncToolReady: Boolean(this.syncTool()),
-      message: this.message, speaking: Boolean(this.job),
+      message: this.message, speaking: Boolean(this.job || this.stream?.pending || this.active?.clips.length),
+      systemVoiceStartedAt: this.systemVoiceStartedAt,
     };
   }
 
@@ -272,8 +281,6 @@ export class FigureVoice {
     const timingChanged = items.voiceTiming !== undefined
       && items.voiceTiming !== normalizeVoiceControls(this.options.config()).voiceTiming;
     if (items.voiceEnabled === true) {
-      const { reader } = await this.availability();
-      if (reader) throw new Error(`请先关闭 ${reader} 的桌宠回复朗读`);
       this.current();
       if (!this.enabled) this.cursor = this.host?.store.latestCursor() ?? 0;
       this.enabled = true;
@@ -302,14 +309,18 @@ export class FigureVoice {
 
   async audition() {
     const voice = this.current();
+    const audition = ++this.auditionEpoch;
     const target = await this.availability();
+    if (audition !== this.auditionEpoch) return { ok: false };
     if ((!target.dir && !target.system) || this.paused) throw new Error(target.issue || '形象正在安装，请稍后再试');
-    await this.hush();
+    await this.hush(false, true, audition);
+    if (audition !== this.auditionEpoch || this.paused) return { ok: false };
     await this.play(target, DEMO, voice, true);
-    return { ok: true };
+    return { ok: audition === this.auditionEpoch };
   }
 
   async stopAudition() {
+    this.auditionEpoch++;
     if (this.job?.audition) {
       this.job.controller.abort();
       this.systemPlayer?.interrupt();
@@ -318,30 +329,31 @@ export class FigureVoice {
     return { ok: true };
   }
 
-  private async availability(): Promise<Availability> {
-    if (!this.options.botDir) return { system: false, issue: '当前宿主无法连接桌宠', reader: '' };
-    const empty = { system: false, issue: '请切换到已安装且支持口型的 Figure 形象', reader: '' };
+  async stopNarration() {
+    await this.hush();
+    this.message = '';
+    return this.state();
+  }
+
+  private async availability(requested?: DesktopBodyId): Promise<Availability> {
+    const empty = { system: false, issue: '请在 Figure 模型设置中选择支持口型的桌宠形象' };
     try {
-      const config = parseFigureJson(await readFile(join(this.options.botDir, 'config.json'), 'utf8'));
-      const pet = config.worlds?.[PET_SOURCE];
-      const stream = config.worlds?.streamvoice;
-      const reader = pet?.speech?.enabled === true ? 'Coo'
-        : stream?.enabled === true && (stream.readSay !== false || stream.readAsk === true) ? '流式语音播报' : '';
-      const system = Boolean(this.systemPlayer && pet?.enabled !== false);
-      const id = pet?.skin?.figure;
-      if (pet?.enabled === false || typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(id)) {
-        return { ...empty, system, reader };
+      const body = this.options.desktopBody?.(requested);
+      const system = Boolean(this.systemPlayer && body !== null);
+      const id = body?.figure;
+      if (typeof id !== 'string' || !FIGURE_ID.test(id)) {
+        return { ...empty, system, body: body?.id };
       }
-      const dir = join(this.options.figures, id);
-      const protocol = await compatiblePack(dir, id);
-      return protocol ? { dir, protocol, figure: id, system, issue: '', reader } : { ...empty, figure: id, system, reader };
+      const dir = body?.dir ?? join(this.options.figures, id);
+      const protocol = !body?.failed && await compatiblePack(dir, id);
+      return protocol ? { dir, body: body?.id, protocol, figure: id, system, issue: '' } : { ...empty, body: body?.id, figure: id, system };
     } catch {
       return { ...empty, issue: '暂时无法读取当前桌宠形象' };
     }
   }
 
   async start(host: WorldHost) {
-    if (!this.options.botDir || !host.store) return;
+    if (!host.store) return;
     this.host = host;
     this.cursor = host.store.latestCursor();
     this.enabled = this.options.config().voiceEnabled === true;
@@ -362,6 +374,7 @@ export class FigureVoice {
   async stop() {
     this.host = null;
     this.speechPairs.clear();
+    this.pairedBubbles = [];
     clearTimeout(this.timer);
     this.testing?.controller.abort();
     const hush = this.hush(true).catch(() => {});
@@ -402,7 +415,7 @@ export class FigureVoice {
     const controller = new AbortController();
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(PREFETCH_MS)]);
     const audio = this.availability().then(target => {
-      if (signal.aborted || target.reader || !target.system || this.paused || !this.syncTiming()) return undefined;
+      if (signal.aborted || !target.system || this.paused || !this.syncTiming()) return undefined;
       return this.synthesize(voice, text, signal);
     }).catch(() => undefined);
     this.preparedSpeech.set(id, { text, voice, controller, audio });
@@ -451,35 +464,50 @@ export class FigureVoice {
     job.task = (async () => {
       await stopPrevious;
       signal.throwIfAborted();
-      if (!await Promise.race([pair.ready, started])) return;
+      const paired = await Promise.race([pair.ready, started]);
+      if (!paired || typeof paired !== 'object') return;
+      const {script, body} = paired;
+      const after = this.host?.store.latestCursor() ?? 0;
+      const pairedAt = Date.now();
+      this.pairedBubbles = this.pairedBubbles.filter(bubble => bubble.expires > pairedAt).slice(1 - MAX_STREAM_CLIPS);
+      this.pairedBubbles.push({ body, text: comparableSpeech(script), after, expires: pairedAt + PREFETCH_MS });
+      const coordinate = this.options.coordinatePerformance?.(text, script, body);
       clearTimeout(timer);
       timer = setTimeout(() => {
         if (signal.aborted) return;
         this.message = '首声等待超时，已继续显示文字';
         controller.abort();
-      }, FIRST_SOUND_MS);
-      const target = await this.availability();
-      if (!target.system || target.reader || this.paused || !this.syncTiming()) return;
-      job.syncTarget = target;
-      const active = await this.setTarget(target.dir, target.protocol);
+      }, coordinate ? PLANNED_FIRST_SOUND_MS : FIRST_SOUND_MS);
+      const target = await this.availability(body);
+      if (!target.system || this.paused || !this.syncTiming()) return;
+      job.target = target;
+      const active = await this.setTarget(target.dir, target.protocol, target.body);
       let next = this.prepareSegment(sentences[0], voice, signal, usePrepared ? prepared?.audio : undefined);
-      let bytes = 0;
-      for (let index = 0; index < sentences.length; index++) {
-        const audio = await next;
-        if (!audio) throw Error('语音合成失败，已保留文字');
-        signal.throwIfAborted();
-        bytes += audio.length;
-        if (bytes > MAX_STREAM_BYTES) throw Error('本轮语音已达到大小限制');
-        const current = await this.availability();
-        if (!this.host || this.paused || current.reader || !current.system || !this.syncTiming()
-          || this.options.config().voiceEnabled !== true || current.figure !== target.figure
-          || current.protocol !== target.protocol || this.active !== active) return;
-        signal.throwIfAborted();
-        if (index + 1 < sentences.length) next = this.prepareSegment(sentences[index + 1], voice, signal);
-        await this.playSynchronizedAudio(active, audio, signal, () => {
-          if (!signal.aborted) { clearTimeout(timer); resolveStarted(true); }
-        });
-      }
+      const playSegments = async (first: Buffer | undefined, onFirstStarted?: VoiceStarted) => {
+        let bytes = 0;
+        for (let index = 0; index < sentences.length; index++) {
+          const audio = index === 0 ? first : await next;
+          if (!audio) throw Error('语音合成失败，已保留文字');
+          signal.throwIfAborted();
+          bytes += audio.length;
+          if (bytes > MAX_STREAM_BYTES) throw Error('本轮语音已达到大小限制');
+          const current = await this.availability(body);
+          if (!this.host || this.paused || !current.system || !this.syncTiming()
+            || this.options.config().voiceEnabled !== true || current.figure !== target.figure
+            || current.body !== target.body || current.protocol !== target.protocol || this.active !== active) return;
+          signal.throwIfAborted();
+          if (index + 1 < sentences.length) next = this.prepareSegment(sentences[index + 1], voice, signal);
+          await this.playSynchronizedAudio(active, audio, signal, (at, durationMs) => {
+            if (signal.aborted || index !== 0) return;
+            job.bubble = { body, text: comparableSpeech(script),
+              after, deadline: Date.now() + BUBBLE_RECEIPT_MS };
+            onFirstStarted?.(at, sentences.length === 1 ? durationMs : undefined);
+            clearTimeout(timer);
+            resolveStarted(true);
+          });
+        }
+      };
+      if (!await coordinate?.(next, signal, playSegments)) await playSegments(await next);
     })().catch(error => {
       if (!signal.aborted) this.message = error instanceof Error ? error.message : '同步语音失败，已保留文字';
     }).finally(() => {
@@ -503,7 +531,7 @@ export class FigureVoice {
     }
   }
 
-  private async playSynchronizedAudio(active: Active | undefined, audio: Buffer, signal: AbortSignal, onStarted: () => void) {
+  private async playSynchronizedAudio(active: Active | undefined, audio: Buffer, signal: AbortSignal, onStarted: VoiceStarted) {
     const player = this.systemPlayer;
     if (!player?.canReportStart) throw Error('当前设备无法确认语音起点');
     const controls = normalizeVoiceControls(this.options.config());
@@ -521,14 +549,14 @@ export class FigureVoice {
       }
     }
     try {
-      await player.play(audio, controls.voiceVolume, signal, startedAt => {
+      await this.playSystem(player, audio, controls.voiceVolume, signal, (startedAt, durationMs) => {
         if (signal.aborted) return;
         if (clip) {
           const id = clip.id;
           receipt = this.publish(active, clips => clips.map(item => item.id === id ? { ...item, startedAt } : item), signal)
             .catch(() => {});
         }
-        onStarted();
+        onStarted(startedAt, durationMs);
       });
     } finally {
       await receipt;
@@ -545,32 +573,25 @@ export class FigureVoice {
       if (!this.syncTool()) return undefined;
       return this.synchronizedTap();
     }
-    return createVoiceStream({
-      chunk: (text, kind, callId) => this.enqueue(text, kind === 'say' ? callId : undefined),
-      finish: (kind, callId) => {
-        const stream = this.stream;
-        const call = kind === 'say' && stream?.calls.get(callId);
-        if (!stream || !call) return;
-        stream.calls.delete(callId);
-        this.coveredSays.push({ until: Date.now() + 20000, hasOutput: stream.play.then(() => call.hasOutput) });
-      },
-      interrupt: () => { void this.hush().catch(() => {}); },
-    });
+    return { externalizes: () => false, onEvent() {},
+      onAbort: () => { void this.hush().catch(() => {}); } };
   }
 
   private synchronizedTap(): OutputTap {
-    const normalized = (raw: string, field: string) => {
+    const argument = (raw: string, field: string) => {
       if (raw.length > 64 * 1024) return '';
       try {
         const value: unknown = JSON.parse(raw)?.[field];
-        return typeof value === 'string' ? speechSentences(value).join('').replace(/\s+/gu, '') : '';
+        return typeof value === 'string' ? value : '';
       } catch { return ''; }
     };
-    let pending: { id: string; text: string; settle: (matched: boolean) => void } | undefined;
-    const closePair = (match = '') => {
+    type PairedCall = Awaited<SpeechPair['ready']>;
+    let pending: { id: string; text: string; settle: (call?: PairedCall) => void } | undefined;
+    const closePair = (call?: PairedCall) => {
       if (!pending) return;
+      const match = call ? comparableSpeech(call.script) : '';
       const matched = Boolean(match) && match === pending.text;
-      pending.settle(matched);
+      pending.settle(matched ? call : undefined);
       if (!matched) {
         this.preparedSpeech.get(pending.id)?.controller.abort();
         this.preparedSpeech.delete(pending.id);
@@ -589,15 +610,16 @@ export class FigureVoice {
         if (event.type === 'response.created') closePair();
         if (event.type === 'response.output_item.done' && event.item?.type === 'function_call') {
           const item = event.item;
-          closePair(item.name === 'pet_say' ? normalized(item.arguments, 'script') : '');
-          if (item.name === 'figure_speak' && item.call_id) {
+          const body = item.name === 'pet_say' ? 'desktop-pet' : item.name === 'live2d_pet_say' ? 'desktop-live2d-pet' : undefined;
+          closePair(body && item.status === 'completed' && item.call_id ? {body, script:argument(item.arguments, 'script')} : undefined);
+          if (item.name === 'figure_speak' && item.call_id && item.status === 'completed') {
             const at = Date.now();
             for (const [id, pair] of this.speechPairs) if (at - pair.at > PREFETCH_MS) this.speechPairs.delete(id);
             if (this.speechPairs.size >= MAX_STREAM_CLIPS) this.speechPairs.delete(this.speechPairs.keys().next().value!);
-            let settle!: (matched: boolean) => void;
-            const ready = new Promise<boolean>(resolve => { settle = resolve; });
+            let settle!: (call?: PairedCall) => void;
+            const ready = new Promise<PairedCall>(resolve => { settle = resolve; });
             this.speechPairs.set(item.call_id, { ready, at });
-            pending = { id: item.call_id, text: normalized(item.arguments, 'text'), settle };
+            pending = { id: item.call_id, text: comparableSpeech(argument(item.arguments, 'text')), settle };
           }
         }
         tap.onEvent(event);
@@ -608,21 +630,20 @@ export class FigureVoice {
 
   onRunPhase(phase: RunPhase) {
     if (this.options.config().voiceEnabled !== true) return;
-    if (phase.state === 'delivering' && phase.round === undefined && !this.job?.audition) {
-      void this.hush().catch(() => {});
-    }
     if (phase.state === 'model' && !this.paused && (this.syncTiming() || !supportsQueue(this.active?.protocol))) this.systemPlayer?.warm();
   }
 
-  private async hush(reset = false) {
+  private async hush(reset = false, advanceCursor = true, keepAudition?: number) {
+    // A sample can be preparing even before it owns the playback job.
+    if (keepAudition === undefined) this.auditionEpoch++;
+    else if (keepAudition !== this.auditionEpoch) return;
     const stream = this.stream;
     const job = this.job;
     this.speechEpoch++;
     this.stream = undefined;
-    this.coveredSays = [];
     for (const speech of this.preparedSpeech.values()) speech.controller.abort();
     this.preparedSpeech.clear();
-    if (this.host) this.cursor = this.host.store.latestCursor();
+    if (advanceCursor && this.host) this.cursor = this.host.store.latestCursor();
     stream?.controller.abort();
     job?.controller.abort();
     this.systemPlayer?.interrupt();
@@ -630,10 +651,15 @@ export class FigureVoice {
     finally { await Promise.allSettled([stream?.play, stream?.synth, job?.task]); }
   }
 
-  private enqueue(text: string, callId?: string, receipt?: SayReceipt) {
-    if (!this.host || this.paused || this.job?.audition || this.syncTiming() || this.options.config().voiceEnabled !== true) return;
+  private enqueue(text: string, body: DesktopBodyId) {
+    const controls = normalizeVoiceControls(this.options.config());
+    if (!this.host || this.paused || this.job?.audition || !controls.voiceEnabled || controls.voiceVolume <= 0) return;
     let stream = this.stream;
-    if (!stream) {
+    if (!stream || stream.body !== body) {
+      if (stream) {
+        stream.controller.abort();
+        this.systemPlayer?.interrupt();
+      }
       let voice;
       try { voice = this.current(); }
       catch (error) {
@@ -642,39 +668,32 @@ export class FigureVoice {
       }
       const controller = new AbortController();
       const previous = this.job;
-      previous?.controller.abort();
-      if (previous) this.systemPlayer?.interrupt();
       const target = (async () => {
         await previous?.task.catch(() => {});
         controller.signal.throwIfAborted();
-        const destination = await this.availability();
+        const destination = await this.availability(body);
         controller.signal.throwIfAborted();
-        if (destination.reader || !(supportsQueue(destination.protocol) || destination.system)) return undefined;
-        const active = await this.setTarget(destination.dir, destination.protocol);
+        if (!(destination.dir || destination.system)) return undefined;
+        const active = await this.setTarget(destination.dir, destination.protocol, destination.body);
         controller.signal.throwIfAborted();
         await this.clear(active);
         return destination;
       })().catch(() => undefined);
-      stream = this.stream = { controller, voice, target, synth: Promise.resolve(), play: Promise.resolve(), calls: new Map(), count: 0, bytes: 0 };
+      stream = this.stream = { body, controller, voice, target, synth: Promise.resolve(), play: Promise.resolve(), pending: 0, bytes: 0 };
+      const created = stream;
+      void target.then(destination => {
+        if (!destination && this.stream === created) this.stream = undefined;
+      });
       this.message = '';
     }
-    if (stream.count >= MAX_STREAM_CLIPS) return;
-    let call = callId ? stream.calls.get(callId) : undefined;
-    if (callId && !call) stream.calls.set(callId, call = { hasOutput: false });
-    if (!receipt) stream.count++;
+    if (stream.pending >= MAX_STREAM_CLIPS) return;
+    stream.pending++;
     const batch = stream;
     const signal = batch.controller.signal;
     const synthesis = batch.synth.then(async () => {
       signal.throwIfAborted();
-      if (receipt) {
-        // The receipt only waits on playback queued before this fallback. Keep
-        // that wait off the poll loop, especially for the system audio player.
-        if (await receipt.hasOutput || batch.count >= MAX_STREAM_CLIPS) return;
-        signal.throwIfAborted();
-        batch.count++;
-      }
       const target = await batch.target;
-      if (!target) return;
+      if (!target || target.body && target.body !== body) return;
       const audio = await this.synthesize(batch.voice, text, signal);
       if (batch.bytes + audio.length > MAX_STREAM_BYTES) throw Error('本轮语音已达到大小限制');
       batch.bytes += audio.length;
@@ -687,14 +706,19 @@ export class FigureVoice {
       const result = await synthesis;
       if (!result) return;
       signal.throwIfAborted();
-      const current = await this.availability();
+      const current = await this.availability(body);
       signal.throwIfAborted();
-      if (this.stream !== batch || !this.host || this.paused || current.reader || this.options.config().voiceEnabled !== true) return;
-      if (supportsQueue(result.target.protocol) && (current.dir !== result.target.dir || current.protocol !== result.target.protocol)) return;
+      if (this.stream !== batch || !this.host || this.paused || this.options.config().voiceEnabled !== true) return;
+      if (current.dir !== result.target.dir || current.body !== result.target.body || current.protocol !== result.target.protocol) {
+        if (this.stream === batch) this.stream = undefined;
+        return;
+      }
       await this.output(result.target, result.audio, false, signal, true);
-      if (call) call.hasOutput = true;
     }).catch(error => {
       if (!signal.aborted) this.message = error instanceof Error ? error.message : '语音播放失败';
+    }).finally(() => {
+      batch.pending--;
+      if (!batch.pending) batch.bytes = 0;
     });
   }
 
@@ -718,48 +742,63 @@ export class FigureVoice {
     this.enabled = on;
     const needsGain = normalizeVoiceControls(this.options.config()).voiceMouthGain !== 1;
     if (!fresh && !needsGain && !this.active && !this.job && !this.stream) return;
-    const target = await this.availability();
-    const { dir, protocol, reader, system } = target;
+    const events = fresh ? desktopEvents(host.store, { fromCursor: previous + 1, toCursor: latest }) : [];
+    const replies = events.filter(event => desktopReply(event) || desktopQuestion(event));
+    const lastReply = replies.at(-1);
+    const interruption = !this.job?.audition && events.filter(event => isDesktopBody(event.source)
+      && [event.source + '.message', event.source + '.speech', event.source + '.answer'].includes(event.type)).at(-1);
+    if (interruption) await this.hush(false, false);
+    const target = await this.availability(lastReply?.source ?? this.stream?.body ?? this.job?.target?.body);
+    const { dir, body, protocol, system } = target;
     if (!this.host || this.paused) return;
-    if ((!on || reader) && this.stream) await this.hush();
-    const syncTarget = this.job?.syncTarget;
-    if (syncTarget && (target.figure !== syncTarget.figure || protocol !== syncTarget.protocol || !system)) this.job?.controller.abort();
-    if (this.active?.dir !== dir || this.active?.protocol !== protocol) {
-      if (this.active || !this.syncTiming() || this.job?.audition) this.job?.controller.abort();
-      await this.setTarget(dir, protocol);
+    if (!on && this.stream) await this.hush();
+    const job = this.job;
+    if (job?.bubble) {
+      const {body: source, text, after, deadline} = job.bubble;
+      const confirmed = host.store.range({source, fromCursor:after + 1, limit:64}).some(event =>
+        desktopReply(event) && event.source === source && event.cursor > after
+        && comparableSpeech(event.text) === text);
+      if (confirmed) job.bubble = undefined;
+      else if (Date.now() >= deadline) {
+        this.message = '没有收到这句气泡的记录，已停止继续朗读';
+        job.controller.abort();
+      }
     }
-    if (reader && !this.job?.audition) this.job?.controller.abort();
+    if (job?.target && (target.figure !== job.target.figure || body !== job.target.body
+        || dir !== job.target.dir || protocol !== job.target.protocol || system !== job.target.system)) job.controller.abort();
+    const packBody = dir ? body : undefined;
+    if (this.active?.dir !== dir || this.active?.body !== packBody || this.active?.protocol !== protocol) {
+      if (this.active || !this.syncTiming() || this.job?.audition) this.job?.controller.abort();
+      await this.setTarget(dir, protocol, body);
+    }
     if (!on && !this.job?.audition) this.job?.controller.abort();
     // An audition may play while automatic narration is disabled.
     const active = this.active;
     await this.publish(active, clips =>
-      clips.filter(clip => clip.expiresAt > Date.now() && (clip.audition || on && !reader)));
+      clips.filter(clip => clip.expiresAt > Date.now() && (clip.audition || on)));
     if (!needsGain && !this.job && !this.stream && !active?.clips.length && this.active === active) this.active = undefined;
-    if (this.syncTiming() || !fresh || !(dir || system) || reader || this.job?.audition || epoch !== this.speechEpoch) return;
-    const events = host.store.range({ fromCursor: previous + 1, toCursor: latest, source: PET_SOURCE, limit: 32 });
-    this.coveredSays = this.coveredSays.filter(covered => covered.until > Date.now());
-    const replies: { text: string; receipt?: SayReceipt }[] = [];
-    let latestUnstreamed = -1;
-    for (const event of events) {
-      if (event.type !== 'desktop-pet.self' || event.meta?.kind !== 'say') continue;
-      const receipt = this.coveredSays.shift();
-      const text = typeof event.text === 'string' ? event.text.trim().slice(0, 800) : '';
-      if (!text) continue;
-      if (!receipt) latestUnstreamed = replies.length;
-      replies.push({ text, receipt });
-    }
-    if (!replies.length) return;
-    const batch = this.stream;
-    const streamTarget = await batch?.target;
-    if (epoch !== this.speechEpoch) return;
-    if (streamTarget && batch === this.stream) {
-      for (const [index, { text, receipt }] of replies.entries()) {
-        if (receipt || index === latestUnstreamed) this.enqueue(text, undefined, receipt);
+    if (!fresh || !(dir || system) || this.job?.audition
+        || epoch + (interruption ? 1 : 0) !== this.speechEpoch) return;
+    const now = Date.now();
+    this.pairedBubbles = this.pairedBubbles.filter(bubble => bubble.expires > now);
+    for (const reply of replies) {
+      if (interruption && reply.cursor <= interruption.cursor) continue;
+      if (body && reply.source !== body) continue;
+      const paired = desktopReply(reply)
+        ? this.pairedBubbles.findIndex(bubble => bubble.body === reply.source && bubble.after < reply.cursor
+          && bubble.text === comparableSpeech(reply.text))
+        : -1;
+      if (paired >= 0) {
+        this.pairedBubbles.splice(paired, 1);
+        continue;
       }
-      return;
+      const questionOptions: unknown = desktopQuestion(reply) ? reply.meta?.options : undefined;
+      const choices = Array.isArray(questionOptions) ? questionOptions.slice(0, 3)
+        .filter((choice): choice is string => typeof choice === 'string' && Boolean(choice.trim())) : [];
+      const sentences = speechSentences(reply.text.trim().slice(0, 800));
+      if (choices.length) sentences.push(...speechSentences('可选，' + choices.join('、') + '。'));
+      for (const sentence of sentences) this.enqueue(sentence, reply.source);
     }
-    try { void this.play(target, replies.at(-1)!.text, this.current(), false).catch(() => {}); }
-    catch (error) { this.message = error instanceof Error ? error.message : '语音配置无效'; }
   }
 
   private async play(target: Availability, text: string, voice: SelectedVoice, audition: boolean) {
@@ -772,18 +811,18 @@ export class FigureVoice {
       const signal = controller.signal;
       await previous?.task.catch(() => {});
       signal.throwIfAborted();
-      const active = await this.setTarget(target.dir, target.protocol);
+      const active = await this.setTarget(target.dir, target.protocol, target.body);
       await this.clear(active);
       const audio = await this.synthesize(voice, text, signal);
       signal.throwIfAborted();
       const current = await this.availability();
-      if (!this.host || this.paused || this.active !== active || current.dir !== target.dir
-          || !audition && (current.reader || this.options.config().voiceEnabled !== true)) {
+      if (!this.host || this.paused || this.active !== active || current.dir !== target.dir || current.body !== target.body
+          || !audition && this.options.config().voiceEnabled !== true) {
         throw new Error('桌宠或朗读设置已变化');
       }
       await this.output(target, audio, audition, signal);
     })();
-    const job = { controller, task, audition };
+    const job = { controller, task, audition, target };
     this.job = job;
     try { await task; }
     catch (error) {
@@ -793,17 +832,26 @@ export class FigureVoice {
   }
 
   private async output(target: Availability, audio: Buffer, audition: boolean, signal: AbortSignal, streaming = false) {
-    if (!target.dir || streaming && !supportsQueue(target.protocol)) {
+    if (!target.dir || streaming && !supportsQueue(target.protocol) && target.system) {
       if (!target.system || !this.systemPlayer) throw Error('当前桌宠无法播放这段语音');
       const volume = normalizeVoiceControls(this.options.config()).voiceVolume;
-      await this.systemPlayer.play(audio, volume, signal);
+      await this.playSystem(this.systemPlayer, audio, volume, signal);
       return;
     }
     const active = this.active;
-    if (!active || active.dir !== target.dir || active.protocol !== target.protocol) throw Error('当前形象已变化');
+    if (!active || active.dir !== target.dir || active.body !== target.body || active.protocol !== target.protocol) throw Error('当前形象已变化');
     const now = Date.now(), expiresAt = now + (streaming ? STREAM_AGE : CLIP_AGE);
     const clip = { id: randomUUID(), playBy: streaming ? expiresAt : now + 8000, expiresAt, audition };
-    await this.stageClip(active, clip, audio, signal, streaming);
+    await this.stageClip(active, clip, audio, signal, streaming && supportsQueue(target.protocol));
+  }
+
+  private playSystem(player: SystemVoicePlayer, audio: Buffer, volume: number, signal: AbortSignal, onStarted?: VoiceStarted) {
+    const observe: VoiceStarted | undefined = player.canReportStart ? (at, duration) => {
+      if (signal.aborted) return;
+      this.systemVoiceStartedAt = at;
+      onStarted?.(at, duration);
+    } : undefined;
+    return player.play(audio, volume, signal, observe);
   }
 
   private async stageClip(active: Active, clip: VoiceClip, audio: Buffer, signal: AbortSignal, append: boolean) {
@@ -819,10 +867,10 @@ export class FigureVoice {
     }
   }
 
-  private async setTarget(dir?: string, protocol?: VoiceProtocol) {
-    if (this.active?.dir === dir && this.active?.protocol === protocol) return this.active;
+  private async setTarget(dir?: string, protocol?: VoiceProtocol, body?: DesktopBodyId) {
+    if (this.active?.dir === dir && this.active?.protocol === protocol && this.active?.body === body) return this.active;
     const previous = this.active;
-    const next: Active | undefined = dir && protocol ? { dir, protocol, clips: [] } : undefined;
+    const next: Active | undefined = dir && protocol ? { dir, body, protocol, clips: [] } : undefined;
     this.active = next;
     await this.clear(previous, true);
     return next;
@@ -850,7 +898,8 @@ export class FigureVoice {
         if (clips.length) throw new Error('桌宠语音资源已变化');
         return;
       }
-      if (!active.signature && await readFile(join(active.dir, ASSET), 'utf8').catch(() => '') === body) {
+      const control = join(active.dir, desktopControlFile(ASSET, active.body));
+      if (!active.signature && await readFile(control, 'utf8').catch(() => '') === body) {
         active.signature = body;
         return;
       }
@@ -860,7 +909,7 @@ export class FigureVoice {
         for (let attempt = 0; ; attempt++) {
           signal?.throwIfAborted();
           try {
-            await rename(temporary, join(active.dir, ASSET));
+            await rename(temporary, control);
             break;
           } catch (error) {
             const code = (error as NodeJS.ErrnoException).code;

@@ -18,7 +18,14 @@ import {
   deriveParameterSmoothing,
   getVADPreset,
   motionStylePresets,
+  facsKeys,
+  actionUnitKeys,
+  planSpeechPerformance,
+  deriveSpeechPerformanceCapabilities,
 } from '../vendor/soullink/index.js';
+
+const planFACS = new Set(facsKeys.filter(key => key !== 'mouthOpen'));
+const planUnits = new Set(actionUnitKeys);
 
 /**
  * FACS 通道 → role。scale 为负表示反向（眉压低 = browY 负）。
@@ -179,10 +186,12 @@ export function createPerformance(profile, warn = console.warn) {
   let dead = false;
   let accent = {};
   let eyeMul = 1;
+  let lastPlan = null;
+  let speechPlanId = null;
 
   return {
     /** 每帧调用；返回 role → 值的表（已只保留 role 表里有的名字）。 */
-    update(t, dt, face, speechLevel) {
+    update(t, dt, face, speechLevel, layer) {
       if (dead) return null;
       try {
         const name = face ?? 'neutral';
@@ -195,9 +204,33 @@ export function createPerformance(profile, warn = console.warn) {
         }
         if (name !== lastFace || (name !== 'neutral' && t - lastPush > keepSeconds)) {
           const preset = getVADPreset(emotion[name] ?? name);
-          runtime.applyVADTarget(preset, blend);
+          runtime.applyVADTarget(preset, blend * (layer?.emotion?.intensity ?? 1));
           lastFace = name;
           lastPush = t;
+        }
+        const plan = layer?.emotion ?? null;
+        const stagedSpeech = layer?.speech;
+        if (stagedSpeech?.id !== speechPlanId) {
+          if (stagedSpeech) {
+            const speechFace = stagedSpeech.face ?? name;
+            const emotionName = emotion[speechFace] ?? speechFace;
+            runtime.startSpeechPerformance(planSpeechPerformance({ emotion: emotionName,
+              durationMs: stagedSpeech.durationMs, capabilities: deriveSpeechPerformanceCapabilities(modelProfile),
+              turnOrdinal: Math.trunc(stagedSpeech.id * 1000),
+            }), t - stagedSpeech.elapsed);
+          } else if (speechPlanId !== null) runtime.clearSpeechPerformance();
+          speechPlanId = stagedSpeech?.id ?? null;
+        }
+        const hadPlan = lastPlan !== null;
+        if (plan !== lastPlan) {
+          if (plan?.vad) runtime.applyVADTarget({ ...getVADPreset(emotion[name] ?? name), ...plan.vad }, plan.intensity ?? 1);
+          if (lastPlan?.vad && !plan?.vad) runtime.applyVADTarget(getVADPreset(emotion[name] ?? name), blend);
+          lastPlan = plan;
+        }
+        if (plan || hadPlan) {
+          const strength = (layer?.strength ?? 1) * (plan?.intensity ?? 1);
+          runtime.setManualFACS(Object.fromEntries(Object.entries(plan?.facs ?? {}).filter(([key])=>planFACS.has(key)).map(([key,value])=>[key,value*strength])));
+          runtime.setManualActionUnits(Object.fromEntries(Object.entries(plan?.actionUnits ?? {}).filter(([key])=>planUnits.has(key)).map(([key,value])=>[key,value*strength])));
         }
         const snap = runtime.update(t, dt);
         const out = {};

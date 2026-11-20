@@ -7,6 +7,10 @@ import {extname,join,resolve,sep} from 'node:path';
 import {findBrowser,pngOf} from './cover.ts';
 import type {StaticPreviewPlan} from './manual-preview.ts';
 
+// The uncapped setting applies to rendering. Comparison PNGs have a fixed output size.
+const captureSize = (plan: StaticPreviewPlan) => plan.size === 'unlimited' ? 2048 : plan.size;
+const maxPngBytes = (size: number) => size * size * 4 + 128 * 1024;
+
 export interface PreviewResult { frames:any[]; quality:any }
 export interface PreviewWorker { readonly closed:boolean; render(plan:StaticPreviewPlan,signal:AbortSignal):Promise<PreviewResult>; close():Promise<void> }
 const MIME:Record<string,string>={'.js':'text/javascript','.mjs':'text/javascript','.json':'application/json','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp'};
@@ -24,7 +28,7 @@ try{
   try{
    if(!body||size!==job.plan.size){
     body?.dispose?.();body=null;root.replaceChildren();globalThis.__l2dPreviewReady=null;
-    body=await mod.createFigureBody(new URL('pack/',base),{kit,preview:true,previewSize:job.plan.size,loadImage,asset:p=>new URL(p,new URL('pack/',base)),scheme:'',host:{root,bounds:()=>bounds,emit(){},sound(){},start:{x:310,facing:1}}});
+    body=await mod.createFigureBody(new URL('pack/',base),{kit,preview:true,previewSize:job.plan.size,previewCaptureSize:job.captureSize,loadImage,asset:p=>new URL(p,new URL('pack/',base)),scheme:'',host:{root,bounds:()=>bounds,emit(){},sound(){},start:{x:310,facing:1}}});
     body.set?.({roam:'off'});body.do?.('neutral');const deadline=performance.now()+20000;
     while(!globalThis.__l2dPreviewReady?.()){
      const quality=globalThis.__l2dRenderQuality?.();if(quality?.error)throw Error(quality.error);
@@ -33,7 +37,7 @@ try{
     size=job.plan.size;loads++;
    }
    globalThis.__l2dPreview.wardrobe(job.plan.groups,{});
-   const frames=job.plan.samples.map(sample=>({...sample,...globalThis.__l2dStaticSample(sample)}));
+   const frames=job.plan.samples.map(sample=>({...sample,...globalThis.__l2dStaticSample(sample,job.captureSize)}));
    await post('result',{id:job.id,frames,quality:globalThis.__l2dRenderQuality(),modelLoads:loads});
   }catch(error){body?.dispose?.();body=null;size=0;await post('result',{id:job.id,error:String(error.message||error)});}
  }
@@ -44,14 +48,20 @@ body?.dispose?.();
 export function previewResult(plan:StaticPreviewPlan,body:any):PreviewResult {
   if(body.error)throw Error(String(body.error));
   if(!Array.isArray(body.frames)||body.frames.length!==plan.samples.length)throw Error('预览图片不完整');
+  const size = captureSize(plan);
   const frames=body.frames.map((frame:any,i:number)=>{
-    const png=pngOf(frame.png);
-    if(png.length<24||png.length>plan.size*plan.size*4+4096||png.readUInt32BE(16)!==plan.size||png.readUInt32BE(20)!==plan.size)throw Error('预览图片尺寸无效');
+    const png=pngOf(frame.png,size);
+    if(png.length>maxPngBytes(size))throw Error('预览图片过大');
     return {...plan.samples[i],png:frame.png,fit:frame.fit,picks:frame.picks,values:frame.values};
   });
   const q=body.quality;
   if(q?.error)throw Error(q.error);
-  if(q?.textureLimit!==plan.size||!Array.isArray(q.canvas)||q.canvas.length!==2||q.canvas.some((n:number)=>!Number.isFinite(n)||n<1||n>plan.size)||q.maskSize>plan.size)throw Error('预览画质上限无效');
+  const renderLimit = plan.size === 'unlimited' ? 0 : plan.size;
+  const canvasLimit = renderLimit || q?.limits?.canvas;
+  const maskLimit = renderLimit || q?.limits?.texture;
+  if(q?.textureLimit!==renderLimit||q.canvasLimit!==renderLimit||!Number.isFinite(canvasLimit)||!Number.isFinite(maskLimit)||
+    !Array.isArray(q.canvas)||q.canvas.length!==2||q.canvas.some((n:number)=>!Number.isFinite(n)||n<1||n>canvasLimit)||
+    !Number.isFinite(q.maskSize)||q.maskSize<1||q.maskSize>maskLimit)throw Error('预览画质上限无效');
   return {frames,quality:{...q,modelLoads:body.modelLoads}};
 }
 
@@ -91,7 +101,7 @@ export class StaticPreviewRenderer implements PreviewWorker {
     if(!this.waiter||!this.queue||this.activeId)return;
     const res=this.waiter,job=this.queue;
     this.waiter=undefined;this.queue=undefined;this.activeId=job.id;
-    res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(job));
+    res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify({...job,captureSize:captureSize(job.plan)}));
   }
   private async handle(req:http.IncomingMessage,res:http.ServerResponse){
     const url=new URL(req.url||'/',this.origin||'http://127.0.0.1');
@@ -104,7 +114,9 @@ export class StaticPreviewRenderer implements PreviewWorker {
       res.once('close',()=>{clearTimeout(timer);if(this.waiter===res)this.waiter=undefined;});this.deliver();return;
     }
     if(req.method==='POST'&&(path==='result'||path==='fatal')){
-      let raw='';for await(const data of req){raw+=data;if(raw.length>18*1048576){res.writeHead(413).end();return;}}
+      const active = path === 'result' && this.activeId ? this.pending.get(this.activeId) : undefined;
+      const limit = active ? 4 * Math.ceil(maxPngBytes(captureSize(active.plan)) / 3) * active.plan.samples.length + 1048576 : 1048576;
+      let raw='';for await(const data of req){raw+=data;if(raw.length>limit){res.writeHead(413).end();this.fail('预览图片过大，请降低精度后重试');return;}}
       const body=JSON.parse(raw);res.writeHead(200).end('ok');
       if(path==='fatal'){this.fail(String(body.error||'预览初始化失败'));return;}
       if(body.id!==this.activeId)return;

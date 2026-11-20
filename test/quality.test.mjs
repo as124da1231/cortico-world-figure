@@ -35,7 +35,7 @@ test('workbench settings expose only declared editable values and the notice has
   assert.deepEqual(page.panels.map(p => p.id), ['workbench','settings','appearance','effects','voice']);
   assert.equal(page.panels.find(p => p.id === 'effects').title, '特效');
   assert.equal(world.webUi('en').panels.find(p => p.id === 'effects').title, 'Effects');
-  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',previewSize:'512',emotionEffect:'native',emotionEffectSize:'medium',gearTheme:'red',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'subtle',uiStyle:'custom',uiButtonFill:'gradient',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:true,assistConfirmFallback:false,modelRoots:'' });
+  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',previewSize:'1024',emotionEffect:'native',emotionEffectSize:'medium',gearTheme:'red',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'subtle',uiStyle:'custom',uiButtonFill:'gradient',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:true,assistConfirmFallback:false,modelRoots:'',performanceMode:'vocab',desktopFigure:'' });
   assert.ok(page.panels.some(p=>p.id==='appearance'));assert.deepEqual(await page.invoke('appearance','settings',[]),await page.invoke('workbench','settings',[]));
   await assert.rejects(()=>page.invoke('appearance','install',[]),/未知面板/);
   assert.deepEqual(await page.invoke('effects', 'settings', []), await page.invoke('workbench', 'settings', []));
@@ -335,7 +335,19 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   assert.match((await inv('cropPreview', [list.builds[0].id])).image, /^data:image\/png;base64,/);
   await assert.rejects(readFile(coverFile), {code:'ENOENT'});
   await writeFile(coverFile, originalCover);
-  // A saved card with the same protocol may still have the older audio renderer.
+  const manifestFile = join(packDir, 'figure.json');
+  const builtManifest = JSON.parse(await readFile(manifestFile, 'utf8'));
+  const effects = builtManifest.axes.find(axis => axis.id === 'figureeffects');
+  assert.deepEqual(effects.options.map(option => option.id), [
+    'figurefxkaomoji', 'figurefxnative', 'figurefxorb', 'figurefxflow', 'figurefxbubbles', 'figurefxsoftglow',
+  ]);
+  for (const option of effects.options) {
+    assert.equal((await readFile(join(packDir, option.thumb))).subarray(1, 4).toString(), 'PNG');
+  }
+  // A card saved with the older runtime gains the options when installed.
+  builtManifest.axes = builtManifest.axes.filter(axis => axis !== effects);
+  await writeFile(manifestFile, JSON.stringify(builtManifest));
+  await rm(join(packDir, 'thumb', 'effects'), { recursive: true });
   const oldVoiceBackend = 'export function createFigureVoicePlayback() {}\n';
   await writeFile(join(packDir, 'backends', 'voice-playback.js'), oldVoiceBackend);
   cfg.emotionEffect = 'flow';
@@ -367,8 +379,15 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   assert.deepEqual(await inv('install', ['', list.builds[0].id]), { replacementRequired: true });
   await inv('install', ['', list.builds[0].id, true]);
   const installedManifest = JSON.parse(await readFile(join(installed.state.install.target, 'figure.json'), 'utf8'));
-  assert.equal(installedManifest.effects, undefined);
-  assert.deepEqual(installedManifest.axes.at(-1).options.map(option => option.id), ['figureupperframe','figurefullframe']);
+  assert.equal(installedManifest.effects.reach, 1.95);
+  assert.deepEqual(installedManifest.axes.find(axis => axis.id === 'figureframing').options.map(option => option.id), ['figureupperframe','figurefullframe']);
+  const installedEffects = installedManifest.axes.find(axis => axis.id === 'figureeffects');
+  assert.deepEqual(installedEffects.options.map(option => option.id), [
+    'figurefxnative', 'figurefxkaomoji', 'figurefxorb', 'figurefxflow', 'figurefxbubbles', 'figurefxsoftglow',
+  ]);
+  for (const option of installedEffects.options) {
+    assert.equal((await readFile(join(installed.state.install.target, option.thumb))).subarray(1, 4).toString(), 'PNG');
+  }
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'body-crop.js'), 'utf8'), /createCropMask/);
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'crop-config.js'), 'utf8'), /curve: between/);
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'gaze-config.js'), 'utf8'), /normalizeGazeConfig/);

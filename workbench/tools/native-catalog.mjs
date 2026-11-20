@@ -3,6 +3,7 @@ import {createReadStream} from 'node:fs';
 import {lstat,readFile,readdir,realpath} from 'node:fs/promises';
 import {basename,dirname,isAbsolute,join,relative,resolve,sep} from 'node:path';
 import {resolveModelAsset} from './model-assets.mjs';
+import {bindingResourceIds,validateExpressionOverlays} from '../pack/backends/native-combination.js';
 import {compileCurve} from '../pack/backends/native-actions.js';
 
 export const FACE_WORDS=['neutral','happy','wink','love','shy','surprised','angry','sad','sleepy','thinking','smug','pout','worried','determined','flustered','scared','excited','cry','confused'];
@@ -201,18 +202,20 @@ export function validateBindings(catalog,bindings){
   used.add(b.word);const r=catalog.resources.find(r=>r.id===b.resource);if(!r)throw Error('映射引用了不存在的资源');
   if(r.classification==='appearance')throw Error('外观资源不能映射为情绪或动作，请保留通用表现');
   if(r.kind==='expression'&&!FACE_WORDS.includes(b.word))throw Error('表情资源须映射到表情词');
+  if(b.nativeOnly!==undefined&&(typeof b.nativeOnly!=='boolean'||b.nativeOnly&&r.kind!=='motion'))throw Error('完全使用动画只适用于原生动作');
+  const overlays=validateExpressionOverlays(catalog,r.id,b.overlays);
   const release=b.release?catalog.resources.find(r=>r.id===b.release):null;
   if(b.release&&(!release||release.kind!=='motion'||r.kind!=='motion'))throw Error('复位动作无效');
   if(release?.classification==='appearance')throw Error('外观资源不能作为复位动作');
   if(release&&!reversePose(r,release))throw Error('复位动作的参数与原姿态不匹配');
   if(r.classification==='pose'&&!release)throw Error('姿态切换必须包含复位动作，否则保留通用表现');
-  return {word:b.word,resource:r.id,...(release?{release:release.id}:{}),reason:String(b.reason||r.suggestion?.reason||'按动作内容匹配').slice(0,200),confidence:Number.isFinite(b.confidence)?Math.max(0,Math.min(1,b.confidence)):.5};
+  return {word:b.word,resource:r.id,...(overlays.length?{overlays}:{}),...(release?{release:release.id}:{}),...(b.nativeOnly?{nativeOnly:true}:{}),reason:String(b.reason||r.suggestion?.reason||'按动作内容匹配').slice(0,200),confidence:Number.isFinite(b.confidence)?Math.max(0,Math.min(1,b.confidence)):.5};
  });
 }
 
 export function nativeConfig(catalog,bindings,{includeAll=false}={}){
- const selected=validateBindings(catalog,bindings),wanted=new Set(selected.flatMap(b=>[b.resource,b.release].filter(Boolean)));
- return {version:1,bindings:selected,resources:catalog.resources.filter(r=>includeAll||wanted.has(r.id)).map(r=>({id:r.id,kind:r.kind,title:r.title,seconds:r.seconds,classification:r.classification,data:r.raw}))};
+ const selected=validateBindings(catalog,bindings),wanted=new Set(selected.flatMap(bindingResourceIds));
+ return {version:selected.some(b=>b.overlays?.length)?2:1,bindings:selected,resources:catalog.resources.filter(r=>includeAll||wanted.has(r.id)).map(r=>({id:r.id,kind:r.kind,title:r.title,seconds:r.seconds,classification:r.classification,data:r.raw}))};
 }
 
 export function publicCatalog(catalog){

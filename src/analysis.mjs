@@ -1,3 +1,4 @@
+import {bindingResourceIds} from '../workbench/pack/backends/native-combination.js';
 import {aiEnabled} from './adaptation.mjs';
 import {createHash} from 'node:crypto';
 
@@ -10,7 +11,7 @@ export function analysisPolicy(cfg) {
   detailParameters:depth==='deep'?24:16,maxFrames:depth==='quick'?4:6,
   targeted:active&&depth!=='quick',reviewRequired:depth==='deep'};
 }
-export const bindingKey=b=>JSON.stringify([b.word,b.resource,b.release||'']);
+export const bindingKey=b=>JSON.stringify([b.word,b.resource,b.release||'',...(b.overlays?.length?[...b.overlays].sort():[])]);
 export const fingerprintKey=(c,b)=>createHash('sha256').update(c.fingerprint+bindingKey(b)).digest('hex');
 
 /** A bounded overview; a single-resource request pages through every channel. */
@@ -65,7 +66,7 @@ export function reviewSamples(c,b) {
  const r=c.resources.find(r=>r.id===b.resource),release=c.resources.find(r=>r.id===b.release);
  return [{id:'__neutral__',time:0},
   {id:r.id,time:0,word:b.word,generic:true},
-  ...resourceSamples(r).map(s=>({...s,word:b.word})),
+  ...resourceSamples(r).map(s=>({...s,word:b.word,...(b.overlays?.length?{overlays:b.overlays}:{})})),
   ...(release?[{id:release.id,time:release.seconds,word:b.word}]:[])];
 }
 
@@ -76,8 +77,9 @@ export function confirmationReasons(c,bindings,cfg,proof={visual:[],review:[]}) 
   const r=c.resources.find(r=>r.id===b.resource);
   if(b.confidence<.7||r.classification==='appearance')reasons.push('存在不确定或外观映射');
   if(r.suggestion?.word!==b.word)reasons.push('缺少明确的语义名称对应，需要人工确认');
+  if(b.overlays?.length&&!proof.review.includes(bindingKey(b)))reasons.push('原生表情组合尚未提供整体对照，需要人工确认');
   if(policy.active){
-   if(![b.resource,b.release].filter(Boolean).every(id=>proof.visual.includes(id)))reasons.push('所选资源的图片证据不完整');
+   if(!bindingResourceIds(b).every(id=>proof.visual.includes(id)))reasons.push('所选资源的图片证据不完整');
    if(policy.reviewRequired&&!proof.review.includes(bindingKey(b)))reasons.push('深入档尚未提供这项映射的对照复核');
   }
  }

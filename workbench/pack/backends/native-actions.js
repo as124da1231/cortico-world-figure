@@ -1,3 +1,4 @@
+import {expressionTracks} from './native-combination.js';
 // Pure data playback. Native clips only own the channels present in their curves.
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const mix=(a,b,t)=>a+(b-a)*t;
@@ -19,7 +20,8 @@ function crossfadeValues(previous, current, ratio) {
     const old = values.get(key);
     const weight = (old?.weight ?? 0) + track.weight;
     values.set(key, old
-      ? { ...track, value: mix(old.value, track.value, track.weight / weight), weight }
+      ? { ...track, value: mix(old.value, track.value, track.weight / weight), weight,
+          ...(old.nativeOnly || track.nativeOnly ? {nativeOnly:true} : {}) }
       : track);
   }
   return [...values.values()];
@@ -55,14 +57,19 @@ export function createNativeActions(config,{warn=console.warn}={}){
    resources.set(resource.id,{...resource,tracks,seconds:clamp(Number(resource.seconds)||1,.05,60)});
   }catch(error){failures.push(resource.id);warn('[l2d] Native resource skipped; generic behavior retained',resource.id,error.message);}
  }
- let active=null,expression=null,fadingExpression=null,elapsed=0,lastFace=null,lastGesture=null,manual=null;
+ let active=null,expression=null,visibleExpression=[],expressionFrom=[],expressionAge=0,elapsed=0,lastFace=null,lastGesture=null,manual=null;
  let visibleMotion=[], outgoing=null, transitionAge=0, idleWeight=0;
- const get=word=>{const b=bindings.get(word),r=b&&resources.get(b.resource);return r?{binding:b,resource:r}:null;};
+ const expressionResource=(id,overlays=[])=>{
+  const list=[id,...overlays].map(id=>resources.get(id)).filter(Boolean);
+  if(!list.length)return null;
+  const primary=list[0];
+  if(primary.kind!=='expression')return primary;
+  return {...primary,tracks:expressionTracks(list)};
+ };
+ const get=word=>{const b=bindings.get(word);if(!b)return null;try{const r=expressionResource(b.resource,b.overlays);return r?{binding:b,resource:r}:null;}catch(error){if(!failures.includes(b.resource)){failures.push(b.resource);warn('[l2d] Invalid expression combination',error.message);}return null;}};
  function setExpression(next) {
   if (expression?.binding.word === next?.binding.word) return;
-  if (expression) {
-   fadingExpression = { ...expression, age: 0, weight: Math.min(1, expression.age / EXPRESSION_FADE) };
-  }
+  expressionFrom=visibleExpression.map(v=>({...v}));expressionAge=0;
   expression = next ? { ...next, age: 0 } : null;
  }
  function rememberMotion() {
@@ -85,8 +92,15 @@ export function createNativeActions(config,{warn=console.warn}={}){
   setExpression(next);
   return true;
  }
- function applyTrack(out,track,value,weight){if(!Number.isFinite(value)||typeof track.id!=='string')return;out.push({id:track.id,target:track.target,value,weight,blend:track.blend||'Overwrite'});}
- function sample(resource,time,weight,out){if(weight>0)for(const p of resource.tracks)applyTrack(out,p,p.sample?p.sample(time):p.value,weight);}
+ function sample(resource,time,weight,out,nativeOnly=false){
+  if(weight<=0)return;
+  for(const track of resource.tracks){
+   const value=track.sample?track.sample(time):track.value;
+   if(!Number.isFinite(value)||typeof track.id!=='string')continue;
+   out.push({id:track.id,target:track.target,value,weight,blend:track.blend||'Overwrite',
+     ...(track.scale!==undefined?{scale:track.scale}:{}),...(nativeOnly?{nativeOnly:true}:{})});
+  }
+ }
  function stepMotion(frame, dt) {
   const values = [];
   if (active) {
@@ -101,15 +115,17 @@ export function createNativeActions(config,{warn=console.warn}={}){
    const { resource, age } = active;
    const end = resource.seconds + (active.release ? 0 : hold);
    const weight = Math.min(1, age / MOTION_IN) * clamp((end + MOTION_OUT - age) / MOTION_OUT, 0, 1);
-   sample(resource, Math.min(age, resource.seconds), weight, values);
+   sample(resource, Math.min(age, resource.seconds), weight, values, active.binding.nativeOnly===true);
    if (age >= end + MOTION_OUT) active = null;
   } else {
    const idle = get('idle');
    if (idle?.resource.kind === 'motion') {
-    const target = (!frame.mode || frame.mode === 'idle') && !expression ? IDLE_WEIGHT : 0;
-    const step = dt * IDLE_WEIGHT / MOTION_IN;
+    const nativeOnly = idle.binding.nativeOnly===true;
+    const maxWeight = nativeOnly ? 1 : IDLE_WEIGHT;
+    const target = (!frame.mode || frame.mode === 'idle') ? maxWeight : 0;
+    const step = dt * maxWeight / MOTION_IN;
     idleWeight += clamp(target - idleWeight, -step, step);
-    sample(idle.resource, elapsed % idle.resource.seconds, idleWeight, values);
+    sample(idle.resource, elapsed % idle.resource.seconds, idleWeight, values, nativeOnly);
    }
   }
   if (!outgoing) return values;
@@ -120,13 +136,14 @@ export function createNativeActions(config,{warn=console.warn}={}){
  }
  return {
   trigger,
+  hasExpression:word=>get(word)?.resource.kind==='expression',
   failed:failures,
   resources:()=>[...resources.keys()],
-  sample(id,time){const r=resources.get(id);if(!r)throw Error('Unknown native resource');manual={id,time:clamp(Number(time)||0,0,r.seconds)};},
+  sample(id,time,overlays=[]){const r=expressionResource(id,overlays);if(!r)throw Error('Unknown native resource');manual={resource:r,time:clamp(Number(time)||0,0,r.seconds)};},
   clearSample(){manual=null;},
   update(frame={},dt=.016){
    dt=clamp(Number(dt)||0,0,.1);elapsed+=dt;const out=[];
-   if(manual){sample(resources.get(manual.id),manual.time,1,out);return out;}
+   if(manual){sample(manual.resource,manual.time,1,out);return out;}
    if (frame.face !== lastFace) {
     lastFace = frame.face;
     const next = get(frame.face);
@@ -138,17 +155,18 @@ export function createNativeActions(config,{warn=console.warn}={}){
     lastGesture = gesture;
     if (gesture && active?.binding.word !== gesture) trigger(gesture, PRIORITY.gesture);
    }
-   if (fadingExpression) {
-    fadingExpression.age += dt;
-    sample(fadingExpression.resource, 0, fadingExpression.weight * (1 - fadingExpression.age / EXPRESSION_FADE), out);
-    if (fadingExpression.age >= EXPRESSION_FADE) fadingExpression = null;
-   }
-   if (expression) {
-    expression.age += dt;
-    sample(expression.resource, 0, Math.min(1, expression.age / EXPRESSION_FADE), out);
-   }
    visibleMotion = stepMotion(frame, dt);
    out.push(...visibleMotion);
+   expressionAge+=dt;if(expression)expression.age+=dt;
+   const ratio=Math.min(1,expressionAge/EXPRESSION_FADE);
+   const target=expression?.resource.tracks||[];
+   const prior=new Map(expressionFrom.map(v=>[v.id,v])),next=new Map(target.map(v=>[v.id,v]));
+   visibleExpression=[...new Set([...prior.keys(),...next.keys()])].map(id=>{
+    const a=prior.get(id),b=next.get(id);
+    return {id,target:'Parameter',blend:'Affine',scale:mix(a?.scale??1,b?.scale??1,ratio),value:mix(a?.value??0,b?.value??0,ratio),weight:1};
+   });
+   if(ratio===1){visibleExpression=visibleExpression.filter(v=>next.has(v.id));expressionFrom=[];}
+   if(!visibleMotion.some(value=>value.nativeOnly))out.push(...visibleExpression);
    return out;
   },
   state:()=>({motion:active?.resource.id||null,expression:expression?.resource.id||null,failed:[...failures]}),
@@ -162,8 +180,21 @@ export function applyNativeValues(values,model,paramIndex,partIndex){
    model.setPartOpacityByIndex(i,clamp(mix(model.getPartOpacityByIndex(i),value.value,value.weight),0,1));continue;
   }
   const i=paramIndex.get(value.id);if(i===undefined)continue;
-  const base=model.getParameterValueByIndex(i),next=value.blend==='Add'?base+value.value:value.blend==='Multiply'?base*value.value:value.value;
+  const base=model.getParameterValueByIndex(i),next=value.blend==='Affine'?base*value.scale+value.value:value.blend==='Add'?base+value.value:value.blend==='Multiply'?base*value.value:value.value;
   const number=clamp(mix(base,next,value.weight),model.getParameterMinimumValue(i),model.getParameterMaximumValue(i));
   if(Number.isFinite(number))model.setParameterValueByIndex(i,number);
  }
+}
+
+// Blend once against the current pose, then keep the result through the later
+// physics, wardrobe and lip-sync writes. Applying the fade twice changes it.
+export function captureMotionLocks(values,model,paramIndex,partIndex){
+ applyNativeValues(values,model,paramIndex,partIndex);
+ return values.flatMap(track=>{
+  const part=track.target==='PartOpacity';
+  const index=(part?partIndex:paramIndex).get(track.id);
+  if(index===undefined)return [];
+  const value=part?model.getPartOpacityByIndex(index):model.getParameterValueByIndex(index);
+  return [{id:track.id,target:track.target,blend:'Overwrite',value,weight:1}];
+ });
 }

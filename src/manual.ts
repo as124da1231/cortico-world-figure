@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {cp,mkdir,readFile,readdir,rm,stat,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {manualPreviewPlan,previewSize} from './manual-preview.ts';
+import {DEFAULT_PREVIEW_SIZE,manualPreviewPlan,previewSize} from './manual-preview.ts';
 import {StaticPreviewRenderer,type PreviewWorker} from './preview-renderer.ts';
 import {assertRegularTree,refreshPackRuntime} from './pipeline.ts';
 import {packFingerprint} from './pack-fingerprint.ts';
@@ -10,6 +10,7 @@ import {appendNativeVocab,nativeConfig,validateBindings,FACE_WORDS,MOTION_WORDS}
 import {wardrobeConfig,wardrobeTracks,wardrobeChannels} from '../workbench/pack/backends/wardrobe.js';
 import {fixedWardrobeGroups} from '../workbench/pack/backends/wardrobe-slots.js';
 import {BODY_CROP_AXIS} from '../workbench/pack/backends/crop-config.js';
+import {EMOTION_EFFECT_AXIS} from '../workbench/tools/emotion-effect.mjs';
 
 export const LIBRARY = 'native-library.json';
 export async function writeNativePack(root:string,catalog:any,bindings:any[],preview=false,groups:any[]=[]) {
@@ -17,10 +18,12 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
   const manifestFile=join(root,'figure.json'),manifest=parseFigureJson(await readFile(manifestFile,'utf8'));
   const previousLibrary=await readFile(join(root,LIBRARY),'utf8').then(s=>JSON.parse(s)).catch(()=>({}));
   const previousAxes=new Set((previousLibrary.wardrobe||[]).map((g:any)=>g.id));
-  const cropAxis=(manifest.axes||[]).find((a:any)=>a.id===BODY_CROP_AXIS&&!previousAxes.has(a.id));
-  const axes=(manifest.axes||[]).filter((a:any)=>!previousAxes.has(a.id)&&a!==cropAxis);
+  const reservedAxes=new Set([BODY_CROP_AXIS,EMOTION_EFFECT_AXIS]);
+  const baseAxes=(manifest.axes||[]).filter((a:any)=>!previousAxes.has(a.id));
+  const trailingAxes=baseAxes.filter((a:any)=>reservedAxes.has(a.id));
+  const axes=baseAxes.filter((a:any)=>!reservedAxes.has(a.id));
   const wardrobe=wardrobeConfig(catalog,groups,bindings,axes.length);
-  if(wardrobe.groups.some(g=>g.options.length&&(g.id===BODY_CROP_AXIS||axes.some((a:any)=>a.id===g.id))))throw Error('装扮分组标识与模型选项重复');
+  if(wardrobe.groups.some(g=>g.options.length&&(reservedAxes.has(g.id)||axes.some((a:any)=>a.id===g.id))))throw Error('装扮分组标识与模型选项重复');
   const oldOrder=new Map((manifest.axes||[]).map((a:any,i:number)=>[a.id,i]));
   const runtimeGroups=wardrobe.groups.filter(g=>g.options.length).sort((a,b)=>Number(oldOrder.get(a.id)??Infinity)-Number(oldOrder.get(b.id)??Infinity));
   const dirs=await readdir(join(root,'models'),{withFileTypes:true});let count=0;
@@ -40,7 +43,7 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
     const removed=new Set(previous.map((b:any)=>b.word).filter((w:string)=>MOTION_WORDS.includes(w)));
     manifest.vocab=(manifest.vocab||[]).filter((v:any)=>!removed.has(v.id));
     appendNativeVocab(manifest.vocab,bindings,catalog.resources);
-    manifest.axes=[...axes,...runtimeGroups.map(g=>({id:g.id,name:{zh:g.name,en:g.en||g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]})),...(cropAxis?[cropAxis]:[])];
+    manifest.axes=[...axes,...runtimeGroups.map(g=>({id:g.id,name:{zh:g.name,en:g.en||g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]})),...trailingAxes];
     manifest.presets=(manifest.presets||[]).map((p:any)=>({...p,pick:Object.fromEntries(manifest.axes.map((a:any)=>[a.id,a.options.some((o:any)=>o.id===p.pick?.[a.id])?p.pick[a.id]:a.options[0].id]))}));
     // Empty groups are editor drafts only; runtime offsets follow the actual emitted axes.
     await writeFile(manifestFile,JSON.stringify(manifest,null,2)+'\n');
@@ -58,7 +61,7 @@ export class ManualSessions {
   private cancelled=new Set<string>();
   private createRenderer:(pack:string,workbench:string)=>PreviewWorker;
   constructor(root:string,workbench:string,createRenderer=(pack:string,bench:string):PreviewWorker=>new StaticPreviewRenderer(pack,bench)){this.root=root;this.workbench=workbench;this.createRenderer=createRenderer;}
-  async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string,requestedToken?:string,groups:any[]=[],resolution:unknown=512){
+  async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string,requestedToken?:string,groups:any[]=[],resolution?:unknown){
     const fixed=fixedWardrobeGroups(groups),wardrobeNeedsSave=groups.some(g=>g.options.length)&&JSON.stringify(fixed)!==JSON.stringify(groups);groups=fixed;
     await this.prune();
     if(this.sessions.size>=3)throw Error('请先关闭已有动作编辑窗口');
@@ -76,7 +79,7 @@ export class ManualSessions {
       // Preview settings are isolated from the source pack and final installation.
       for(const model of await readdir(join(copy,'models'),{withFileTypes:true}))if(model.isDirectory()){
         const file=join(copy,'models',model.name,'profile.js');let text=await readFile(file,'utf8');
-        text=text.replace(/^  render: .*\r?\n/gm,'').replace(/\r?\n};\s*$/, '\n  render: {mode:"economy",textureLimit:512,canvasLimit:512,strict:false},\n};\n');await writeFile(file,text);
+        text=text.replace(/^  render: .*\r?\n/gm,'').replace(/\r?\n};\s*$/, `\n  render: {mode:"economy",textureLimit:${DEFAULT_PREVIEW_SIZE},canvasLimit:${DEFAULT_PREVIEW_SIZE},strict:false},\n};\n`);await writeFile(file,text);
       }
       let files=0,bytes=0;
       const walk=async(base:string)=>{for(const e of await readdir(base,{withFileTypes:true})){
@@ -89,9 +92,9 @@ export class ManualSessions {
       this.sessions.set(token,value);
       if(!this.reaper){this.reaper=setInterval(()=>void this.prune().catch(()=>{}),60000);this.reaper.unref();}
       if(pending.cancelled||!this.sessions.has(token))throw Error('这次编辑已取消');
-      return {token,buildId,previewSize:previewSize(resolution),wardrobe:groups,wardrobeNeedsSave,title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,
+      return {token,buildId,previewSize:previewSize(resolution),wardrobe:groups,wardrobeNeedsSave,title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,nativeMotionMode:true,
         words:{expressions:FACE_WORDS,motions:MOTION_WORDS},
-        resources:catalog.resources.map((r:any)=>{const channels=wardrobeChannels(r);let wardrobeError='';try{wardrobeTracks(r);}catch(e){wardrobeError=String((e as Error).message);}const {id,title,kind,classification,seconds,release}=r;return {id,title,kind,classification,seconds,release,channels,wardrobeError};}),warnings:catalog.warnings||[],truncated:catalog.truncated};
+        resources:catalog.resources.map((r:any)=>{const channels=wardrobeChannels(r);let wardrobeError='';try{wardrobeTracks(r);}catch(e){wardrobeError=String((e as Error).message);}const {id,title,kind,classification,seconds,release}=r;return {id,title,kind,classification,seconds,release,channels,wardrobeError,...(kind==='expression'?{parameters:r.parameters}: {})};}),warnings:catalog.warnings||[],truncated:catalog.truncated};
     }catch(e){this.sessions.delete(token);if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;}await rm(dir,{recursive:true,force:true});throw e;}
     finally{this.openingTokens.delete(token);}
   }
