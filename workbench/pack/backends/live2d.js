@@ -13,7 +13,7 @@
  *     下一帧又当输入，会自激（头发/胸口越抖越大）。
  *
  * 沙箱适配：
- *   1. moc3 / model3 / physics / motion / profile 全是 JS 模块（不能 fetch）
+ *   1. moc3 直接读二进制，model3 / physics / motion / profile 读取 JS 模块
  *   2. 着色器内联，覆盖 CubismShader_WebGL.loadShader
  *   3. 贴图走 loadImage（响应带 ACAO: null）
  *   4. canvas 经 foreignObject 放进 kit 的 SVG 组，跟随整组变换
@@ -138,7 +138,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   const limits = graphicsLimits(gl);
   if (opts.preview) canvas.width = canvas.height = Math.min(canvas.width, limits.canvas);
 
-  // ---------- 模型（官方双轨回退：优先 fetch 原生 moc3，失败回退到 base64 模块） ----------
+  // ---------- 模型 ----------
   const resolveAsset = (rel) => {
     if (typeof opts?.asset === 'function') {
       const u = opts.asset(rel);
@@ -147,17 +147,27 @@ export async function createLive2DBody(base, opts, entry, kit) {
     return new URL(rel, base);
   };
 
+  const presetSchemes = new Map();
+  if (emotionConfig.hasNamedPresets) {
+    const manifest = await fetch(resolveAsset('figure.json')).then(response => response.json()).catch(() => null);
+    for (const preset of manifest?.presets ?? []) {
+      const scheme = manifest.axes.map(axis => preset.pick[axis.id]).join('-');
+      presetSchemes.set(preset.id, scheme);
+    }
+  }
+  const resolveScheme = id => presetSchemes.get(id) ?? id;
+  const initialScheme = resolveScheme(opts.scheme);
+
   const mocName = entry.moc || 'model.moc3';
-  const fallbackName = entry.mocFallback || (mocName.endsWith('.js') ? mocName : 'moc3.js');
+  const fallbackName = entry.mocFallback || (mocName.endsWith('.js') ? mocName : null);
   let mocBuf;
   if (!mocName.endsWith('.js')) {
     try {
       const res = await fetch(resolveAsset(`models/${entry.id}/${mocName}`));
-      if (res.ok) {
-        mocBuf = await res.arrayBuffer();
-      }
-    } catch {
-      // 旧版宿主（0.2.13 及更早）CSP 拒绝 fetch，回退读取 base64 模块
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      mocBuf = await res.arrayBuffer();
+    } catch (error) {
+      if (!fallbackName) throw new Error(`无法读取 ${mocName}（${error.message}）。请检查包内文件和 Coo 版本（需 0.2.14 或更新版本）。`, {cause:error});
     }
   }
   if (!mocBuf) {
@@ -482,7 +492,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   }
   let native = [1,2].includes(profile.native?.version) ? createNativeActions(profile.native) : null;
   const wardrobe=createWardrobe(model._model,paramIndex,partIndex,{parts:{...profile.parts?.base,...profile.clean?.parts},params:profile.clean?.params});
-  wardrobe.configure(profile.wardrobe);wardrobe.scheme(opts.scheme);
+  wardrobe.configure(profile.wardrobe);wardrobe.scheme(initialScheme);
   let previewState = null;
   const nativeParams = new Set(), nativeParts = new Map();
   for (const resource of profile.native?.resources ?? []) {
@@ -881,7 +891,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   let elapsedBetweenDraws = 0;
   const reduceMotion = doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)');
   const schemeCrop = (id) => profile.bongo ? normalizeBodyCrop(null) : bodyCropForScheme(profile.crop, id);
-  let crop = schemeCrop(opts.scheme);
+  let crop = schemeCrop(initialScheme);
   let cropDisplay = null, cropTransition = null, cropDirty = true;
   const rawExtent = () => extent ?? DEFAULT_EXTENT;
   const cropExtent = () => measuredExtent ?? rawExtent();
@@ -1151,7 +1161,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     return effectPicks[pick] ?? emotionConfig.default;
   }
   let emotionEffects, initialEmotionTrigger, kitSvg;
-  let emotionStyle = effectForScheme(opts.scheme);
+  let emotionStyle = effectForScheme(initialScheme);
   let emotionEffectsEnabled = emotionStyle !== 'native';
   function setEmotionEffectsEnabled(enabled) {
     emotionEffectsEnabled = enabled;
@@ -1174,6 +1184,13 @@ export async function createLive2DBody(base, opts, entry, kit) {
     try {
       emotionEffects ??= createPetEmotionEffects({
         doc, parent, art: fo, bounds: currentExtent, style: emotionStyle, size: emotionConfig.emotionEffectSize,
+        kaomojiBox: ([left,top,right,bottom]) => {
+          const height = bottom-top;
+          if (!silhouette?.headWidth) return {left,top,right,height};
+          const half = silhouette.headWidth/2;
+          return {left:silhouette.headX-half,right:silhouette.headX+half,
+            top:Math.max(top,silhouette.headY+(cropDisplay?.shift ?? 0)),height};
+        },
       });
       emotionEffects.setTheme(doc.documentElement.dataset.theme);
       if (initialEmotionTrigger) {
@@ -1534,10 +1551,11 @@ export async function createLive2DBody(base, opts, entry, kit) {
     if (draw) drawShadow();
   };
   body.setScheme = async (id) => {
-    selectEmotionStyle(effectForScheme(id));
-    changeWardrobe(() => wardrobe.scheme(id));
+    const scheme = resolveScheme(id);
+    selectEmotionStyle(effectForScheme(scheme));
+    changeWardrobe(() => wardrobe.scheme(scheme));
     if (texturesReady) settleWardrobe();
-    setCrop(schemeCrop(id));
+    setCrop(schemeCrop(scheme));
   };
   const layoutBase = body.layout.bind(body);
   body.layout = () => {

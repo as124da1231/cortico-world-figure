@@ -6,12 +6,14 @@
 
 ## 安装
 
+新生成的 Live2D 和 BongoCat 形象包需要 Coo 0.2.14 或更新版本。
+
 - **扩展市场**　在 Coo 的「扩展」页搜索「Live2D 模型一键安装」或填写包名 `cortico-world-figure`。市场跟随 npm 发行版本。
 - **GitHub 发行包**　下载发行页中的 `cortico-world-figure-*.tgz`。解压到保留在本机的路径，再在 Coo「扩展 → 安装 → 本地目录」选择包含 `package.json` 的 `package` 目录。例子如下。
 
   ```powershell
   New-Item -ItemType Directory -Force .\figure-extension
-  tar -xzf .\cortico-world-figure-4.1.1.tgz -C .\figure-extension
+  tar -xzf .\cortico-world-figure-4.1.2.tgz -C .\figure-extension
   ```
 
 两种方式都需要重启 Coo，再从高级模式打开扩展。Figure 使用当前 Cortico World API 6，完整流程在 Windows 验证。生成封面和实时编辑需要本机 Chrome、Edge 或 Chromium。
@@ -38,10 +40,11 @@
 
 「模型设置」里可调正式画质和编辑预览精度。卡片的「编辑」提供全身和半身取景。切换装扮时按模型可见底边自动贴地。
 
-## 三、特效与语音
+## 三、个性化与语音
 
-- **桌宠特效**　Figure 将六种风格放进同一个 Live2D 形象。选好初始风格并安装后，到 Coo「装扮 → 情绪特效」切换。小、中、大只调 Figure 特效。
-- **文字转语音**　在「管理服务」保存多套音色和连接设置，从当前服务卡直接试听。支持 Edge TTS、OpenAI 兼容、MiniMax、本机 GPT-SoVITS 插件及其他服务预设。本机 GPT-SoVITS 需先开启插件的本机语音接口，音色可沿用插件当前选择。
+- **主题配色**　在「个性化」多选蓝色、黑色、橙色、紫色和粉色，随形象包安装。穿戴相应形象后可在 Coo「装扮 → 配色」切换。Coo 设置窗口采用跟随形象的配色时，也会同步切换强调色。
+- **桌宠特效**　默认使用 Coo 原生特效。在「个性化」勾选要随包带入的其他效果，可多选。带有额外特效的形象安装后，可在 Coo「装扮 → 情绪特效」切换。小、中、大只调 Figure 特效。
+- **文字转语音**　在语音页保存多套音色和连接设置，在卡片上选择或配置，并试听当前服务。支持 Edge TTS、OpenAI 兼容、MiniMax、本机 GPT-SoVITS 插件及其他服务预设。本机 GPT-SoVITS 需先开启插件的本机语音接口，音色可沿用插件当前选择。
 - **朗读时机**　快速播报按已记录的台词分段。Windows 可选「跟气泡一起开始」，按首段声音实际开始对齐气泡。服务失败或超时仍会显示正文。重装更新之后的 Figure 形象，可用音频驱动口型。
 
 使用在线语音或编排服务时，所需台词会发给选中的服务。AI 适配还会将模型元数据和所选关键帧交给 Coo 当前模型分析。模型导入、打包和安装在本机完成。

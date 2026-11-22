@@ -7,7 +7,6 @@ function wardrobeLink(el, label, style = 'l2d-btn sm') {
 function mountPerformanceSettings(ctx, form, cfg, setMode) {
   const {doc, t, el, button} = voiceView(ctx);
   const section = el('section', 'l2d-planner-settings');
-  section.append(el('h3', 'l2d-settings-heading', t('运行时表演', 'Runtime performance')));
   const modes = el('fieldset', 'l2d-planner-modes');
   modes.setAttribute('aria-label', t('表演模式', 'Performance mode'));
   const descriptions = [
@@ -52,11 +51,13 @@ function mountPerformanceSettings(ctx, form, cfg, setMode) {
   const importSource = button(t('导入原始模型', 'Import source model'), 'sm');
   action.append(dress, importSource, manage);
   readiness.append(targetSummary, action);
-  readiness.setAttribute('role', 'status');
+  targetSummary.setAttribute('role', 'status');
   section.append(modes, targetRow, readiness);
   form.append(section);
 
   let snapshot = null, currentBody = null, disposed = false, reading = false, importing = false, choosing = false;
+  let readingTargets = false, targetsLoaded = false;
+  let targetRevision = 0;
   let syncState = '';
   let dialog;
   const providerName = id => {
@@ -77,9 +78,9 @@ function mountPerformanceSettings(ctx, form, cfg, setMode) {
     manage.hidden = !independent && (!dress.hidden || !importSource.hidden);
     const bodyName = currentBody?.body === 'desktop-live2d-pet' ? t('Live2D 桌宠', 'Live2D desktop pet') : t('桌宠', 'Desktop pet');
     const worn = currentBody?.figure === 'coo' ? t('内置 Coo', 'Built-in Coo') : currentBody?.figure;
-    targetName.textContent = worn ? bodyName + ' · ' + worn : t('当前对话桌宠', 'Current conversation pet');
-    if (service?.ready) targetName.textContent += ' · ' + service.model;
-    nextStep.textContent = !currentBody ? t('正在检查穿戴形象…', 'Checking the worn figure…')
+    const name = worn ? bodyName + ' · ' + worn : t('当前对话桌宠', 'Current conversation pet');
+    const title = service?.ready ? name + ' · ' + service.model : name;
+    const hint = !currentBody ? t('正在检查穿戴形象…', 'Checking the worn figure…')
         : mode === 'vocab' ? t('回到对话，直接说「眨一下眼」。', 'In chat, say “Wink once.”')
           : state === 'unavailable' ? t('暂时读不到桌宠状态，正在重试。', 'Pet status is unavailable. Retrying.')
           : state === 'native-model' ? t('当前是 Live2D 桌宠直导的模型。请用 Figure 导入原始素材，再穿戴到 Coo 桌宠。', 'Import the source model in Figure and wear the pack on the Coo desktop pet.')
@@ -94,34 +95,37 @@ function mountPerformanceSettings(ctx, form, cfg, setMode) {
           : independent && !service?.ready ? t('形象已就绪，选择一个编排服务即可。', 'The figure is ready. Select a planner service.')
           : currentBody.limited ? t('可编排姿态和通用表情。导入原始素材可恢复原生动作。', 'Pose and generic expression planning are available. Import the source model to recover native actions.')
           : t('可以回到对话，试试「先点头，再往左歪头」。', 'In chat, try “Nod, then tilt your head left.”');
-    targetName.title = targetName.textContent;
-    nextStep.title = nextStep.textContent;
-
+    if (targetName.textContent !== title) targetName.title = targetName.textContent = title;
+    if (nextStep.textContent !== hint) nextStep.title = nextStep.textContent = hint;
   }
   paint();
   void ctx.invoke('plannerState', []).then(state => {
     if (!snapshot && state?.services && !ctx.signal?.aborted) { snapshot = state; paint(); }
-  }, () => { if (!ctx.signal?.aborted) { snapshot = {services:[]}; paint(); } });
+  }, () => { if (!snapshot && !ctx.signal?.aborted) { snapshot = {services:[]}; paint(); } });
   async function checkBody() {
     if (reading || choosing || disposed || ctx.signal?.aborted) return;
     reading = true;
+    const revision = targetRevision;
     try {
       const state = await ctx.invoke('performanceReadiness', []);
-      if (!disposed && !ctx.signal?.aborted) currentBody = state?.state ? state : {state:'unavailable'};
+      if (!disposed && !ctx.signal?.aborted && revision === targetRevision) currentBody = state?.state ? state : {state:'unavailable'};
     } catch {
-      if (!disposed && !ctx.signal?.aborted) currentBody = {state:'unavailable'};
+      if (!disposed && !ctx.signal?.aborted && revision === targetRevision) currentBody = {state:'unavailable'};
     } finally {
       reading = false;
       if (!disposed && !ctx.signal?.aborted) paint();
     }
   }
   void checkBody();
-  const statusPoll = ctx.interval?.(() => { if (form.isConnected && !doc.hidden) void checkBody(); }, 2000);
   let selectedTarget = cfg.desktopFigure || '';
   async function loadTargets() {
+    if (readingTargets || targetsLoaded || disposed || ctx.signal?.aborted) return;
+    readingTargets = true;
     try {
       const targets = await ctx.invoke('desktopTargets', []);
-      if (disposed || !Array.isArray(targets)) return;
+      if (disposed || ctx.signal?.aborted) return;
+      if (!Array.isArray(targets)) throw new Error('Figure list unavailable');
+      desktopTarget.options[0].textContent = t('跟随装扮记录', 'Follow wardrobe activity');
       for (const {id, name} of targets) {
         const option = el('option', null, name);
         option.value = id;
@@ -130,12 +134,21 @@ function mountPerformanceSettings(ctx, form, cfg, setMode) {
       desktopTarget.value = selectedTarget;
       if (desktopTarget.selectedIndex < 0) desktopTarget.selectedIndex = 0;
       desktopTarget.disabled = false;
+      targetsLoaded = true;
     } catch {
       if (!disposed) desktopTarget.options[0].textContent = t('形象列表暂不可用', 'Figure list unavailable');
+    } finally {
+      readingTargets = false;
     }
   }
   void loadTargets();
+  const statusPoll = ctx.interval?.(() => {
+    if (!form.isConnected || doc.hidden) return;
+    void checkBody();
+    void loadTargets();
+  }, 2000);
   desktopTarget.onchange = async () => {
+    targetRevision++;
     choosing = desktopTarget.disabled = true;
     try {
       currentBody = await ctx.invoke('selectDesktopFigure', [desktopTarget.value]);
@@ -239,6 +252,7 @@ function mountPerformanceSettings(ctx, form, cfg, setMode) {
       const draft = el('form', 'l2d-planner-editor');
       const field = (title, input) => {
         const label = el('label', 'l2d-field');
+        input.setAttribute('aria-label', title);
         label.append(el('span', 'l2d-label', title), input);
         return label;
       };

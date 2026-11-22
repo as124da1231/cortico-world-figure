@@ -135,6 +135,63 @@ test('existing provider profiles become saved service cards without rewriting se
   assert.ok(!JSON.stringify(state).includes('existing-local-test-key'));
 });
 
+test('malformed saved services do not hide usable services or draft repair', async () => {
+  const voice = new FigureVoice({ figures: '', systemPlayer: null, persist() {},
+    config: () => ({voiceService:'good', voiceServices:[
+      null,
+      {id:'unsupported', provider:'removed-provider', name:'Old', profile:{}},
+      {id:'broken', provider:'edge', name:'To repair', profile:null},
+      {id:'good', provider:'sovitsLocal', name:'Usable', profile:{}},
+    ]}),
+  });
+  const state = await voice.state();
+  assert.equal(state.selectedId, 'good');
+  assert.deepEqual(state.services.map(({id, ready}) => [id, ready]), [['broken', false], ['good', true]]);
+});
+
+test('stopping narration blocks synchronized calls from the previous model response', async t => {
+  const spoken = [];
+  const events = [];
+  const voice = new FigureVoice({ figures:'', config:()=>({voiceEnabled:true,voiceTiming:'sync',voiceProvider:'sovitsLocal'}),
+    persist() {}, systemPlayer:{
+      canReportStart:true, warm(){}, interrupt(){}, async stop(){},
+      async play(audio, _volume, _signal, started) { spoken.push(audio.toString()); started(Date.now()); },
+    },
+  });
+  voice.synthesize = async (_voice, text) => Buffer.from(text);
+  await voice.start({store:{latestCursor:()=>events.length,range:({source,fromCursor=1,toCursor=Infinity})=>
+    events.filter(event=>(!source || source===event.source) && event.cursor>=fromCursor && event.cursor<=toCursor)}});
+  t.after(() => voice.stop());
+  const tap = voice.outputTap();
+  const emit = (name, call_id, args, output_index) => tap.onEvent({
+    type:'response.output_item.done',output_index,item:{
+      type:'function_call',name,call_id,status:'completed',arguments:JSON.stringify(args),
+    },
+  });
+  const pair = (id, text) => {
+    emit('figure_speak',id,{text},0);
+    emit('pet_say',id+'-bubble',{script:text},1);
+    tap.onRoundEnd();
+  };
+  const reply = (callId, text) => voice.syncTool().handler({text},{callId});
+  pair('queued','等待朗读的旧回复。');
+  await voice.stopNarration();
+  assert.match(await reply('queued','等待朗读的旧回复。'),/语音未开始/);
+  pair('late','停止之后才完成的旧回复。');
+  assert.match(await reply('late','停止之后才完成的旧回复。'),/语音未开始/);
+  for (const text of ['等待朗读的旧回复。','停止之后才完成的旧回复。']) {
+    events.push({source:'desktop-pet',type:'desktop-pet.self',cursor:events.length+1,text,meta:{kind:'say'}});
+  }
+  await voice.poll();
+  await voice.stream?.play;
+  assert.deepEqual(spoken, []);
+
+  tap.onEvent({type:'response.created'});
+  pair('new','新回复仍正常朗读。');
+  assert.match(await reply('new','新回复仍正常朗读。'),/语音已开始/);
+  assert.deepEqual(spoken, ['新回复仍正常朗读。']);
+});
+
 test('speech uses the selected service for fresh pet replies, with origin-bound keys and cleanup', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'figure-voice-'));
   const botFile = join(dir, 'config.json');

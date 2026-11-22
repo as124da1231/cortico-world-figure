@@ -11,7 +11,10 @@ import { fileURLToPath } from 'node:url';
 import { canonicalPath, childPath, containsPath } from './paths.ts';
 import { parseFigureJson, readPackManifest } from './pack-manifest.ts';
 import { packFingerprint } from './pack-fingerprint.ts';
-import { EMOTION_EFFECT_THUMBS, emotionStyleModule, normalizeEmotionEffect, setEmotionEffectAxis } from '../workbench/tools/emotion-effect.mjs';
+import { writePackEffects } from '../workbench/tools/pack-effects.mjs';
+import { EMOTION_EFFECT_AXIS, EMOTION_EFFECTS } from '../workbench/tools/emotion-effect.mjs';
+import { writePackThemes } from '../workbench/tools/pack-themes.mjs';
+import { packBackends, writePackSoulLink } from '../workbench/tools/pack-runtime.mjs';
 import { BODY_CROP_AXIS, BODY_CROP_OPTIONS, normalizeBodyCrop } from '../workbench/pack/backends/crop-config.js';
 import { normalizeGazeConfig } from '../workbench/pack/backends/gaze-config.js';
 
@@ -27,31 +30,33 @@ export async function assertRegularTree(root: string): Promise<void> {
   }
 }
 
-const RUNTIME_BACKENDS = ['live2d.js', 'native-actions.js', 'native-combination.js', 'wardrobe.js', 'wardrobe-slots.js', 'render-config.js',
-  'render-quality.js', 'role-values.js', 'soullink.js', 'bongo.js', 'voice-playback.js', 'body-crop.js', 'crop-config.js', 'gaze-config.js',
-  'performance-plan.js', 'performance-playback.js'];
-
 /** Update the runtime of a private, validated pack copy without changing its model or entry. */
 export async function refreshPackRuntime(runtime: string, pack: string): Promise<void> {
-  for (const file of RUNTIME_BACKENDS) await cp(join(runtime, 'backends', file), join(pack, 'backends', file));
+  const build = await readFile(join(pack, 'build.json'), 'utf8').then(parseFigureJson).catch(() => null);
+  for (const file of packBackends(build?.sourceFormat)) await cp(join(runtime, 'backends', file), join(pack, 'backends', file));
   await cp(join(runtime, 'backends', 'emotion-effects'), join(pack, 'backends', 'emotion-effects'), { recursive: true });
-  await cp(join(runtime, 'vendor', 'soullink'), join(pack, 'vendor', 'soullink'), { recursive: true });
+  await writePackSoulLink(runtime, pack);
   const effectStyle = join(pack, 'backends', 'emotion-style.js');
   if (!existsSync(effectStyle)) await cp(join(runtime, 'backends', 'emotion-style.js'), effectStyle);
   await cp(join(runtime, 'figure-voice.json'), join(pack, 'figure-voice.json'));
 }
 
-/** Add the effects wardrobe to a private copy of a Figure-generated pack. */
-export async function setPackEmotionEffect(pack: string, value: unknown, size: unknown): Promise<void> {
-  const style = normalizeEmotionEffect(value);
-  const styleFile = join(pack, 'backends', 'emotion-style.js');
+/** Apply appearance choices to a private copy of a Figure-generated pack. */
+export async function setPackAppearance(pack: string, value?: unknown, size?: unknown, themePalettes?: unknown): Promise<void> {
   const manifestFile = join(pack, 'figure.json');
-  const manifestText = await readFile(manifestFile, 'utf8');
-  const manifest = parseFigureJson(manifestText);
-  setEmotionEffectAxis(manifest, style);
-  const assets = fileURLToPath(new URL('../workbench/pack/' + EMOTION_EFFECT_THUMBS, import.meta.url));
-  await cp(assets, join(pack, EMOTION_EFFECT_THUMBS), { recursive: true });
-  await writeFile(styleFile, emotionStyleModule(style, size, manifest), 'utf8');
+  const manifest = parseFigureJson(await readFile(manifestFile, 'utf8'));
+  if (value === undefined) {
+    const axis = manifest.axes?.find((item: {id:string}) => item.id === EMOTION_EFFECT_AXIS);
+    const options: Array<{id:string}> = Array.isArray(axis?.options) ? axis.options : [];
+    const styleFile = await readFile(join(pack, 'backends', 'emotion-style.js'), 'utf8');
+    const legacyEffect = /^export default ["']([a-z]+)["'];\s*$/m.exec(styleFile)?.[1];
+    value = options.length && options.every(option => EMOTION_EFFECTS.some(effect => option.id === 'figurefx' + effect))
+      ? options.map(option => option.id.slice('figurefx'.length))
+      : legacyEffect;
+    size = /^export const emotionEffectSize = ["']([a-z]+)["'];\s*$/m.exec(styleFile)?.[1];
+  }
+  await writePackThemes(pack, manifest, themePalettes);
+  await writePackEffects(fileURLToPath(new URL('../workbench/pack/',import.meta.url)),pack,manifest,value,size);
   await writeFile(manifestFile, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 }
 
@@ -218,7 +223,7 @@ export async function buildPack(
   workbenchDir: string,
   modelDir: string,
   workDir: string,
-  opts: { fit?: unknown; native?: unknown; render?: unknown; emotionEffect?: string; emotionEffectSize?: string; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; desktopSourceId?: string; signal?: AbortSignal } = {},
+  opts: { fit?: unknown; native?: unknown; render?: unknown; emotionEffects?: string[]; emotionEffectSize?: string; themePalettes?: string[]; modelFile?: string; maxTexture?: number; clean?: boolean; corePath?: string; desktopSourceId?: string; signal?: AbortSignal } = {},
 ): Promise<string> {
   const builds = join(workDir, 'builds');
   await mkdir(builds, { recursive: true });
@@ -235,9 +240,9 @@ export async function buildPack(
   if (opts.desktopSourceId) args.push('--desktop-source', '--id', opts.desktopSourceId);
   if (opts.clean) args.push('--clean');
   let overrideFile = '';
-  if (opts.fit || opts.native || opts.render || opts.emotionEffect || opts.emotionEffectSize) {
+  if (opts.fit || opts.native || opts.render || opts.emotionEffects || opts.emotionEffectSize || opts.themePalettes?.length) {
     overrideFile = join(workDir, `overrides-${randomUUID()}.json`);
-    await writeFile(overrideFile, JSON.stringify({ fit: opts.fit, native: opts.native, render: opts.render, emotionEffect: opts.emotionEffect, emotionEffectSize: opts.emotionEffectSize }, null, 2), 'utf8');
+    await writeFile(overrideFile, JSON.stringify({ fit: opts.fit, native: opts.native, render: opts.render, emotionEffects: opts.emotionEffects, emotionEffectSize: opts.emotionEffectSize, themePalettes: opts.themePalettes }, null, 2), 'utf8');
     args.push('--overrides', overrideFile);
   }
   try {
@@ -345,8 +350,14 @@ export async function installPack(
     }
     await rename(pending, target);
   } catch (error) {
+    const recovery: string[] = [];
     for (const { path, previous } of moved.reverse()) {
-      await rename(previous, path).catch(() => opts.onWarning?.(`旧形象恢复失败，已保留在 ${previous}`));
+      try { await rename(previous, path); }
+      catch { recovery.push(`旧形象恢复失败，已保留在 ${previous}`); }
+    }
+    if (recovery.length) {
+      const failure = error instanceof Error ? error.message : String(error);
+      throw new Error([failure, ...recovery].join('。'), {cause:error});
     }
     throw error;
   } finally {

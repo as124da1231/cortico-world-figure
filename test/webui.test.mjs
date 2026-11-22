@@ -23,6 +23,8 @@ async function mount(t, opts = {}) {
   const root = document.querySelector('main');
   const ctx = {
     root, language: opts.language ?? 'zh',
+    signal: opts.signal,
+    notifyOnUnmount: opts.notifyOnUnmount,
     pickPath: opts.pickPath,
     interval: opts.interval,
     timeout: opts.timeout,
@@ -57,12 +59,34 @@ async function mount(t, opts = {}) {
       return { builds: opts.builds ?? [] };
     },
   };
-  const handle = await (opts.voice ? panel.panels.voice : opts.appearance ? panel.panels.appearance : opts.effects ? panel.panels.effects : opts.configuration ? panel.panels.settings : panel.panels.workbench).mount(ctx);
+  const handle = await (opts.voice ? panel.panels.voice : opts.effects ? panel.panels.effects : opts.configuration ? panel.panels.settings : panel.panels.workbench).mount(ctx);
   t.after(() => { handle.dispose(); dom.window.close(); });
   await tick();
-  const button = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent === label);
+  const button = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent === label || b.getAttribute('aria-label') === label);
   return { ctx, root, calls, configCalls, toasts, drawers, button, handle, dom, guards };
 }
+
+test('Figure panels and version headers wait for their stylesheet inside the assigned panel root', async t => {
+  const cases = [
+    [{}, ['.l2d-sheet']],
+    [{configuration:true}, ['.l2d-panel-version', '.l2d-config-page']],
+    [{effects:true}, ['.l2d-panel-version', '.l2d-effects-page']],
+    [{voice:true}, ['.l2d-panel-version', '.l2d-voice-page']],
+  ];
+  for (const [options, selectors] of cases) {
+    const {root, handle} = await mount(t, {
+      ...options,
+      invoke(method) {
+        if (method === 'voiceState') return {services:[], controls:{}};
+      },
+    });
+    for (const selector of selectors) {
+      assert.equal(root.querySelector(selector).style.display, 'var(--l2d-panel-display, none)');
+    }
+    assert.equal(root.style.display, '');
+    handle.dispose();
+  }
+});
 
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
   const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
@@ -70,7 +94,7 @@ test('primary configuration uses the shared gear form and auto-saves only change
   assert.equal(root.querySelectorAll('.l2d-gear-input').length,6);
   assert.equal(root.querySelector('.l2d-config-notice'),null);
   assert.equal(root.querySelector('.l2d-config-page .l2d-notice-entry'),null);
-  assert.equal(root.querySelector('.l2d-version-corner'),null);
+  assert.ok(root.querySelector('.l2d-panel-version .l2d-version-corner'));
   const texture=root.querySelector('[aria-label="贴图精度"]');
   texture.value='2';texture.dispatchEvent(new dom.window.Event('change',{bubbles:true}));await tick();
   assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.texture':'2048'}}]);
@@ -94,6 +118,47 @@ test('performance settings explain which desktop pet needs a Figure pack', async
   const status = root.querySelector('.l2d-performance-readiness');
   assert.match(status.textContent,/Live2D 桌宠 · 内置 Coo/);
   assert.match(status.textContent,/先在这只桌宠的装扮里穿戴/);
+});
+
+test('the worn figure selector recovers after a temporary read failure', async t => {
+  let requests = 0, poll;
+  const {root,dom} = await mount(t, {
+    configuration:true,
+    appearanceValues:{desktopFigure:'hiyori'},
+    interval(fn) { poll = fn; return {dispose(){}}; },
+    invoke(method) {
+      if (method !== 'desktopTargets') return;
+      if (++requests === 1) throw Error('Coo temporarily unavailable');
+      return [{id:'hiyori',name:'Hiyori'}];
+    },
+  });
+  Object.defineProperty(dom.window.document, 'hidden', { value:false });
+  const select = root.querySelector('[aria-label="已穿戴的形象"]');
+  assert.equal(select.disabled, true);
+  assert.equal(select.options[0].textContent, '形象列表暂不可用');
+  poll();
+  await tick();
+  assert.equal(select.disabled, false);
+  assert.equal(select.value, 'hiyori');
+  assert.equal(select.options[0].textContent, '跟随装扮记录');
+  poll();
+  await tick();
+  assert.equal(requests, 2);
+});
+
+test('model settings can send the worn desktop source to the workbench', async t => {
+  const {button, calls, dom} = await mount(t, {
+    configuration:true,
+    appearanceValues:{performanceMode:'direct'},
+    invoke(method) {
+      if (method === 'performanceReadiness') return {state:'native-model', body:'desktop-live2d-pet', figure:'local-model'};
+      if (method === 'importDesktopSource') return {token:'desktop-import'};
+    },
+  });
+  button('导入原始模型').click();
+  await tick();
+  assert.deepEqual(calls.find(call => call.method === 'importDesktopSource').args, ['local-model']);
+  assert.equal(dom.window.location.hash, '#/provider/world%3Afigure/workbench');
 });
 
 test('entering and leaving main-model planning refreshes the current session tools after saving', async t => {
@@ -185,43 +250,68 @@ test('model cards display only the supported model types', async t => {
   assert.deepEqual(labels, {old:null,u:null,b:'BongoCat',l:'Live2D'});
 });
 
-test('the effects tab has six preview cards and saves the chosen style with its size', async t => {
+test('the effects tab keeps Coo original fixed and saves multiple optional styles', async t => {
   const {root, configCalls, guards} = await mount(t, {effects:true, appearanceValues:{emotionEffect:'flow'}});
   const cards = [...root.querySelectorAll('.l2d-effect-card')];
-  const radios = cards.map(card => card.querySelector('input[type="radio"]'));
-  assert.deepEqual(radios.map(input => input.value), ['native','kaomoji','orb','flow','bubbles','softglow']);
-  assert.ok(cards.every(card => card.querySelector('.l2d-effect-preview[aria-hidden="true"]')));
-  assert.equal(radios.find(input => input.checked).value, 'flow');
-  assert.equal(root.querySelector('.l2d-version-corner'), null);
+  const checks = cards.map(card => card.querySelector('input[type="checkbox"]'));
+  assert.deepEqual(checks.map(input => input.value), ['native','kaomoji','orb','flow','bubbles','softglow']);
+  assert.equal(root.querySelectorAll('.l2d-effects-grid :is(img,svg,canvas)').length, 0);
+  assert.ok(cards.every(card => card.querySelector('.l2d-effect-symbol[aria-hidden="true"]').textContent.trim()
+    && card.querySelector('small').textContent.trim()));
+  assert(checks[0].checked && checks[0].disabled);
+  assert.deepEqual(checks.filter(input=>input.checked).map(input=>input.value),['native','flow']);
+  assert.ok(root.querySelector('.l2d-panel-version .l2d-version-corner'));
   cards[4].click();
   await tick();
-  assert.deepEqual(configCalls, [{group:'figure', values:{'worlds.figure.emotionEffect':'bubbles','worlds.figure.emotionEffectSize':'medium'}}]);
-  assert.equal(root.querySelector('.l2d-effect-card.selected input').value, 'bubbles');
+  assert.deepEqual(configCalls, [{group:'figure', values:{'worlds.figure.emotionEffects':'flow,bubbles','worlds.figure.emotionEffectSize':'medium'}}]);
+  assert.deepEqual(checks.filter(input=>input.checked).map(input=>input.value),['native','flow','bubbles']);
   assert.equal(root.querySelector('.l2d-effects-status').textContent, '已保存');
   assert.equal(guards[0](), null);
   assert.deepEqual([...root.querySelectorAll('.l2d-effect-card')], cards);
 });
 
-test('Figure effect size can be set regardless of the starting style', async t => {
+test('Figure effect size is retained while only Coo original is included', async t => {
   const {root, configCalls} = await mount(t, {effects:true, appearanceValues:{emotionEffect:'flow',emotionEffectSize:'large'}});
   const sizes = root.querySelector('.l2d-effect-sizes');
-  const page = root.querySelector('.l2d-effects-page');
   const checkedSize = () => sizes.querySelector('input:checked').value;
   assert.equal(checkedSize(), 'large');
   sizes.querySelector('[value="small"]').click();
   await tick();
-  assert.equal(page.dataset.effectSize, 'small');
-  root.querySelector('[name="l2d-pet-effect"][value="native"]').click();
+  assert.equal(checkedSize(), 'small');
+  root.querySelector('[name="l2d-pet-effect"][value="flow"]').click();
   await tick();
-  assert.equal(sizes.disabled, false);
-  sizes.querySelector('[value="large"]').click();
-  await tick();
-  assert.equal(checkedSize(), 'large');
+  assert.equal(sizes.disabled, true);
+  assert.equal(checkedSize(), 'small');
   root.querySelector('[name="l2d-pet-effect"][value="orb"]').click();
   await tick();
   assert.equal(sizes.disabled, false);
-  assert.equal(checkedSize(), 'large');
-  assert.deepEqual(configCalls.map(call => call.values['worlds.figure.emotionEffectSize']), ['small','small','large','large']);
+  assert.equal(checkedSize(), 'small');
+  assert.deepEqual(configCalls.map(call => call.values['worlds.figure.emotionEffects']), ['flow','native','orb']);
+});
+
+test('personalization includes multiple Coo themes independently of optional effects', async t => {
+  const {root, configCalls} = await mount(t, {effects:true, appearanceValues:{emotionEffects:['native','flow'],themePalettes:['claude','kimi','gemini']}});
+  const choices = [...root.querySelectorAll('[name="l2d-theme-palette"]')];
+  const names = [...root.querySelectorAll('.l2d-theme-name')].map(label => label.textContent);
+  assert.deepEqual(names, ['蓝色','黑色','橙色','紫色','粉色']);
+  assert(choices.every(input => input.type === 'checkbox'));
+  assert.deepEqual(choices.filter(input=>input.checked).map(input=>input.value),['deepseek','claude']);
+  assert.equal(root.querySelectorAll('.l2d-theme-swatch').length,5);
+  root.querySelector('[name="l2d-theme-palette"][value="minimax"]').closest('label').click();
+  await tick();
+  assert.deepEqual(configCalls,[{group:'figure',values:{'worlds.figure.themePalettes':'deepseek,claude,minimax'}}]);
+  assert.deepEqual(choices.filter(input=>input.checked).map(input=>input.value),['deepseek','claude','minimax']);
+  const [all, clear] = root.querySelectorAll('.l2d-theme-actions button');
+  all.click();
+  await tick();
+  assert(choices.every(input => input.checked));
+  assert(all.disabled);
+  clear.click();
+  await tick();
+  assert(choices.every(input => !input.checked));
+  assert(clear.disabled);
+  assert.deepEqual(configCalls.at(-1),{group:'figure',values:{'worlds.figure.themePalettes':''}});
+  assert(root.querySelector('[name="l2d-pet-effect"][value="flow"]').checked);
 });
 
 test('effect card selection rolls back after a failed save and can be retried', async t => {
@@ -237,7 +327,7 @@ test('effect card selection rolls back after a failed save and can be retried', 
   fail = false;
   orb.click();
   await tick();
-  assert.equal(root.querySelector('[name="l2d-pet-effect"]:checked').value, 'orb');
+  assert(orb.checked);
   assert.equal(configCalls.length, 2);
 });
 
@@ -245,7 +335,7 @@ test('quick effect changes leave the latest style and size saved', async t => {
   let finishFirst;
   const firstSave = new Promise(resolve => { finishFirst = resolve; });
   const {root, configCalls} = await mount(t, {effects:true, setConfig(_group, values) {
-    if (values['worlds.figure.emotionEffect'] === 'orb') return firstSave;
+    if (values['worlds.figure.emotionEffects'] === 'orb') return firstSave;
   }});
   root.querySelector('input[value="orb"]').click();
   root.querySelector('input[value="large"]').click();
@@ -253,9 +343,9 @@ test('quick effect changes leave the latest style and size saved', async t => {
   assert.equal(configCalls.length, 1);
   finishFirst();
   await tick();
-  assert.deepEqual(configCalls.map(call => call.values['worlds.figure.emotionEffect']), ['orb', 'flow']);
+  assert.deepEqual(configCalls.map(call => call.values['worlds.figure.emotionEffects']), ['orb', 'orb,flow']);
   assert.deepEqual(configCalls.map(call => call.values['worlds.figure.emotionEffectSize']), ['medium', 'large']);
-  assert.equal(root.querySelector('[name="l2d-pet-effect"]:checked').value, 'flow');
+  assert(root.querySelector('[value="flow"]').checked);
 });
 
 test('speech service creation, editing and deletion use the service dialogs', async t => {
@@ -276,8 +366,11 @@ test('speech service creation, editing and deletion use the service dialogs', as
     },
   });
   const cards = () => root.querySelectorAll('[data-service-id]');
-  assert.equal(root.querySelector('.l2d-version-corner'), null);
+  assert.ok(root.querySelector('.l2d-panel-version .l2d-version-corner'));
   const controls = root.querySelector('.l2d-voice-controls');
+  const serviceList = root.querySelector('.l2d-voice-service-grid');
+  assert.equal(serviceList.previousElementSibling, root.querySelector('.l2d-voice-audition'));
+  assert.equal(serviceList.hasAttribute('tabindex'), false);
   const enabled = controls.querySelector('[aria-label="朗读桌宠回复"]');
   assert.equal(cards().length, 0);
   assert.equal(root.querySelector('select[name="provider"]'), null);
@@ -300,19 +393,19 @@ test('speech service creation, editing and deletion use the service dialogs', as
   await tick();
 
   assert.equal(root.querySelector('dialog[open]'), null);
-  assert.equal(cards().length, 0);
-  assert.match(root.querySelector('.l2d-voice-current').textContent, /日常朗读/);
+  assert.equal(cards().length, 1);
+  assert.match(root.querySelector('.l2d-voice-service.is-current').textContent, /日常朗读/);
   const saves = calls.filter(call => call.method === 'voiceSave');
   assert.equal(saves.length, 1);
   const [id, providerId, serviceName, profile, key, select] = saves[0].args;
   assert.deepEqual([id, providerId, serviceName, profile.voice, key, select], [null, 'edge', '日常朗读', 'zh-CN-XiaoxiaoNeural', '', true]);
   assert.equal(enabled.disabled, false);
   assert.equal(button('在桌宠试听').disabled, false);
+  assert.equal(document.activeElement, button('添加语音服务'));
 
-  button('管理服务').click();
-  assert.equal(cards().length, 1);
-  assert.match(cards()[0].getAttribute('aria-label'), /日常朗读/);
-  cards()[0].click();
+  const editSelected = () => cards()[0].querySelector('[aria-label="配置 日常朗读"]');
+  assert.ok(editSelected());
+  editSelected().click();
   const edit = root.querySelector('dialog.l2d-voice-popup[open]');
   const editName = edit.querySelector('input[name="name"]');
   assert.equal(editName.value, '日常朗读');
@@ -320,14 +413,13 @@ test('speech service creation, editing and deletion use the service dialogs', as
   editName.dispatchEvent(new dom.window.Event('input', {bubbles: true}));
   button('取消').click();
   await tick();
-  assert.ok(root.querySelector('dialog.l2d-voice-library-popup[open]'));
-  assert.equal(root.querySelector('dialog.l2d-voice-popup[open]'), null);
-  assert.match(cards()[0].getAttribute('aria-label'), /日常朗读/);
+  assert.equal(root.querySelector('dialog[open]'), null);
+  assert.ok(editSelected());
   assert.equal(calls.filter(call => call.method === 'voiceSave').length, 1);
 
-  cards()[0].click();
+  editSelected().click();
   button('删除服务').click();
-  assert.equal(root.querySelectorAll('dialog[open]').length, 2);
+  assert.equal(root.querySelectorAll('dialog[open]').length, 1);
   assert.equal(cards().length, 1);
   assert.equal(calls.some(call => call.method === 'voiceRemove'), false);
   button('确认删除').click();
@@ -364,7 +456,7 @@ test('the local GPT-SoVITS preset shows its three fields and can be saved with a
   await tick();
   const save = calls.find(call => call.method === 'voiceSave');
   assert.deepEqual(save.args.slice(0, 6), [null, 'sovitsLocal', '', { endpoint: 'http://127.0.0.1:9880', voice: '', speed: 1 }, '', true]);
-  assert.match(root.querySelector('.l2d-voice-current').textContent, /使用插件当前音色/);
+  assert.match(root.querySelector('.l2d-voice-service.is-current').textContent, /使用插件当前音色/);
 });
 
 test('switching a saved voice keeps the current service on failure and updates it on success', async t => {
@@ -373,7 +465,7 @@ test('switching a saved voice keeps the current service on failure and updates i
   }));
   const state = {selectedId:'0',services,playbackReady:true,bodyReady:true,controls:{}};
   let attempts = 0;
-  const {root,button,calls} = await mount(t,{
+  const {root,calls} = await mount(t,{
     voice:true,
     invoke(method) {
       if (method==='voiceState') return state;
@@ -383,16 +475,15 @@ test('switching a saved voice keeps the current service on failure and updates i
       }
     },
   });
-  button('管理服务').click();
   const use = () => root.querySelector('[aria-label="使用 备用"]');
   use().click();
   await tick();
-  assert.match(root.querySelector('.l2d-voice-current h2').textContent,/日常/);
-  assert.match(root.querySelector('.l2d-voice-library-footer').textContent,/切换失败/);
+  assert.match(root.querySelector('.l2d-voice-service.is-current h3').textContent,/日常/);
+  assert.match(root.querySelector('.l2d-voice-feedback').textContent,/切换失败/);
   use().click();
   await tick();
   assert.equal(root.querySelector('dialog[open]'),null);
-  assert.equal(root.querySelector('.l2d-voice-current h2').textContent,'备用');
+  assert.equal(root.querySelector('.l2d-voice-service.is-current h3').textContent,'备用');
   assert.deepEqual(calls.filter(call=>call.method==='voiceSave').map(call=>call.args[0]),['1','1']);
 });
 
@@ -479,44 +570,20 @@ test('auto-save serializes rapid edits and keeps the latest selection', async t 
   assert.equal(configCalls[1].values['worlds.figure.texture'],'4096');
   release();await tick();assert.equal(guards[0](),null);
 });
-test('six themes and six particles preview independently and auto-save only the chosen preference',async t=>{
- const {root,configCalls}=await mount(t,{appearance:true});const themes=root.querySelector('[role=radiogroup][aria-label="主题配色"]'),particles=root.querySelector('[role=radiogroup][aria-label="粒子效果"]');
- assert.equal(root.querySelector('.l2d-version-corner'),null);
- assert.equal(themes.querySelectorAll('input').length,6);assert.equal(particles.querySelectorAll('input').length,6);assert.equal(themes.querySelector(':checked').value,'red');assert.equal(particles.querySelector(':checked').value,'stars');assert.equal(configCalls.length,0);
- themes.querySelector('[value=cyan]').click();await tick();assert.equal(root.querySelector('form').dataset.gearTheme,'cyan');assert.equal(root.querySelector('form').dataset.particleEffect,'stars');
- particles.querySelector('[value=meteors]').click();await tick();assert.deepEqual(configCalls.map(c=>c.values),[{'worlds.figure.gearTheme':'cyan'},{'worlds.figure.particleEffect':'meteors'}]);
-});
-test('appearance preferences persist and reopen while configuration and its quick popup stay focused',async t=>{
- const cfg={cover:true,quality:'original',texture:'original'};const opts={appearance:true,invoke:method=>method==='settings'?{...cfg}:undefined,setConfig:async(_group,patch)=>{for(const[key,value]of Object.entries(patch))cfg[key.replace('worlds.figure.','')]=value;}};
- const e=await mount(t,opts);e.root.querySelector('[name=l2d-uiMaterial][value=glass]').click();await tick();e.root.querySelector('[name=l2d-gearTheme][value=green]').click();await tick();e.root.querySelector('[name=l2d-particleEffect][value=glow]').click();await tick();
- assert.deepEqual(e.configCalls.map(c=>c.values),[{'worlds.figure.uiMaterial':'glass'},{'worlds.figure.gearTheme':'green'},{'worlds.figure.particleEffect':'glow'}]);
- const reopened=await mount(t,opts);assert.equal(reopened.root.querySelector('[value=glass]').checked,true);assert.equal(reopened.root.querySelector('[value=green]').checked,true);assert.equal(reopened.root.querySelector('[value=glow]').checked,true);
- const quick=await mount(t,{...opts,appearance:false,ack:true});quick.button('设置').click();await tick();assert.equal(quick.root.querySelector('[role=radiogroup]'),null);assert.equal(quick.root.querySelector('form').dataset.gearTheme,'green');assert.equal(quick.root.dataset.uiMaterial,'glass');
-});
-test('unknown appearance values fall back visually without writing a replacement configuration',async t=>{
- const e=await mount(t,{appearance:true,gearTheme:'bad',particleEffect:'bad',appearanceValues:{uiMode:'bad',uiCorners:'bad',uiMaterial:'bad',uiGlow:'bad'}});assert.equal(e.root.querySelector('form').dataset.gearTheme,'red');assert.equal(e.root.querySelector('form').dataset.particleEffect,'stars');assert.equal(e.root.dataset.uiMaterial,'matte');assert.equal(e.root.dataset.uiMode,'auto');assert.equal(e.configCalls.length,0);
-});
-
-test('appearance preview stays at maximum and saves serialized changes with retry and leave protection',async t=>{
- let fail=true;const e=await mount(t,{appearance:true,setConfig:async()=>{if(fail)throw Error('offline');}});
- assert.ok(e.root.querySelector('.l2d-preview-bar.is-max .l2d-gear-sparks'));assert.equal(e.root.querySelector('.l2d-preview-bar input'),null);assert.equal(e.root.querySelectorAll('.l2d-gear-input').length,0);
- e.root.querySelector('[name=l2d-uiMode][value=dark]').click();await tick();assert.equal(e.root.dataset.uiMode,'dark');assert.match(e.guards[0](),/尚未保存/);fail=false;e.button('重试保存').click();await tick();assert.equal(e.guards[0](),null);
- assert.deepEqual(e.configCalls[1].values,{'worlds.figure.uiMode':'dark'});e.handle.dispose();assert.equal(e.root.classList.contains('l2d-themed'),false);assert.equal(e.root.dataset.uiMode,undefined);assert.equal(e.root.style.getPropertyValue('--gear-max-fill'),'');
-});
-
-test('default preset restores pre-red styling while retaining every custom preference',async t=>{
- const cfg={gearTheme:'cyan',particleEffect:'meteors',uiMaterial:'metal',uiMode:'dark',uiCorners:'crisp',uiGlow:'vivid',uiButtonFill:'gradient'};
- const e=await mount(t,{appearance:true,appearanceValues:cfg});e.root.querySelector('[name=l2d-uiStyle][value=classic]').click();await tick();
- assert.equal(e.root.dataset.gearTheme,'purple');assert.equal(e.root.dataset.particleEffect,'stars');assert.equal(e.root.dataset.uiMode,'auto');assert.equal(e.root.dataset.uiGlow,'off');assert.equal(e.root.querySelector('[value=metal]').disabled,true);
- assert.deepEqual(e.configCalls[0].values,{'worlds.figure.uiStyle':'classic'});assert.equal(e.root.querySelector('[name=l2d-gearTheme][value=cyan]').checked,true);
- e.root.querySelector('[name=l2d-uiStyle][value=custom]').click();await tick();for(const[key,value]of Object.entries(cfg))assert.equal(e.root.dataset[key],value);assert.equal(e.root.querySelector('[value=metal]').disabled,false);
- assert.deepEqual(e.configCalls[1].values,{'worlds.figure.uiStyle':'custom'});
-});
-
-test('button fill is an independent saved preference',async t=>{
- const e=await mount(t,{appearance:true});e.root.querySelector('[name=l2d-uiButtonFill][value=solid]').click();await tick();
- assert.equal(e.root.dataset.uiButtonFill,'solid');assert.equal(e.root.dataset.gearTheme,'red');assert.deepEqual(e.configCalls[0].values,{'worlds.figure.uiButtonFill':'solid'});
- const reopened=await mount(t,{appearance:true,appearanceValues:{uiButtonFill:'solid'}});assert.equal(reopened.root.querySelector('[name=l2d-uiButtonFill][value=solid]').checked,true);
+test('old appearance settings leave the host palette intact and the four model settings groups are shared',async t=>{
+  const legacy = {uiMode:'dark',gearTheme:'red',particleEffect:'hearts'};
+  const options = {appearanceValues:legacy,ack:true};
+  const full = await mount(t,{...options,configuration:true});
+  const groups = root => [...root.querySelectorAll('.l2d-settings-section>h3')].map(node => node.textContent);
+  assert.equal(panel.panels.appearance,undefined);
+  assert.deepEqual(groups(full.root),['画质与预览','打包与安装','动作适配','运行时表演']);
+  assert.equal(full.root.hasAttribute('data-ui-mode'),false);
+  assert.equal(full.configCalls.length,0);
+  const quick = await mount(t,options);
+  quick.button('设置').click();
+  await tick();
+  assert.deepEqual(groups(quick.root),groups(full.root));
+  assert.ok(quick.root.querySelector('dialog.l2d-settings-popup[open]'));
 });
 
 test('failed primary auto-save retains dirty values and retries without reverting controls',async t=>{
@@ -527,6 +594,25 @@ test('failed primary auto-save retains dirty values and retries without revertin
   assert.equal(texture.value,'0');assert.equal(texture.disabled,false);assert.match(guards[0](),/尚未保存/);
   fail=false;button('重试保存').click();await tick();
   assert.deepEqual(configCalls[1].values,{'worlds.figure.texture':'512'});assert.equal(guards[0](),null);
+});
+
+test('a newer model setting still autosaves when an earlier write fails', async t => {
+  let rejectFirst;
+  let writes = 0;
+  const {root, configCalls, guards} = await mount(t, {
+    configuration:true,
+    setConfig() {
+      if (!writes++) return new Promise((_, reject) => { rejectFirst = reject; });
+    },
+  });
+  const texture = root.querySelector('[aria-label="贴图精度"]');
+  texture.value = '1'; texture.dispatchEvent(new window.Event('change', {bubbles:true}));
+  texture.value = '2'; texture.dispatchEvent(new window.Event('change', {bubbles:true}));
+  rejectFirst(Error('temporary failure'));
+  await tick();
+  assert.deepEqual(configCalls.map(call => call.values['worlds.figure.texture']), ['1024', '2048']);
+  assert.equal(guards[0](), null);
+  assert.equal(root.querySelector('.l2d-settings-status').textContent, '已保存');
 });
 
 test('configuration folder selection uses the host picker and persists the chosen directory',async t=>{
@@ -555,31 +641,32 @@ test('the version opens a bounded notice and restores focus after consent', asyn
   assert.equal(calls.filter(c=>c.method==='noticeAccept').length,1);
 });
 
-test('the compact Figure header keeps the same notice button when the host redraws the header', async t => {
-  const {root, ctx, dom, handle} = await mount(t, {providerHeader:true, version:'4.0.0'});
+test('the version and notice stay below the host shell through a redraw and tab switch', async t => {
+  const {root, ctx, handle} = await mount(t, {providerHeader:true, version:'4.0.0'});
   const chrome = root.previousElementSibling;
-  const version = chrome.querySelector('.l2d-version-corner');
+  const version = root.querySelector('.l2d-version-corner');
   assert.equal(version.textContent, 'v4.0.0');
-  assert.equal(root.querySelector('.l2d-version-corner'), null);
-  const next = chrome.firstElementChild.cloneNode(false);
-  next.append(chrome.querySelector('.pagetitle-row').cloneNode());
+  assert.equal(chrome.querySelector('.l2d-version-corner'), null);
+  assert.equal(chrome.className, 'providerchrome');
+  assert.equal(chrome.style.getPropertyValue('--appearance-accent'), '');
+  assert.equal(chrome.hasAttribute('data-ui-mode'), false);
+  const next = chrome.firstElementChild.cloneNode(true);
   chrome.replaceChildren(next);
   await tick();
-  assert.equal(next.querySelector('.l2d-version-corner'), version);
+  assert.equal(root.querySelector('.l2d-version-corner'), version);
+  assert.equal(chrome.querySelectorAll('button,dialog,.l2d-version-corner').length, 0);
   version.click();
   assert.equal(root.querySelector('dialog.l2d-notice-popup').open, true);
   handle.dispose();
+  assert.equal(root.childElementCount, 0);
+
   const settings = await panel.panels.settings.mount(ctx);
-  assert.equal(chrome.querySelector('.l2d-version-corner'), version);
-  assert.equal(root.querySelector('.l2d-version-corner'), null);
-  version.click();
-  assert.equal(chrome.querySelector('dialog.l2d-notice-popup').open, true);
-  chrome.querySelector('.l2d-modal-close').click();
+  root.querySelector('.l2d-version-corner').click();
+  assert.equal(root.querySelector('dialog.l2d-notice-popup').open, true);
+  assert.equal(chrome.querySelector('dialog,.l2d-version-corner'), null);
   settings.dispose();
-  dom.window.location.hash = '#/provider/world%3Aother';
-  chrome.replaceChildren(next.cloneNode(false));
-  await tick();
-  assert.equal(chrome.querySelector('.l2d-version-corner'), null);
+  assert.equal(root.childElementCount, 0);
+  assert.equal(chrome.firstElementChild, next);
 });
 
 test('an acknowledged upgrade shows no inline notice or core banner',async t=>{
@@ -706,7 +793,7 @@ test('a pending AI proposal shows its mapping and approval acts only on that pro
 
 test('reading the notice preserves settings without a discard confirmation',async t=>{
  let confirms=0;
- const {root,button,drawers}=await mount(t,{ack:true,confirm:async()=>{confirms++;return false;}});button('设置').click();await tick();
+ const {root,button}=await mount(t,{ack:true,confirm:async()=>{confirms++;return false;}});button('设置').click();await tick();
  const gear=root.querySelector('[aria-label="分析方式"]');assert.equal(gear.disabled,true);
  const mode=root.querySelector('[aria-label="适配方式"]');mode.value='2';mode.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));assert.equal(gear.disabled,false);
  const note=root.querySelector('.l2d-settings .l2d-notice-entry');note.click();await tick();
@@ -715,7 +802,7 @@ test('reading the notice preserves settings without a discard confirmation',asyn
  let hostEscapes=0;root.ownerDocument.addEventListener('keydown',()=>hostEscapes++);
  notice.dispatchEvent(new root.ownerDocument.defaultView.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
  assert.equal(hostEscapes,0);assert.equal(root.querySelector('dialog.l2d-notice-popup'),null);assert.equal(confirms,0);
- assert.equal(drawers.length,1);assert(root.querySelector('.l2d-settings'));
+ assert.equal(root.querySelectorAll('dialog.l2d-settings-popup[open]').length,1);assert(root.querySelector('.l2d-settings'));
  assert.equal(root.querySelector('[aria-label="适配方式"]').value,'2');
  assert.match(root.querySelector('[aria-label="模型搜索目录"]').placeholder,/最近使用/);
 });
@@ -828,7 +915,7 @@ test('failed consent save leaves warning visible and permits retry', async (t) =
 test('packing requires a source; installation of an existing card does not require a model path', async (t) => {
   const builds = [{ id: 'sample-1', packId: 'sample', nameZh: '名字', at: 1, bytes: 5 }];
   const { button, calls } = await mount(t, { builds });
-  button('一键打包').click(); button('选择文件夹').click(); await tick();
+  button('一键打包').click(); button('导入文件夹').click(); await tick();
   assert.equal(calls.some((c) => c.method === 'build'), false);
   assert.equal(document.querySelector('.l2d-modal'), null);
   button('安装').click();await tick();
@@ -853,7 +940,7 @@ test('edit validates name, locks close while saving, clears about, and disposes 
   button('取消').click(); assert.ok(document.querySelector('.l2d-modal'));
   modal.dispatchEvent(new dom.window.Event('cancel', {cancelable:true})); assert.equal(modal.open, true);
   button('×').click(); assert.equal(modal.open, true);
-  assert.equal(button('选择文件夹').disabled, true);
+  assert.equal(button('导入文件夹').disabled, true);
   finish({}); await tick();
   assert.equal(document.querySelector('.l2d-modal'), null);
   assert.equal(calls.find((c) => c.method === 'edit').args[1].aboutZh, '');
@@ -972,12 +1059,48 @@ test('the model gaze tab saves only changed settings and remembers speed while d
   assert.equal(root.querySelectorAll('.l2d-card').length,1);
 });
 
+test('retrying a card edit keeps unavailable controls disabled and returns focus to the refreshed card', async t => {
+  let savedName = '之前的名字';
+  let fail = true;
+  const record = () => ({id:'draft', nameZh:savedName, at:1, bytes:1});
+  const {root, button} = await mount(t, {ack:true, invoke(method, args) {
+    if (method === 'list') return {builds:[record()]};
+    if (method === 'detail') return {nameZh:savedName, crop:{mode:'full'}, gaze:{enabled:false}};
+    if (method === 'edit') {
+      if (fail) throw Error('try again');
+      savedName = args[1].nameZh;
+      return {};
+    }
+  }});
+  const trigger = button('编辑');
+  trigger.focus(); trigger.click();
+  await tick();
+  const dialog = root.querySelector('dialog[open]');
+  dialog.querySelector('#l2d-edit-name').value = '新名字';
+  button('保存').click();
+  await tick();
+  assert.match(dialog.querySelector('.l2d-edit-feedback').textContent, /try again/);
+  assert.equal(document.activeElement, button('保存'));
+  button('取景').click();
+  assert.equal(button('圆口').disabled, true);
+  assert.equal(dialog.querySelector('#l2d-crop-line').disabled, true);
+  button('视线').click();
+  assert.equal(dialog.querySelector('#l2d-edit-gaze-speed').disabled, true);
+  fail = false;
+  button('保存').click();
+  await tick();
+  assert.equal(dialog.isConnected, false);
+  assert.equal(trigger.isConnected, false);
+  assert.equal(document.activeElement, button('编辑'));
+  assert.equal(button('新名字').closest('.l2d-model-card').dataset.id, 'draft');
+});
+
 test('folder and ZIP selection are owned by the Coo browser window without the backend path picker', async (t) => {
   const { root, button } = await mount(t, {
     ack: true,
     pickPath: async () => { throw new Error('must not use the backend picker'); },
   });
-  assert.deepEqual([...root.querySelectorAll('.l2d-source-pickers button')].map(b => b.textContent), ['选择文件夹', '选择 ZIP']);
+  assert.deepEqual([...root.querySelectorAll('.l2d-source-pickers button')].map(b => b.textContent), ['导入文件夹', '导入 ZIP']);
   assert.equal(root.querySelector('.l2d-operation .l2d-import-controls button').textContent, '一键打包');
   assert.equal(root.querySelector('.l2d-path'), null);
   assert.equal(button('扫描'), undefined);
@@ -988,7 +1111,8 @@ test('folder and ZIP selection are owned by the Coo browser window without the b
   const opened = [];
   folder.addEventListener('click', event => { event.preventDefault(); opened.push('folder'); });
   zip.addEventListener('click', event => { event.preventDefault(); opened.push('zip'); });
-  button('选择文件夹').click(); button('选择 ZIP').click();
+  button('导入文件夹').click();
+  button('导入 ZIP').click();
   assert.deepEqual(opened, ['folder', 'zip']);
 });
 
@@ -1053,6 +1177,124 @@ test('failed imports keep the error visible and cannot package a stale selection
   assert.equal(button('一键打包').disabled, true);
 });
 
+test('refreshing analysis state keeps the current import error visible', async t => {
+  let poll;
+  const automation = {enabled:true, plans:[]};
+  const {root, button, dom} = await mount(t, {
+    ack:true, automation,
+    interval(fn, ms) { if (ms === 1500) poll = fn; return {dispose() {}}; },
+    invoke(method) {
+      if (method === 'importPaths') throw Error('目录不存在');
+      if (method === 'assistState') return automation;
+    },
+  });
+  paste(dom, root.querySelector('.l2d-drop-zone'), 'G:/missing');
+  await tick();
+  await poll();
+  assert.match(root.querySelector('.l2d-source-hint').textContent, /目录不存在/);
+  assert.equal(button('提交 AI 适配').disabled, true);
+});
+
+test('a late desktop import cannot replace a newer pasted source', async t => {
+  let desktop, pasted;
+  const {root, dom, calls} = await mount(t, {
+    ack:true,
+    invoke(method) {
+      if (method === 'takeDesktopImport') return new Promise(resolve => { desktop = resolve; });
+      if (method === 'importPaths') return new Promise(resolve => { pasted = resolve; });
+    },
+  });
+  const zone = root.querySelector('.l2d-drop-zone');
+  paste(dom, zone, 'G:/new-model');
+  desktop({token:'old-desktop', models:[{dir:'old', title:'之前的形象'}], packs:[]});
+  await tick();
+  assert.match(zone.querySelector('.l2d-source-title').textContent, /识别模型/);
+  assert.deepEqual(calls.filter(call => call.method === 'importCancel').map(call => call.args), [['old-desktop']]);
+  pasted({token:'new-paste', models:[{dir:'new', title:'刚选择的形象'}], packs:[]});
+  await tick();
+  assert.equal(zone.querySelector('.l2d-source-title').textContent, '刚选择的形象');
+});
+
+test('opening a card editor shows one local loading state and restores the button on failure', async t => {
+  const models = [{id:'first',bytes:1,at:1,manualAvailable:true},{id:'second',bytes:1,at:2,manualAvailable:true}];
+  const first = Promise.withResolvers();
+  const timers = new Map();
+  let attempts = 0;
+  const {root,toasts,dom} = await mount(t, {
+    ack:true,builds:models,
+    timeout(fn,ms) {
+      timers.set(ms,fn);
+      return {dispose(){timers.delete(ms);}};
+    },
+    invoke(method,args) {
+      if (method === 'manualBrowserStatus') return {status:args.length ? 'open' : 'closed'};
+      if (method === 'manualBrowserOpen') return ++attempts === 1 ? first.promise : {token:'editor',buildId:'first'};
+    },
+  });
+  const action = id => root.querySelector(`.l2d-card-binding[data-build-id="${id}"]`);
+  action('first').focus();
+  action('first').click();
+  await tick();
+  assert.equal(action('first').getAttribute('aria-busy'),'true');
+  assert.equal(action('first').getAttribute('aria-label'),'正在打开动作编辑器');
+  assert.equal(dom.window.document.activeElement,action('first'));
+  assert.equal(action('second').hasAttribute('aria-busy'),false);
+  assert.equal(action('second').getAttribute('aria-disabled'),'true');
+  action('first').click();
+  action('second').click();
+  assert.equal(attempts,1);
+  root.querySelector('.l2d-sort').dispatchEvent(new dom.window.Event('change'));
+  assert.equal(action('first').getAttribute('aria-busy'),'true');
+  timers.get(3000)();
+  assert.deepEqual(toasts.at(-1),['正在准备模型并打开浏览器…']);
+
+  first.reject(Error('模型文件暂时不可读'));
+  await tick();
+  assert.deepEqual(toasts.at(-1),['模型文件暂时不可读','bad']);
+  assert.equal(action('first').textContent,'动作');
+  assert.equal(action('first').hasAttribute('aria-busy'),false);
+  assert.equal(action('second').hasAttribute('aria-disabled'),false);
+  assert.equal(timers.has(3000),false);
+
+  action('first').click();
+  await tick();
+  assert.equal(attempts,2);
+  assert.equal(action('first').textContent,'编辑中');
+  assert.deepEqual(toasts.at(-1),['已打开浏览器编辑器','ok']);
+  assert.equal(timers.has(3000),false);
+});
+
+test('a browser binding save only completes the source that opened the editor', async t => {
+  let source = 0;
+  let poll;
+  const {root, dom, button, calls} = await mount(t, {
+    ack:true,
+    automation:{enabled:false, adaptationMode:'manual', plans:[]},
+    invoke(method, args) {
+      if (method === 'importPaths') return {token:`import-${++source}`, models:[{dir:'source-0', title:`形象 ${source}`}], packs:[]};
+      if (method === 'manualBrowserStatus') return args.length ? {status:'saved', buildId:'old-build'} : {status:'closed'};
+      if (method === 'manualBrowserOpen') return {token:'editor'};
+    },
+  });
+  const setTimeout = dom.window.setTimeout.bind(dom.window);
+  dom.window.setTimeout = (fn, ms) => {
+    if (ms !== 1400) return setTimeout(fn, ms);
+    poll = fn;
+    return 0;
+  };
+  const zone = root.querySelector('.l2d-drop-zone');
+  paste(dom, zone, 'G:/first');
+  await tick();
+  button('预览并绑定').click();
+  await tick();
+  assert.deepEqual(calls.find(call => call.method === 'manualBrowserOpen').args[1], ['import-1','source-0']);
+  paste(dom, zone, 'G:/second');
+  await tick();
+  await poll();
+  assert.equal(zone.querySelector('.l2d-source-title').textContent, '形象 2');
+  assert.equal(button('预览并绑定').disabled, false);
+});
+
 test('dropping a ZIP recognizes it without opening an import dialog', async (t) => {
   const { root, calls, dom, button } = await mount(t, {
     ack: true,
@@ -1091,9 +1333,9 @@ test('a successful installation is not reported as failed when the result list c
 test('a reopened panel reflects a running backend action until it actually finishes',async t=>{
   let busy=true,poll,cleared=false;
   const {root,button}=await mount(t,{ack:true,interval:fn=>{poll=fn;return{dispose(){cleared=true;}};},invoke:method=>method==='state'?{notice:{acknowledged:true},version:'1.4.5',busy,steps:{build:{phase:busy?'loading':'done'}}}:undefined});
-  assert.equal(button('选择文件夹').disabled,true);assert.equal(root.getAttribute('aria-busy'),'true');
+  assert.equal(button('导入文件夹').disabled,true);assert.equal(root.getAttribute('aria-busy'),'true');
   busy=false;await poll();
-  assert.equal(button('选择文件夹').disabled,false);assert.equal(root.getAttribute('aria-busy'),'false');assert.equal(cleared,true);
+  assert.equal(button('导入文件夹').disabled,false);assert.equal(root.getAttribute('aria-busy'),'false');assert.equal(cleared,true);
 });
 
 test('workbench reloads its cards and host tabs after the extension restarts',async t=>{
@@ -1108,11 +1350,11 @@ test('workbench reloads its cards and host tabs after the extension restarts',as
   });
   assert.equal(root.querySelector('.l2d-count').textContent,'—');
   assert.match(root.querySelector('.l2d-status').textContent,/等待扩展恢复/);
-  assert.equal(button('选择文件夹').disabled,true);
+  assert.equal(button('导入文件夹').disabled,true);
   retry();await tick();
   assert.equal(root.querySelector('.l2d-count').textContent,'1');
   assert.match(root.querySelector('.l2d-card').textContent,/原来的卡片/);
-  assert.equal(button('选择文件夹').disabled,false);
+  assert.equal(button('导入文件夹').disabled,false);
   assert.equal(refreshed,1);
 });
 
@@ -1152,6 +1394,31 @@ test('leaving during folder reads stops subsequent transfer and cancels only tha
   assert(calls.some(call=>call.method==='importCancel'&&call.args[0]==='owned'));
 });
 
+test('folder upload registers its token before the host aborts the panel on unmount', async t => {
+  const controller = new AbortController();
+  const sentOnAbort = [];
+  let finishRead;
+  const {root, dom, handle, calls} = await mount(t, {
+    ack:true, signal:controller.signal,
+    notifyOnUnmount(method, args) {
+      controller.signal.addEventListener('abort', () => sentOnAbort.push({method, args}), {once:true});
+    },
+    invoke(method) { if (method === 'importBegin') return {token:'upload'}; },
+  });
+  const files = [{name:'model.model3.json', webkitRelativePath:'model/model.model3.json',
+    arrayBuffer:() => new Promise(resolve => { finishRead = resolve; })}];
+  const input = root.querySelector('input[webkitdirectory]');
+  Object.defineProperty(input, 'files', {value:files});
+  input.dispatchEvent(new dom.window.Event('change'));
+  await tick();
+  controller.abort();
+  handle.dispose();
+  finishRead(new Uint8Array([1]).buffer);
+  await tick();
+  assert.deepEqual(sentOnAbort, [{method:'importCancel', args:['upload']}]);
+  assert.equal(calls.some(call => ['importCancel','importAppend','importFinish'].includes(call.method)), false);
+});
+
 test('manual mode disables AI options while retaining depth and analysis selections',async t=>{
  const {root,dom,button,configCalls}=await mount(t,{ack:true});button('设置').click();await tick();
  const mode=root.querySelector('[aria-label="适配方式"]'),gear=root.querySelector('[aria-label="分析方式"]'),depth=root.querySelector('[aria-label="适配深度"]'),automatic=root.querySelector('[aria-label="自动安装"]');
@@ -1162,14 +1429,7 @@ test('manual mode disables AI options while retaining depth and analysis selecti
  change(mode,'1');button('保存设置').click();await tick();assert.equal(configCalls[0].values['worlds.figure.adaptationMode'],'manual');assert(!('worlds.figure.assistMotions' in configCalls[0].values));
 });
 
-test('manual actions sit above the unchanged install/edit/delete row',async t=>{
- const {root}=await mount(t,{ack:true,builds:[{id:'editable',at:1,bytes:1024,manualAvailable:true}]});
- const card=root.querySelector('.l2d-card');assert.equal(card.querySelector(':scope > .l2d-card-binding').textContent,'动作');
- assert.deepEqual([...card.querySelectorAll('.l2d-card-actions button')].map(b=>b.textContent),['安装','编辑','删除']);
- assert.equal(card.querySelector('.l2d-card-binding').nextElementSibling.className,'l2d-card-actions');
-});
-
-test('workbench explains the current step and keeps the wearing link visible after install', async t => {
+test('workbench keeps the import and installation actions in their own panes', async t => {
   const {root,dom,button} = await mount(t, {
     ack:true,
     invoke(method) {
@@ -1178,19 +1438,23 @@ test('workbench explains the current step and keeps the wearing link visible aft
       if (method === 'install') return {figureId:'figure',log:[]};
     },
   });
-  const current = () => root.querySelector('[aria-current="step"]').textContent;
-  const guide = root.querySelector('.l2d-workflow-next');
-  assert.match(current(),/选择素材/);
-  assert.match(guide.textContent,/不会自动打包或安装/);
+  const install = root.querySelector('.l2d-install-pane');
+  const guide = install.querySelector('.l2d-workflow-next');
+  assert.equal(install.querySelector('.l2d-source-title').textContent, '安装形象');
+  assert.equal(install.querySelector('.l2d-import-controls button:nth-child(2)').disabled, true);
+  assert.match(guide.textContent,/可打包或安装/);
+  assert.equal(root.querySelector('.l2d-drop-zone .l2d-source-pickers button').textContent, '导入文件夹');
   paste(dom,root.querySelector('.l2d-drop-zone'),'E:/models/figure');
   await tick();
-  assert.match(current(),/处理模型/);
-  assert.match(guide.textContent,/一键安装.*一键打包/);
+  assert.match(guide.textContent,/直接安装.*先打包/);
   button('一键安装').click();
   await tick();
-  assert.match(current(),/前往装扮/);
-  assert.match(guide.textContent,/选中形象才会穿戴/);
-  assert.equal(guide.querySelector('a').hidden,false);
+  assert.match(guide.textContent,/选中形象即可穿戴/);
+  assert.equal(install.querySelector('.l2d-source-title').textContent, '形象已安装');
+  const dress = install.querySelector('.l2d-import-controls a');
+  assert.equal(dress.hidden, false);
+  root.querySelector('dialog[open] .l2d-modal-close').click();
+  assert.equal(dom.window.document.activeElement, dress);
 });
 
 test('library no-match state provides a keyboard-friendly clear action', async t => {
@@ -1202,4 +1466,99 @@ test('library no-match state provides a keyboard-friendly clear action', async t
   button('清除搜索').click();
   assert.equal(root.querySelectorAll('.l2d-card').length,1);
   assert.equal(document.activeElement, search);
+});
+
+test('installing a different library pack does not complete the staged import', async t => {
+  const {root, dom, button} = await mount(t, {
+    ack: true,
+    builds: [{id:'existing-pack',nameZh:'库里的形象',at:1,bytes:1024}],
+    invoke(method) {
+      if (method === 'importPaths') return {token:'staged',models:[{dir:'source',title:'刚导入的形象'}],packs:[]};
+      if (method === 'install') return {figureId:'existing-pack',log:[]};
+    },
+  });
+  paste(dom, root.querySelector('.l2d-drop-zone'), 'E:/models/source');
+  await tick();
+  button('安装').click();
+  await tick();
+  assert.equal(root.querySelector('dialog[open] .l2d-install-next a')?.textContent, '前往装扮穿戴');
+  assert.equal(root.querySelector('.l2d-install-pane .l2d-source-title').textContent, '安装形象');
+  assert.equal(button('一键安装').disabled, false);
+  assert.equal(root.querySelector('.l2d-install-pane .l2d-workflow-dress').hidden, true);
+  root.querySelector('dialog[open] .l2d-modal-close').click();
+  assert.equal(dom.window.document.activeElement, root.querySelector('.l2d-model-card .l2d-install'));
+});
+
+test('installing a matching library pack advances the current batch without reinstalling it', async t => {
+  let builds = [];
+  const {root, dom, button, calls} = await mount(t, {ack:true, invoke(method, args) {
+    if (method === 'list') return {builds};
+    if (method === 'importPaths') return {token:'batch', models:[{dir:'one', title:'一'}, {dir:'two', title:'二'}], packs:[]};
+    if (method === 'importBuild') {
+      const id = args[1];
+      builds = [...builds, {id, bytes:10, at:2}];
+      return {buildId:id, log:[]};
+    }
+    if (method === 'install') return {figureId:args[1], log:[]};
+  }});
+  paste(dom, root.querySelector('.l2d-drop-zone'), 'E:/models');
+  await tick();
+  button('一键打包').click();
+  await tick();
+  root.querySelector('[data-id="one"] .l2d-install').click();
+  await tick();
+  root.querySelector('dialog[open] .l2d-modal-close').click();
+  button('一键安装').click();
+  await tick();
+  assert.deepEqual(calls.filter(call => call.method === 'install').map(call => call.args[1]), ['one','two']);
+  assert.equal(root.querySelector('.l2d-install-pane .l2d-source-title').textContent, '形象已安装');
+});
+
+test('version badge only signals an unread notice after a confirmed response', async t => {
+  const panels = [
+    ['workbench', {}],
+    ['settings', {configuration:true}],
+    ['effects', {effects:true}],
+    ['voice', {voice:true}],
+  ];
+  for (const [panelName, config] of panels) {
+    await t.test(panelName, async t => {
+      for (const acknowledged of [true, false]) {
+        let complete;
+        const pending = new Promise(resolve => { complete = resolve; });
+        const {root} = await mount(t, {
+          ...config,
+          invoke(method) {
+            if (method === (panelName === 'workbench' ? 'state' : 'core')) return pending;
+            if (method === 'voiceState') return {services:[], selectedId:'', controls:{}};
+          },
+        });
+        const badge = root.querySelector('.l2d-version-corner');
+        assert.match(badge.textContent, /^v\d/);
+        assert.equal(badge.classList.contains('unack'), false);
+        assert.equal(badge.getAttribute('aria-label').includes('未确认'), false);
+        const label = badge.textContent;
+        complete({ok:true, notice:{acknowledged, revision:1}});
+        await tick();
+        assert.equal(root.querySelector('.l2d-version-corner'), badge);
+        assert.equal(badge.textContent, label);
+        assert.equal(badge.classList.contains('ack'), acknowledged);
+        assert.equal(badge.classList.contains('unack'), !acknowledged);
+      }
+    });
+  }
+});
+
+test('a notice opened while the runtime request is pending receives the resolved status', async t => {
+  let complete;
+  const pending = new Promise(resolve => { complete = resolve; });
+  const {root} = await mount(t, {effects:true, invoke(method) { if (method === 'core') return pending; }});
+  root.querySelector('.l2d-version-corner').click();
+  const dialog = root.querySelector('dialog[open]');
+  const runtime = dialog.querySelector('.l2d-license-core-status [role="status"]');
+  assert.match(runtime.textContent, /正在读取/);
+  complete({ok:true, version:'Cubism 5.3', bytes:451584, notice:{acknowledged:true}});
+  await tick();
+  assert.equal(root.querySelector('dialog[open]'), dialog);
+  assert.match(runtime.textContent, /运行组件已就绪/);
 });

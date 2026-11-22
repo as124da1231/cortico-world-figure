@@ -13,16 +13,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile,
 } from 'node:fs/promises';
-import { dirname, join, basename, relative, resolve, sep, isAbsolute } from 'node:path';
+import { dirname, join, basename, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   World, WorldHost, WorldWebUiDecl, ToolDef, WorldStreamSocket, RunPhase,
 } from 'cortico/core/types.ts';
 import type { ConfigGroup } from 'cortico/core/config-schema.ts';
-import { adaptationSummary, assertRegularTree, buildPack, dirSize, editPack, installPack, packDetail, refreshPackRuntime, scanModel, setPackEmotionEffect, type ScanSummary } from './pipeline.ts';
-import { canonicalPath, containsPath, packId } from './paths.ts';
+import { adaptationSummary, assertRegularTree, buildPack, dirSize, editPack, installPack, packDetail, refreshPackRuntime, scanModel, setPackAppearance, type ScanSummary } from './pipeline.ts';
+import { canonicalPath, containsPath, isInsideRoot, packId } from './paths.ts';
 import { parseFigureJson, readPackManifest } from './pack-manifest.ts';
 import { PackImporter, filesFromBundle, filesFromZip, thumbOf, type StageResult } from './import.ts';
+import { FIGURE_IMPORT } from './import-limits.mjs';
 import { captureCover, captureWardrobeThumbnails, type CoverResult } from './cover.ts';
 import { readClipboardPaths } from './clipboard.ts';
 import { FigureAutomation, automationMode } from './automation.mjs';
@@ -34,10 +35,10 @@ import { PERFORMANCE_ASSET } from '../workbench/pack/backends/performance-plan.j
 import {findModels,inspectNative,nativeConfig} from '../workbench/tools/native-catalog.mjs';
 import {packFingerprint} from './pack-fingerprint.ts';
 import { qualityPolicy } from '../workbench/pack/backends/render-quality.js';
-import { EMOTION_EFFECTS, EMOTION_EFFECT_SIZES, normalizeEmotionEffect, normalizeEmotionEffectSize } from '../workbench/tools/emotion-effect.mjs';
+import { EMOTION_EFFECT_SIZES, normalizeEmotionEffects, normalizeEmotionEffectSize } from '../workbench/tools/emotion-effect.mjs';
+import { normalizeFigureThemes } from '../workbench/tools/theme-palette.mjs';
 import {PREVIEW_SIZES,previewSize} from './manual-preview.ts';
 import {wardrobeConfig} from '../workbench/pack/backends/wardrobe.js';
-import {GEAR_THEMES,GEAR_PARTICLES,UI_MATERIALS,UI_MODES,UI_CORNERS,UI_GLOWS,UI_STYLES,UI_BUTTON_FILLS,normalizeAppearance} from './gear-appearance.mjs';
 import { FigureVoice, type VoiceConfig } from './voice.ts';
 import { DesktopSelection, FIGURE_ID, type DesktopBodyLookup } from './desktop-body.ts';
 import { CORE_HOME, CORE_FILE, CORE_URLS, CORE_VERSION, LICENSE_FILES } from './core.ts';
@@ -66,15 +67,9 @@ export interface Live2dSection extends VoiceConfig, PerformanceConfig {
   quality?: string;
   previewSize?: string;
   emotionEffect?: string;
+  emotionEffects?: string;
   emotionEffectSize?: string;
-  gearTheme?: string;
-  particleEffect?: string;
-  uiMaterial?: string;
-  uiMode?: string;
-  uiCorners?: string;
-  uiGlow?: string;
-  uiStyle?: string;
-  uiButtonFill?: string;
+  themePalettes?: string;
   clean?: boolean;
   adaptationMode?: string;
   assistMotions?: boolean;
@@ -84,6 +79,8 @@ export interface Live2dSection extends VoiceConfig, PerformanceConfig {
   assistConfirmFallback?: boolean;
   modelRoots?: string;
 }
+
+const includedEffects = (config: Live2dSection) => normalizeEmotionEffects(config.emotionEffects || config.emotionEffect);
 
 type Phase = 'idle' | 'loading' | 'done' | 'error';
 type ManualSaveStage = 'check' | 'pack' | 'images' | 'commit';
@@ -98,6 +95,7 @@ interface StepState {
 
 interface BuildState {
   packDir: string;
+  imported?: boolean;
   bytes: number;
   words: number;
   cover: boolean;
@@ -143,6 +141,12 @@ async function captureOptionalImages(
     if (!skipSignal?.aborted) throw error;
     return { ok: false, error: '已选择跳过图片' };
   }
+}
+
+async function workbenchCover(dir: string, declared: unknown): Promise<string | null> {
+  return (declared === 'thumb/opt-model.png' ? null : await thumbOf(dir, declared))
+    ?? await thumbOf(dir, 'thumb/cover.png')
+    ?? await thumbOf(dir, 'thumb/opt-model.png');
 }
 
 export class Live2dWorld implements World {
@@ -259,7 +263,7 @@ export class Live2dWorld implements World {
       const adapter = await buildPack(WORKBENCH_DIR, dirname(modelFile), scratch, {
         desktopSourceId: id, modelFile: basename(modelFile), corePath: core.file, maxTexture: 0,
         render: qualityPolicy(config), native: nativeConfig(catalog, [], { includeAll: true }),
-        emotionEffect: config.emotionEffect, emotionEffectSize: config.emotionEffectSize,
+        emotionEffects: includedEffects(config), emotionEffectSize: config.emotionEffectSize, themePalettes: normalizeFigureThemes(config.themePalettes),
         signal,
       });
       await writeFile(join(adapter, LIBRARY), JSON.stringify({ version: 1, catalog, bindings: [] }));
@@ -283,9 +287,8 @@ export class Live2dWorld implements World {
       if (this.state.build && !(this.state.builds?.length)) {
         const b = this.state.build;
         this.state.builds = [{
+          ...b,
           id: `${basename(b.packDir) || 'pack'}-${b.at}`,
-          packDir: b.packDir, bytes: b.bytes, words: b.words,
-          cover: b.cover, fit: b.fit, at: b.at,
         }];
       }
       this.hydrate();
@@ -300,7 +303,7 @@ export class Live2dWorld implements World {
     }
     this.coreReady = (await cubismRuntimeState(sdk)).ok;
     await this.automation.start();
-    await this.importer.pruneAutomationInputs(join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
+    await this.importer.pruneAutomationInputs(join(this.workRoot(),'automation-inputs'),this.retainedImportPaths());
     await this.voice.start(_host);
     await this.performance.start(_host);
   }
@@ -368,8 +371,7 @@ export class Live2dWorld implements World {
         title: zh ? '工作台' : 'Workbench',
         description: zh ? '拖入、粘贴或选择文件夹 / ZIP，一键打包' : 'Drop, paste or choose a folder / ZIP, then pack',
       }, {id:'settings',title:zh?'模型设置':'Model settings',description:zh?'画质、适配与安装':'Quality, adaptation and installation'},
-      {id:'appearance',title:zh?'外观':'Appearance',description:zh?'配色、材质与光效':'Colour, materials and light'},
-       {id:'effects',title:zh?'特效':'Effects',description:zh?'预览并选择桌宠特效':'Preview and choose desktop pet effects'},
+       {id:'effects',title:zh?'个性化':'Personalization',description:zh?'选择随形象包安装的主题配色与特效':'Choose theme colours and effects to include in figure packs'},
       {id:'voice',title:zh?'文字转语音':'Text to speech',description:zh?'配置语音提供商、模型和音色':'Configure speech providers, models and voices'}],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
       stream: (panel, socket) => {
@@ -379,7 +381,7 @@ export class Live2dWorld implements World {
         for (const line of this.log.slice(-50)) socket.send?.(line);
       },
       config: [CONFIG_GROUP(zh)],
-      promptDocs: [{ key: 'worlds.figure.envPrompt', title: zh ? '模型自动化' : 'Figure automation', description: zh ? '模型识别、动作分析、确认安装与换装的工具流程' : 'Model discovery, action analysis, approved installation and wardrobe workflow', path: join(PACKAGE_DIR, 'src', 'ENV_PROMPT.md'), role: 'envPrompt', vars:[{name:'performance',description:'Direct performance instructions',multiline:true}] }],
+      promptDocs: [{ key: 'worlds.figure.envPrompt', title: zh ? '提示词模板' : 'Prompt template', description: zh ? '模型识别、动作分析、确认安装与换装的工具流程' : 'Model discovery, action analysis, approved installation and wardrobe workflow', path: join(PACKAGE_DIR, 'src', 'ENV_PROMPT.md'), role: 'envPrompt', vars:[{name:'performance',description:'Direct performance instructions',multiline:true}] }],
     };
   }
 
@@ -395,17 +397,19 @@ export class Live2dWorld implements World {
       if (method === 'desktopTargets') return this.desktopTargets();
       if (method === 'selectDesktopFigure') {
         if (this.busy) throw Error('请等当前安装或打包完成后再切换形象');
-        const figure = typeof args[0] === 'string' ? args[0] : '';
-        if (figure && (!FIGURE_ID.test(figure) || !(await this.desktopTargets()).some(item => item.id === figure))) {
-          throw Error('请选择已安装的 Figure 形象');
-        }
-        this.playbackFigures = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
-        const resume = await this.voice.suspend();
-        try {
-          await this.opts.persist({desktopFigure: figure, desktopFigureCursor: this.host?.store.latestCursor() ?? 0});
-          await this.performance.refreshSelection();
-        } finally { resume(); }
-        return this.performance.readiness();
+        return this.exclusive(async () => {
+          const figure = typeof args[0] === 'string' ? args[0] : '';
+          if (figure && (!FIGURE_ID.test(figure) || !(await this.desktopTargets()).some(item => item.id === figure))) {
+            throw Error('请选择已安装的 Figure 形象');
+          }
+          this.playbackFigures = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
+          const resume = await this.voice.suspend();
+          try {
+            await this.opts.persist({desktopFigure: figure, desktopFigureCursor: this.host?.store.latestCursor() ?? 0});
+            await this.performance.refreshSelection();
+          } finally { resume(); }
+          return this.performance.readiness();
+        });
       }
       if (method === 'plannerState') return this.performance.planners.state();
       if (method === 'plannerSave') return this.performance.planners.save(args[0]);
@@ -432,6 +436,11 @@ export class Live2dWorld implements World {
       catch (error) { this.say(`! 安装已完成，Coo 通知未送达：${errText(error)}`); }
       return result;
     }
+    // The panel can unmount while its upload or build still needs the staged files.
+    if (panel === 'workbench' && method === 'importCancel' && typeof args[0] === 'string' && args[0]) {
+      while (this.activeAction) await this.activeAction.catch(() => {});
+      if (this.stopping) return { ok: true };
+    }
     if (this.busy) throw new Error('上一个动作还没结束');
     this.busy = true;
     const action = this.dispatch(panel, method, args);
@@ -441,7 +450,9 @@ export class Live2dWorld implements World {
   }
 
   private async dispatch(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    if (panel !== 'workbench' && !(['appearance','settings','effects','voice'].includes(panel) && ['settings','state','core'].includes(method))) throw new Error(`未知面板：${panel}`);
+    const sharedRead = ['settings', 'effects', 'voice'].includes(panel) && ['settings', 'state', 'core'].includes(method);
+    const desktopImport = panel === 'settings' && method === 'importDesktopSource';
+    if (panel !== 'workbench' && !sharedRead && !desktopImport) throw new Error(`未知面板：${panel}`);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();
 
     if (method === 'state') {
@@ -450,8 +461,9 @@ export class Live2dWorld implements World {
     if (method === 'settings') {
       const cfg = this.opts.getConfig();
       return { cover: cfg.cover !== false, texture: cfg.texture || 'original', quality: qualityPolicy(cfg).mode, previewSize:String(previewSize(cfg.previewSize)),
-        emotionEffect: normalizeEmotionEffect(cfg.emotionEffect), emotionEffectSize: normalizeEmotionEffectSize(cfg.emotionEffectSize),
-        ...normalizeAppearance(cfg), clean: Boolean(cfg.clean),
+        emotionEffects: includedEffects(cfg), emotionEffectSize: normalizeEmotionEffectSize(cfg.emotionEffectSize),
+        themePalettes: normalizeFigureThemes(cfg.themePalettes),
+        clean: Boolean(cfg.clean),
         autoDelete: Boolean(cfg.autoDelete), figuresDir: cfg.figuresDir || '',
         adaptationMode: adaptationMode(cfg), assistMotions: aiEnabled(cfg), assistGear: automationMode(cfg).gear, assistDepth: automationMode(cfg).configuredDepth, assistAuto: automationMode(cfg).automatic, assistConfirmFallback: cfg.assistConfirmFallback === true, modelRoots: cfg.modelRoots || '',
         performanceMode: this.performance.mode(), desktopFigure: cfg.desktopFigure || '' };
@@ -494,8 +506,11 @@ export class Live2dWorld implements World {
       return { status: 'closed' };
     }
     if (method === 'manualSave') {
-      if (this.browserEditors.has(String(args[0]))) throw Error('请在当前浏览器编辑页保存。');
-      return this.saveManual(String(args[0]),args[1] as any[],args[2] as any[]|undefined);
+      const [token, bindings, wardrobe] = args;
+      if (typeof token !== 'string' || !token || !Array.isArray(bindings)
+          || wardrobe != null && !Array.isArray(wardrobe)) throw Error('绑定保存参数无效');
+      if (this.browserEditors.has(token)) throw Error('请在当前浏览器编辑页保存。');
+      return this.saveManual(token, bindings, wardrobe ?? undefined);
     }
     if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() };
     if (method === 'importDesktopSource') return this.importDesktopSource(packId(args[0]));
@@ -532,7 +547,11 @@ export class Live2dWorld implements World {
 
     if (method === 'scan') return this.doScan(dir);
     if (method === 'build') return this.doBuild(dir);
-    if (method === 'install') return this.installWithConfirmation(dir, args[1] ? String(args[1]) : undefined, args[2] === true);
+    if (method === 'install') {
+      const id = args[1];
+      if (id != null && typeof id !== 'string') throw Error('打包记录无效');
+      return this.installWithConfirmation(dir, id || undefined, args[2] === true);
+    }
     if (method === 'list') {
       return {
         ...this.snapshot(),
@@ -546,17 +565,21 @@ export class Live2dWorld implements World {
     if (method === 'clearAll') {
       await this.listBuilds();
       const list = this.state.builds ?? [];
-      const keep = list.slice(0, 1);
       const drop = list.slice(1);
       for (const b of drop) await this.assertRemovableBuild(b.packDir);
-      for (const b of drop) await rm(b.packDir, { recursive: true, force: true });
-      this.state.builds = keep;
-      if (this.state.build && !keep.some((b) => b.packDir === this.state.build!.packDir)) {
-        delete this.state.build;
+      const failures: string[] = [];
+      let removed = 0;
+      for (const build of drop) {
+        try {
+          await this.removeBuild(build.id);
+          removed++;
+        } catch (error) {
+          failures.push(`${build.id} · ${errText(error)}`);
+        }
       }
-      await this.save();
-      this.say(`清空旧打包 · 删除 ${drop.length} 份`);
-      return { removed: drop.length, state: this.snapshot(), builds: await this.listBuilds() };
+      const warn = removed ? await this.saveOutcome('打包目录已删除，但删除记录保存失败') : undefined;
+      this.say(`清空旧打包 · 删除 ${removed} 份`);
+      return { removed, failures, warn, state: this.snapshot(), builds: await this.listBuilds() };
     }
     if (method === 'license') {
       const which = String(args[0] ?? 'core');
@@ -587,7 +610,7 @@ export class Live2dWorld implements World {
         const at = Date.now();
         const record = {
           id: `${manifest.id}-${at}-${randomUUID().slice(0, 8)}`,
-          packDir, at, bytes: await dirSize(packDir),
+          packDir, imported: true, at, bytes: await dirSize(packDir),
           words: Array.isArray(manifest.vocab) ? manifest.vocab.length : 0,
           cover: Boolean(manifest.thumb), fit: false,
         };
@@ -616,9 +639,12 @@ export class Live2dWorld implements World {
       return this.corePayload();
     }
     if (method === 'importStage') {
-      const b64 = String(args[0] ?? '');
-      const kind = String(args[1] ?? 'zip') === 'folder' ? 'folder' : 'zip';
-      if (!b64) throw new Error('没有收到文件');
+      const b64 = args[0];
+      const kind = args[1] ?? 'zip';
+      if (typeof b64 !== 'string' || !b64) throw new Error('没有收到文件');
+      if (kind !== 'zip' && kind !== 'folder') throw new Error('导入文件类型无效');
+      if (kind === 'zip') importPayloadSize(b64, FIGURE_IMPORT.zip, 'ZIP 超过 32 MB，请选择解压后的文件夹');
+      else importPayloadSize(b64, FIGURE_IMPORT.bundle, '文件夹数据过大，请重新选择文件夹分批导入');
       const bytes = Buffer.from(b64, 'base64');
       const files = kind === 'folder' ? filesFromBundle(bytes) : filesFromZip(bytes);
       if (typeof files === 'string') throw new Error(files);
@@ -638,16 +664,14 @@ export class Live2dWorld implements World {
       try {
         const r = await this.importer.install(token, dirs, replace, {
           figuresDir: figures,
-          install: (source, beforeSwap) => this.installPrepared(source, figures, { beforeSwap }),
+          install: (source, beforeSwap) => this.installPrepared(source, figures, { beforeSwap, keepPackThemes: true }),
         });
         if ('error' in r) throw new Error(r.error);
         if ('conflicts' in r) { this.steps.install = { ...IDLE, hint: '同名形象需要确认替换' }; return { conflicts: r.conflicts }; }
         const last = r.installed[r.installed.length - 1];
         this.state.install = { target: last.target, at: Date.now() };
         this.steps.install = { phase: 'done', hint: last.target, at: Date.now() };
-        let warn;
-        try { await this.save(); }
-        catch (error) { warn = `形象已安装，但安装记录保存失败：${errText(error)}`; this.say(`! ${warn}`); }
+        const warn = await this.saveOutcome('形象已安装，但安装记录保存失败');
         this.say(`导入完成 · ${r.installed.map((x) => x.id).join('、')}`);
         return { installed: r.installed.map((x) => x.id), state: this.snapshot(), warn };
       } catch (e) {
@@ -684,20 +708,30 @@ export class Live2dWorld implements World {
       return { token };
     }
     if (method === 'importAppend') {
-      const token = String(args[0] ?? '');
-      const list = Array.isArray(args[1]) ? (args[1] as Array<Record<string, unknown>>) : [];
-      const files = list.map((f) => ({
-        path: String(f?.path ?? ''),
-        bytes: Buffer.from(String(f?.b64 ?? ''), 'base64'),
-      }));
+      const [token, list] = args;
+      if (typeof token !== 'string' || !token) throw new Error('这次上传已经过期，重新选一次');
+      if (!Array.isArray(list) || list.length > FIGURE_IMPORT.files) throw new Error('上传批次无效或文件过多');
+      let batchSize = 0;
+      const entries = list.map(entry => {
+        const file = readImportFile(entry);
+        batchSize += importPayloadSize(file.b64, FIGURE_IMPORT.file, '单个文件过大，请重新选择文件夹分块导入');
+        if (batchSize > FIGURE_IMPORT.batch) throw new Error('上传批次过大，请重新选择文件夹');
+        return file;
+      });
+      const files = entries.map(({path, b64}) => ({path, bytes: Buffer.from(b64, 'base64')}));
       const r = await this.importer.appendUpload(token, files);
       if ('error' in r) throw new Error(r.error);
       return r;
     }
     if (method === 'importAppendChunk') {
-      const file = args[1] as Record<string, unknown> | undefined;
-      if (!file || typeof file.path !== 'string' || typeof file.b64 !== 'string') throw new Error('文件分块无效');
-      const result = await this.importer.appendChunk(String(args[0] ?? ''), {path:file.path,bytes:Buffer.from(file.b64,'base64')}, Number(file.offset), Number(file.total));
+      const [token, payload] = args;
+      if (typeof token !== 'string' || !token) throw new Error('这次上传已经过期，重新选一次');
+      const file = readImportFile(payload);
+      const size = importPayloadSize(file.b64, FIGURE_IMPORT.chunk, '文件分块过大，请重新选择文件夹');
+      const {offset, total} = payload as Record<string, unknown>;
+      if (typeof offset !== 'number' || typeof total !== 'number' || !Number.isSafeInteger(offset) || !Number.isSafeInteger(total)
+          || offset < 0 || total > FIGURE_IMPORT.folder || offset + size > total) throw new Error('文件分块无效');
+      const result = await this.importer.appendChunk(token, {path:file.path,bytes:Buffer.from(file.b64,'base64')}, offset, total);
       if ('error' in result) throw new Error(result.error);
       return result;
     }
@@ -716,14 +750,14 @@ export class Live2dWorld implements World {
       if (!rec || !existsSync(rec.packDir)) throw new Error('没有这份打包产物');
       if (method === 'coverPreview') {
         const manifest = parseFigureJson(await readFile(join(rec.packDir, 'figure.json'), 'utf8'));
-        return {image: await thumbOf(rec.packDir, manifest.thumb)};
+        return {image: await workbenchCover(rec.packDir, manifest.thumb)};
       }
       if (method === 'cropPreview') return this.previewCrop(rec);
       return packDetail(rec.packDir);
     }
     if (method === 'edit') {
-      const id = String(args[0] ?? '');
-      const patch = (args[1] ?? {}) as Record<string, unknown>;
+      const id = args[0], patch = args[1] ?? {};
+      if (typeof id !== 'string' || !id || typeof patch !== 'object' || Array.isArray(patch)) throw Error('打包编辑参数无效');
       const rec = (this.state.builds ?? []).find((b) => b.id === id);
       if (!rec || !existsSync(rec.packDir)) throw new Error('没有这份打包产物');
       await editPack(rec.packDir, patch as never);
@@ -736,8 +770,12 @@ export class Live2dWorld implements World {
       return { autoDelete: on };
     }
     if (method === 'remove') {
-      await this.removeBuild(String(args[0] ?? ''));
-      return { state: this.snapshot(), builds: await this.listBuilds() };
+      const id = args[0];
+      if (typeof id !== 'string' || !id) throw Error('打包记录无效');
+      await this.removeBuild(id);
+      this.say(`删除打包产物 · ${id}`);
+      const warn = await this.saveOutcome('打包目录已删除，但删除记录保存失败');
+      return { warn, state: this.snapshot(), builds: await this.listBuilds() };
     }
     throw new Error(`未知方法：${panel}.${method}`);
   }
@@ -826,10 +864,11 @@ export class Live2dWorld implements World {
       const render = qualityPolicy(this.opts.getConfig());
       const maxTexture = render.textureLimit;
       const clean = this.opts.getConfig().clean === true;
-      const emotionEffect = normalizeEmotionEffect(this.opts.getConfig().emotionEffect);
+      const emotionEffects = includedEffects(this.opts.getConfig());
       const emotionEffectSize = normalizeEmotionEffectSize(this.opts.getConfig().emotionEffectSize);
+      const themePalettes = normalizeFigureThemes(this.opts.getConfig().themePalettes);
       opts.onSaveStage?.('pack');
-      let packDir = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, maxTexture, clean, emotionEffect, emotionEffectSize, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+      let packDir = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, maxTexture, clean, emotionEffects, emotionEffectSize, themePalettes, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
       temporary.add(packDir);
       push(`初版包就绪 · ${Date.now() - t0} ms`);
 
@@ -849,7 +888,7 @@ export class Live2dWorld implements World {
       let finalDir = packDir;
       if (shot.fit) {
         t0 = Date.now();
-        const rebuilt = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, fit: shot.fit, maxTexture, clean, emotionEffect, emotionEffectSize, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
+        const rebuilt = await buildPack(WORKBENCH_DIR, source, this.workRoot(), { render, fit: shot.fit, maxTexture, clean, emotionEffects, emotionEffectSize, themePalettes, corePath: core.file, native: opts.native, modelFile: opts.modelFile, signal: opts.signal });
         temporary.add(rebuilt);
         // 封面跟着走
         const thumb = join(packDir, 'thumb');
@@ -926,8 +965,11 @@ export class Live2dWorld implements World {
     } finally {
       if (scratch) await rm(scratch, {recursive:true,force:true}).catch(()=>{});
       if (!committed) for (const target of temporary) {
-        const rel = relative(resolve(this.workRoot(), 'builds'), resolve(target));
-        if (rel && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel)) await rm(target, {recursive:true,force:true}).catch(()=>{});
+        if (isInsideRoot(join(this.workRoot(), 'builds'), target)) {
+          await this.assertRemovableBuild(target).then(() => rm(target, {recursive:true,force:true})).catch(cleanupError => {
+            this.say(`未能移除未完成的打包副本 · ${errText(cleanupError)}`);
+          });
+        }
       }
     }
   }
@@ -955,9 +997,12 @@ export class Live2dWorld implements World {
     this.steps.install = { phase: 'loading', hint: '安装中…' };
     let resumeVoice: (() => void) | undefined;
     try {
+      const warnings: string[] = [];
       const figures = await this.installDirectory();
       resumeVoice = await this.voice.suspend();
-      const target = await this.installPrepared(chosen.packDir, figures, { signal, beforeSwap });
+      const target = await this.installPrepared(chosen.packDir, figures, {
+        signal, beforeSwap, keepPackThemes: chosen.imported, onWarning: message => warnings.push(message),
+      });
       const figureId = basename(target);
       this.steps.install = { phase: 'done', hint: target, at: Date.now() };
       this.state.install = { target, at: Date.now(), buildId };
@@ -965,13 +1010,13 @@ export class Live2dWorld implements World {
       if (this.opts.getConfig().autoDelete) {
         const rec = (this.state.builds ?? []).find((b) => b.packDir === chosen.packDir);
         if (rec) {
-          try { await this.removeBuild(rec.id, { quiet: true }); this.say('已按开关删除打包产物'); }
-          catch (e) { this.say(`! 安装已完成，清理打包产物失败：${errText(e)}`); }
+          try { await this.removeBuild(rec.id); this.say('已按开关删除打包产物'); }
+          catch (e) { warnings.push(`安装已完成，清理打包产物失败：${errText(e)}`); }
         }
       }
-      let warn;
-      try { await this.save(); }
-      catch (error) { warn = `形象已安装，但安装记录保存失败：${errText(error)}`; this.say(`! ${warn}`); }
+      for (const warning of warnings) this.say(`! ${warning}`);
+      const saveWarning = await this.saveOutcome('形象已安装，但安装记录保存失败');
+      const warn = [...warnings, saveWarning].filter(Boolean).join('。') || undefined;
       this.say(`安装完成 · ${target}`);
       return { figureId, state: this.snapshot(), log: [`安装到 ${target}`], warn };
     } catch (e) {
@@ -993,7 +1038,7 @@ export class Live2dWorld implements World {
       return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id,requestedToken,library.wardrobe||[],this.opts.getConfig().previewSize);
     }
     const token=String(args[0]),dir=String(args[1]);
-    const paths=await this.importer.preserveForAutomation(token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
+    const paths=await this.importer.preserveForAutomation(token,join(this.workRoot(),'automation-inputs'),this.retainedImportPaths());
     const source=paths.get(dir),file=this.importer.modelFile(token,dir);
     if(!source||!file)throw Error('这次导入已过期，请重新选择模型');
     const found=await findModels(join(source,file)),model=found.models.find((m:any)=>m.kind==='live2d');
@@ -1008,7 +1053,7 @@ export class Live2dWorld implements World {
     }catch(e){await rm(scratch,{recursive:true,force:true});throw e;}
   }
 
-  private async openBrowserManual([method, args, language]: unknown[]) {
+  private async openBrowserManual([method, args, language, theme]: unknown[]) {
     if ((method !== 'manualOpen' && method !== 'manualOpenBuild') || !Array.isArray(args)) throw Error('编辑入口无效');
     if (this.browserEditors.size) throw Error('已有浏览器编辑页，请先保存或关闭当前编辑。');
     const data = await this.openManual(method, args);
@@ -1022,6 +1067,7 @@ export class Live2dWorld implements World {
       editor = await serveBrowserEditor({
         data,
         language: language === 'en' ? 'en' : 'zh',
+        theme,
         pack: session.copy,
         workbench: WORKBENCH_DIR,
         draft: previousDraft && previousDraft.fingerprint === fingerprint ? previousDraft.draft : undefined,
@@ -1094,8 +1140,7 @@ export class Live2dWorld implements World {
       pending.stage='pack';
       await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
       await refreshPackRuntime(RUNTIME_DIR, target);
-      const { emotionEffect, emotionEffectSize } = this.opts.getConfig();
-      await setPackEmotionEffect(target, emotionEffect, emotionEffectSize);
+      await setPackAppearance(target);
       await writeNativePack(target,session.catalog,bindings,false,wardrobe);
       await enablePackPerformance(target);
       if (!controller.signal.aborted && wardrobe.some(group=>group.options.length)) pending.stage='images';
@@ -1111,10 +1156,7 @@ export class Live2dWorld implements World {
       try{await this.save();}catch(e){Object.assign(this.state,previous);throw e;}
       committed=true;
       const result={state:this.snapshot(),buildId:rec.id,warn};this.manual.complete(token,result);
-      const rel=relative(resolve(this.workRoot(),'builds'),resolve(old.packDir));
-      const inside=(root:string,file:string)=>{const path=relative(resolve(root),resolve(file));return !path||path!=='..'&&!path.startsWith('..'+sep)&&!isAbsolute(path);};
-      const installed=this.state.install?.target;
-      if(rel&&rel!=='..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel)&&!this.state.builds.some(b=>b.packDir===old.packDir)&&(!installed||!inside(old.packDir,installed)&&!inside(installed,old.packDir))) {
+      if (isInsideRoot(join(this.workRoot(), 'builds'), old.packDir) && !this.state.builds.some(b => b.packDir === old.packDir)) {
         try { await this.assertRemovableBuild(old.packDir); await rm(old.packDir,{recursive:true,force:true}); }
         catch(e) { this.say(`旧打包副本未能移除 · ${errText(e)}`); }
       }
@@ -1138,11 +1180,15 @@ export class Live2dWorld implements World {
     return { ...result, submission: this.automation.submissions().find(request => request.token === result.token) };
   }
 
+  private retainedImportPaths(): string[] {
+    return [...this.automation.activeSources(), ...this.manual.activeSources()];
+  }
+
   private async queueAnalysis(result: {token:string;models?:Array<{dir:string}>;packs?:Array<{dir:string}>},repeat=false) {
     if(!aiEnabled(this.opts.getConfig())||!result.token)return {queued:false};
     if(!repeat && !result.models?.length)return {queued:false};
     if (!result.models?.length && !result.packs?.length) return { queued: false };
-    const paths=await this.importer.preserveForAutomation(result.token,join(this.workRoot(),'automation-inputs'),this.automation.activeSources());
+    const paths=await this.importer.preserveForAutomation(result.token,join(this.workRoot(),'automation-inputs'),this.retainedImportPaths());
     return this.automation.imported(result,(_token:string,dir:string)=>{
       const source=paths.get(dir),file=this.importer.modelFile(result.token,dir);
       return source && file ? join(source,file) : source;
@@ -1180,12 +1226,10 @@ export class Live2dWorld implements World {
       if (!aiEnabled(this.opts.getConfig())) throw new Error('AI 自动适配已关闭');
       if (model.kind === 'pack') {
         const figures=await this.installDirectory();
-        const target = await this.installPrepared(model.dir, figures, { signal, expectedFingerprint: fingerprint, beforeSwap });
-        const manifest = parseFigureJson(await readFile(join(target,'figure.json'),'utf8'));
+        const target = await this.installPrepared(model.dir, figures, { signal, expectedFingerprint: fingerprint, beforeSwap, keepPackThemes: true });
         this.state.install = {target,at:Date.now()};
-        let warning;
-        try { await this.save(); } catch (error) { warning = `形象已安装，但安装记录保存失败：${errText(error)}`; this.say(`! ${warning}`); }
-        return {figureId:manifest.id,target,installed:true,mappings:[],warning};
+        const warning = await this.saveOutcome('形象已安装，但安装记录保存失败');
+        return {figureId:basename(target),target,installed:true,mappings:[],warning};
       }
       const built = await this.doBuild(model.dir, {native,modelFile:model.file,remember:false,signal,fingerprint,sourceFingerprint});
       signal?.throwIfAborted();
@@ -1200,14 +1244,13 @@ export class Live2dWorld implements World {
     });
   }
 
-  /** 打包历史，最新在前。卡片封面用 128 小图，转 data URL 给面板。 */
+  /** 打包历史，最新在前。卡片优先显示模型包的封面。 */
   private async listBuilds(): Promise<Array<Record<string, unknown>>> {
     const out: Array<Record<string, unknown>> = [];
     let dropped = false;
     for (const b of this.state.builds ?? []) {
       if (!existsSync(b.packDir)) { dropped = true; continue; }
-      let thumb = '';
-      thumb = await thumbOf(b.packDir, 'thumb/opt-model.png') ?? '';
+      let declaredThumb: unknown;
       let packId = '';
       let nameZh = '';
       let nameEn = '';
@@ -1222,7 +1265,7 @@ export class Live2dWorld implements World {
       catch { /* older or imported packs may not include a build report */ }
       try {
         const m = parseFigureJson(await readFile(join(b.packDir, 'figure.json'), 'utf8'));
-        if (!thumb) thumb = await thumbOf(b.packDir, m.thumb) ?? '';
+        declaredThumb = m.thumb;
         packId = typeof m.id === 'string' ? m.id : '';
         nameZh = typeof m.name?.zh === 'string' ? m.name.zh : '';
         nameEn = typeof m.name?.en === 'string' ? m.name.en : '';
@@ -1231,7 +1274,7 @@ export class Live2dWorld implements World {
       } catch { /* 读不到就用 id */ }
       out.push({
         id: b.id, packId, nameZh, nameEn, bytes: b.bytes, words: b.words, cover: b.cover, fit: b.fit, at: b.at,
-        exists: true, thumb, kind,
+        exists: true, thumb: await workbenchCover(b.packDir, declaredThumb) ?? '', kind,
         adaptation, manualAvailable: b.manualAvailable === true && existsSync(join(b.packDir,LIBRARY)),
       });
     }
@@ -1259,13 +1302,15 @@ export class Live2dWorld implements World {
     return figures;
   }
 
-  private async installPrepared(source: string, figures: string, opts: Pick<NonNullable<Parameters<typeof installPack>[2]>, 'signal' | 'beforeSwap' | 'expectedFingerprint'>) {
-    const { emotionEffect, emotionEffectSize } = this.opts.getConfig();
+  private async installPrepared(source: string, figures: string, opts: Pick<NonNullable<Parameters<typeof installPack>[2]>, 'signal' | 'beforeSwap' | 'expectedFingerprint' | 'onWarning'> & { keepPackThemes?: boolean }) {
+    const cfg = this.opts.getConfig();
+    const { keepPackThemes, ...installOptions } = opts;
+    const themePalettes = keepPackThemes ? undefined : normalizeFigureThemes(cfg.themePalettes);
     let installed = () => {};
     const target = await installPack(source, figures, {
-      ...opts, backupRoot: join(dirname(figures), 'figure-backups'), keep: 2,
+      ...installOptions, backupRoot: join(dirname(figures), 'figure-backups'), keep: 2,
       prepare: async pending => {
-        await prepareFigureRuntime(pending, emotionEffect, emotionEffectSize, this.performance.mode() === 'direct');
+        await prepareFigureRuntime(pending, cfg, this.performance.mode() === 'direct', themePalettes);
         const manifest = await readPackManifest(pending);
         installed = await this.performance.beforeInstall(manifest.id);
       },
@@ -1276,7 +1321,10 @@ export class Live2dWorld implements World {
 
   private async desktopTargets() {
     const dir = await resolveFigures(this.opts.getConfig(), this.opts.dataDir);
-    const entries = await readdir(dir, {withFileTypes:true}).catch(() => []);
+    const entries = await readdir(dir, {withFileTypes:true}).catch((error:NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
     const models = await Promise.all(entries.filter(e => e.isDirectory() && FIGURE_ID.test(e.name)).map(async e => {
       const root = join(dir, e.name);
       const build = await readFile(join(root, 'build.json'), 'utf8').then(parseFigureJson).catch(() => null);
@@ -1308,14 +1356,14 @@ export class Live2dWorld implements World {
     const figures = await canonicalPath(await resolveFigures(this.opts.getConfig(), this.opts.dataDir));
     const installed = this.state.install?.target;
     const builds = await canonicalPath(join(this.workRoot(), 'builds'));
-    const managed = build !== builds && containsPath(builds, build);
-    if (!managed || containsPath(build, figures) || containsPath(figures, build)
-        || installed && containsPath(build, await canonicalPath(installed))) {
+    const installedPath = installed && await canonicalPath(installed);
+    if (!isInsideRoot(builds, build) || containsPath(build, figures) || containsPath(figures, build)
+        || installedPath && (containsPath(build, installedPath) || containsPath(installedPath, build))) {
       throw Error('打包目录与已安装形象重叠，或已不在当前工作目录内');
     }
   }
 
-  private async removeBuild(id: string, opts: { quiet?: boolean } = {}): Promise<void> {
+  private async removeBuild(id: string): Promise<void> {
     const list = this.state.builds ?? [];
     const idx = list.findIndex((b) => b.id === id);
     if (idx < 0) throw new Error('没有这份打包产物');
@@ -1325,8 +1373,6 @@ export class Live2dWorld implements World {
     list.splice(idx, 1);
     this.state.builds = list;
     if (this.state.build?.packDir === rec.packDir) delete this.state.build;
-    if (!opts.quiet) this.say(`删除打包产物 · ${id}`);
-    await this.save();
   }
 
   private snapshot(): Record<string, unknown> {
@@ -1456,6 +1502,15 @@ export class Live2dWorld implements World {
     await task;
   }
 
+  private async saveOutcome(failure: string): Promise<string | undefined> {
+    try { await this.save(); }
+    catch (error) {
+      const warning = `${failure}：${errText(error)}`;
+      this.say(`! ${warning}`);
+      return warning;
+    }
+  }
+
   private hydrate(): void {
     const s = this.state;
     if (s.scan) {
@@ -1481,6 +1536,19 @@ export class Live2dWorld implements World {
 }
 
 const errText = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 300);
+
+function importPayloadSize(encoded: string, limit: number, error: string): number {
+  if (encoded.length > 4 * Math.ceil(limit / 3)) throw new Error(error);
+  const bytes = Buffer.byteLength(encoded, 'base64');
+  if (bytes > limit) throw new Error(error);
+  return bytes;
+}
+
+function readImportFile(payload: unknown): { path: string; b64: string } {
+  const file = payload as Record<string, unknown> | undefined;
+  if (!file || typeof file.path !== 'string' || typeof file.b64 !== 'string') throw new Error('上传文件数据无效');
+  return {path:file.path, b64:file.b64};
+}
 
 function lamp(s: StepState): 'online' | 'loading' | 'error' | 'offline' {
   if (s.phase === 'loading') return 'loading';
@@ -1509,7 +1577,7 @@ async function enablePackPerformance(dir: string, immediate = false) {
   await writeFile(join(dir, PERFORMANCE_ASSET), '{"version":1,"orders":[]}\n');
 }
 
-async function prepareFigureRuntime(dir: string, emotionEffect: unknown, emotionEffectSize: unknown, immediate: boolean) {
+async function prepareFigureRuntime(dir: string, cfg: Live2dSection, immediate: boolean, themePalettes?: string[]) {
   // Match the current entry and the original Figure entry shipped before 1.4.5.
   const owned = await readFile(join(dir, 'build.json'), 'utf8').then(parseFigureJson).catch(() => null);
   if (owned?.tool !== 'cortico-live2d-pack' || !existsSync(join(dir, 'backends', 'live2d.js'))) return;
@@ -1522,22 +1590,16 @@ async function prepareFigureRuntime(dir: string, emotionEffect: unknown, emotion
   const voice = await readFile(join(dir, 'figure-voice.json'), 'utf8').then(parseFigureJson).catch(() => null);
   const cropConfig = join('backends', 'crop-config.js');
   const installedCrop = await readFile(join(dir, cropConfig)).catch(() => null);
-  const effectsAdapter = join('backends', 'emotion-effects', 'index.js');
-  const installedEffects = await readFile(join(dir, effectsAdapter)).catch(() => null);
-  const kaomoji = join('backends', 'emotion-effects', 'wolf-kaomoji.js');
-  const installedKaomoji = await readFile(join(dir, kaomoji)).catch(() => null);
   const voiceBackend = join('backends', 'voice-playback.js');
   const installedVoice = await readFile(join(dir, voiceBackend)).catch(() => null);
   const bodyBackend = join('backends', 'live2d.js');
   const installedBody = await readFile(join(dir, bodyBackend)).catch(() => null);
   const wardrobeBackend = join('backends', 'wardrobe.js');
   const installedWardrobe = await readFile(join(dir, wardrobeBackend)).catch(() => null);
-  const performanceBackend = join('backends', 'performance-playback.js');
-  const installedPerformance = await readFile(join(dir, performanceBackend)).catch(() => null);
-  if (voice?.version !== 3 || !installedPerformance?.equals(await readFile(join(RUNTIME_DIR, performanceBackend)))
+  const formatBackend = join('backends', owned.sourceFormat === 'bongocat' ? 'bongo.js' : 'performance-playback.js');
+  const installedFormatBackend = await readFile(join(dir, formatBackend)).catch(() => null);
+  if (voice?.version !== 3 || !installedFormatBackend?.equals(await readFile(join(RUNTIME_DIR, formatBackend)))
       || !existsSync(join(dir, 'vendor', 'soullink', 'chunk-OPVA6SRP.js'))
-      || !installedEffects?.equals(await readFile(join(RUNTIME_DIR, effectsAdapter)))
-      || !installedKaomoji?.equals(await readFile(join(RUNTIME_DIR, kaomoji)))
       || !existsSync(join(dir, 'backends', 'body-crop.js'))
       || !existsSync(join(dir, 'backends', 'gaze-config.js'))
       || !installedVoice?.equals(await readFile(join(RUNTIME_DIR, voiceBackend)))
@@ -1546,7 +1608,7 @@ async function prepareFigureRuntime(dir: string, emotionEffect: unknown, emotion
       || !installedWardrobe?.equals(await readFile(join(RUNTIME_DIR, wardrobeBackend)))) {
     await refreshPackRuntime(RUNTIME_DIR, dir);
   }
-  await setPackEmotionEffect(dir, emotionEffect, emotionEffectSize);
+  await setPackAppearance(dir, includedEffects(cfg), cfg.emotionEffectSize, themePalettes);
   if (owned.sourceFormat === 'bongocat') return;
   if (existsSync(join(dir, LIBRARY))) {
     await enablePackPerformance(dir, immediate);
@@ -1585,16 +1647,9 @@ function CONFIG_GROUP(zh: boolean): ConfigGroup {
         },
         'worlds.figure.quality': {type:'string',enum:['economy','balanced','high','original'],title:zh?'画质':'Quality',description:zh?'流畅／标准／高清／原图；原图不设软件精度上限，仅受设备能力限制':'Smooth / Standard / HD / Original; Original has no software resolution cap, subject to device limits','x-hot':true},
         'worlds.figure.previewSize': {type:'string',enum:PREVIEW_SIZES.map(String),title:zh?'预览精度':'Preview resolution',description:zh?'动作与装扮预览默认 1024；无上限时按设备能力渲染':'Action and wardrobe previews default to 1024. Unlimited uses device limits.','x-hot':true},
-        'worlds.figure.emotionEffect': {type:'string',enum:[...EMOTION_EFFECTS],title:zh?'初始特效':'Starting effect',description:zh?'安装后可在 Coo 装扮中切换六种特效。':'Switch between all six effects in Coo Dress up after installing.','x-hot':true},
+        'worlds.figure.emotionEffects': {type:'string',title:zh?'随包特效':'Included effects',description:zh?'在个性化页勾选随包包含的 Figure 特效。':'Choose the Figure effects to include on the Personalization page.','x-hot':true},
         'worlds.figure.emotionEffectSize': {type:'string',enum:[...EMOTION_EFFECT_SIZES],title:zh?'特效大小':'Effect size',description:zh?'仅用于 Figure 自带的特效。':'Applies to Figure’s own effects.','x-hot':true},
-        'worlds.figure.gearTheme': {type:'string',enum:GEAR_THEMES.map(t=>t.id),title:zh?'主题配色':'Theme colour','x-hot':true},
-        'worlds.figure.particleEffect': {type:'string',enum:GEAR_PARTICLES.map(p=>p.id),title:zh?'粒子效果':'Particle effect','x-hot':true},
-        ...Object.fromEntries([
-          ['uiMaterial',UI_MATERIALS,zh?'界面材质':'Material'],['uiMode',UI_MODES,zh?'明暗风格':'Brightness'],
-          ['uiCorners',UI_CORNERS,zh?'边角风格':'Corners'],['uiGlow',UI_GLOWS,zh?'光效强度':'Glow'],
-          ['uiStyle',UI_STYLES,zh?'外观方案':'Appearance preset'],
-          ['uiButtonFill',UI_BUTTON_FILLS,zh?'按钮填色':'Button fill'],
-        ].map(([key,choices,title])=>['worlds.figure.'+key,{type:'string',enum:(choices as typeof UI_MATERIALS).map(c=>c.id),title,'x-hot':true}])),
+        'worlds.figure.themePalettes': {type:'string',title:zh?'随包主题配色':'Included themes',description:zh?'在个性化页多选。安装后在 Coo 装扮中切换。':'Select in Personalization. Switch in Coo Dress up after installation.','x-hot':true},
         'worlds.figure.texture': {
           type: 'string',
           title: zh ? '贴图精度' : 'Texture size',

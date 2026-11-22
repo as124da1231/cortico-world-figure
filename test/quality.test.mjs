@@ -9,6 +9,8 @@ import { buildPack, editPack, installPack, scanModel } from '../src/pipeline.ts'
 import { coreState } from '../src/core.ts';
 import { captureCover } from '../src/cover.ts';
 import { LIVE2D } from '../src/index.ts';
+import { FIGURE_THEME_AXIS, FIGURE_THEME_PALETTES } from '../workbench/tools/theme-palette.mjs';
+import { writePackThemes } from '../workbench/tools/pack-themes.mjs';
 import { copyTestCubismRuntime, makeCtx, fixtureManifest } from './_ctx.mjs';
 
 const bytes = (value) => Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
@@ -32,11 +34,12 @@ test('workbench settings expose only declared editable values and the notice has
   const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({});
   t.after(() => world.stop());
   const page = world.webUi('zh');
-  assert.deepEqual(page.panels.map(p => p.id), ['workbench','settings','appearance','effects','voice']);
-  assert.equal(page.panels.find(p => p.id === 'effects').title, '特效');
-  assert.equal(world.webUi('en').panels.find(p => p.id === 'effects').title, 'Effects');
-  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',previewSize:'1024',emotionEffect:'native',emotionEffectSize:'medium',gearTheme:'red',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'subtle',uiStyle:'custom',uiButtonFill:'gradient',clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:true,assistConfirmFallback:false,modelRoots:'',performanceMode:'vocab',desktopFigure:'' });
-  assert.ok(page.panels.some(p=>p.id==='appearance'));assert.deepEqual(await page.invoke('appearance','settings',[]),await page.invoke('workbench','settings',[]));
+  assert.deepEqual(page.panels.map(p => p.id), ['workbench','settings','effects','voice']);
+  assert.equal(page.panels.find(p => p.id === 'effects').title, '个性化');
+  assert.equal(world.webUi('en').panels.find(p => p.id === 'effects').title, 'Personalization');
+  assert.equal(page.promptDocs[0].title, '提示词模板');
+  assert.deepEqual(await page.invoke('workbench', 'settings', []), { cover:false,texture:'original',quality:'balanced',previewSize:'1024',emotionEffects:['native'],emotionEffectSize:'medium',themePalettes:[],clean:false,autoDelete:true,figuresDir:'',adaptationMode:'none',assistMotions:false,assistGear:'auto',assistDepth:'standard',assistAuto:true,assistConfirmFallback:false,modelRoots:'',performanceMode:'vocab',desktopFigure:'' });
+  await assert.rejects(()=>page.invoke('appearance','settings',[]),/未知面板/);
   await assert.rejects(()=>page.invoke('appearance','install',[]),/未知面板/);
   assert.deepEqual(await page.invoke('effects', 'settings', []), await page.invoke('workbench', 'settings', []));
   assert.equal((await page.invoke('effects', 'state', [])).version, (await page.invoke('workbench', 'state', [])).version);
@@ -50,19 +53,32 @@ test('workbench settings expose only declared editable values and the notice has
   const next=await page.invoke('workbench', 'settings', []);
   assert.equal(next.clean,true); assert.equal(next.texture,'1024');
   assert.equal('modelDir' in next,false); assert.equal('workDir' in next,false);
-  cfg.gearTheme='cyan';cfg.particleEffect='meteors';const appearance=await page.invoke('workbench','settings',[]);assert.equal(appearance.gearTheme,'cyan');assert.equal(appearance.particleEffect,'meteors');
-  const props=page.config[0].schema.properties;assert.equal(props['worlds.figure.gearTheme'].enum.length,6);assert.equal(props['worlds.figure.particleEffect'].enum.length,6);
-  assert.deepEqual(props['worlds.figure.emotionEffect'].enum, ['native','kaomoji','orb','flow','bubbles','softglow']);
+  const props=page.config[0].schema.properties;
+  for (const key of ['gearTheme','particleEffect','uiMaterial','uiMode','uiCorners','uiGlow','uiStyle','uiButtonFill']) {
+    cfg[key] = 'legacy';
+    assert.equal('worlds.figure.' + key in props,false);
+  }
+  const legacy = await page.invoke('workbench','settings',[]);
+  assert.equal('gearTheme' in legacy,false);
+  assert.equal(cfg.gearTheme,'legacy');
+  assert.equal(props['worlds.figure.emotionEffects'].type,'string');
+  assert.equal(props['worlds.figure.themePalettes'].type,'string');
+  cfg.bubbleTheme='rose';
+  cfg.themePalettes='minimax, unknown, gemini, kimi, harness, minimax';
+  const themes = await page.invoke('effects', 'settings', []);
+  assert.deepEqual(themes.themePalettes,['deepseek','chatgpt','minimax']);
+  assert.equal('bubbleTheme' in themes,false);
   assert.deepEqual(props['worlds.figure.emotionEffectSize'].enum, ['small','medium','large']);
   cfg.emotionEffect='flow';
-  assert.equal((await page.invoke('workbench', 'settings', [])).emotionEffect, 'flow');
+  assert.deepEqual((await page.invoke('workbench', 'settings', [])).emotionEffects,['native','flow']);
   cfg.emotionEffectSize='large';
   assert.equal((await page.invoke('effects', 'settings', [])).emotionEffectSize, 'large');
   cfg.emotionEffectSize='unknown';
   assert.equal((await page.invoke('effects', 'settings', [])).emotionEffectSize, 'medium');
-  cfg.emotionEffect='unknown';
-  assert.equal((await page.invoke('workbench', 'settings', [])).emotionEffect, 'native');
-  cfg.gearTheme='unknown';cfg.particleEffect='unknown';const fallback=await page.invoke('workbench','settings',[]);assert.equal(fallback.gearTheme,'red');assert.equal(fallback.particleEffect,'stars');assert.equal(cfg.gearTheme,'unknown');
+  cfg.emotionEffects='softglow,unknown,kaomoji,kaomoji';
+  assert.deepEqual((await page.invoke('workbench', 'settings', [])).emotionEffects,['native','kaomoji','softglow']);
+  cfg.emotionEffects='native';
+  assert.deepEqual((await page.invoke('workbench', 'settings', [])).emotionEffects,['native']);
 });
 
 test('zip/bundle parsing rejects malformed data and traversal without touching neighboring files', async (t) => {
@@ -311,9 +327,54 @@ test('core cache rejects corruption; cover handles browser spawn error without c
   } finally { if (previous === undefined) delete process.env.CHROME_PATH; else process.env.CHROME_PATH = previous; }
 });
 
+test('pack themes preserve authored colours and other wardrobe picks when toggled', async t => {
+  const root = await fixture(t);
+  const original = { light:{fill:'#ffffff',line:'#888888',text:'#111111'}, dark:{fill:'#111111',line:'#999999',text:'#ffffff'} };
+  const authored = {
+    bubble:original,
+    axes:[{id:'outfit',options:[{id:'default'},{id:'winter'}]}],
+    presets:[{id:'winter',pick:{outfit:'winter'},bubble:original}],
+  };
+  const originalManifest = structuredClone(authored);
+  await writePackThemes(root, authored, 'minimax,invalid,claude,minimax');
+  assert.deepEqual(authored.axes.at(-1).options.map(option => option.id), ['figurethemeclaude','figurethememinimax']);
+  assert.equal(authored.presets[0].pick.outfit, 'winter');
+  assert.deepEqual(authored.presets.at(-1).console, FIGURE_THEME_PALETTES.at(-1).console);
+  assert.deepEqual(authored.presets.at(-1).pick, {outfit:'default',figuretheme:'figurethememinimax'});
+  assert.deepEqual(await readdir(join(root,'thumb','themes')), ['claude.png','minimax.png']);
+  await writePackThemes(root, authored, ['claude']);
+  assert.deepEqual(await readdir(join(root,'thumb','themes')), ['claude.png']);
+  await writePackThemes(root, authored, []);
+  assert.deepEqual(authored, originalManifest);
+  assert.deepEqual(await readdir(join(root,'thumb','themes')), []);
+});
+
+test('upgrading a pack combines its legacy colours and carries authored outfit picks forward', async t => {
+  const root = await fixture(t);
+  const thumbDir = join(root,'thumb','themes');
+  await mkdir(thumbDir,{recursive:true});
+  const legacy = ['harness','gemini','kimi','minimax'];
+  const options = legacy.map(id => ({id:'figuretheme'+id, name:{zh:id}, thumb:`thumb/themes/${id}.png`}));
+  const manifest = {
+    axes:[{id:FIGURE_THEME_AXIS,options}, {id:'outfit',options:[{id:'default'},{id:'winter'}]}],
+    presets:[
+      ...options.map(({id,name}) => ({id,name,pick:{figuretheme:id,outfit:'default'}})),
+      {id:'winter',pick:{figuretheme:'figurethemeharness',outfit:'winter'}},
+    ],
+  };
+  for (const id of legacy) await writeFile(join(thumbDir,`${id}.png`),'old swatch');
+  await writePackThemes(root,manifest);
+  assert.deepEqual(manifest.axes[0].options.map(({id,name}) => [id,name.zh]), [
+    ['figurethemedeepseek','蓝色'],['figurethemechatgpt','黑色'],['figurethememinimax','粉色'],
+  ]);
+  assert.deepEqual(manifest.presets.map(preset => preset.id), ['winter','figurethemedeepseek','figurethemechatgpt','figurethememinimax']);
+  assert.deepEqual(manifest.presets[0].pick, {figuretheme:'figurethemechatgpt',outfit:'winter'});
+  assert.deepEqual(await readdir(thumbDir), ['chatgpt.png','deepseek.png','minimax.png']);
+});
+
 test('real model: scan, Core verification, packing, cover and installation', { skip: !process.env.L2D_MODEL || !process.env.L2D_CORE }, async (t) => {
   const root = await fixture(t);
-  const cfg = { enabled: true, figuresDir: join(root, 'figures'), workDir: join(root, 'figure'), cover: true, emotionEffect: 'kaomoji' };
+  const cfg = { enabled: true, figuresDir: join(root, 'figures'), workDir: join(root, 'figure'), cover: true, emotionEffects: 'kaomoji,orb', themePalettes: 'deepseek,harness,chatgpt,claude,gemini,qwen,kimi,minimax' };
   await copyTestCubismRuntime(cfg.workDir);
   const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({}); t.after(() => world.stop());
   const inv = (m, a = []) => world.webUi().invoke('workbench', m, a);
@@ -325,8 +386,24 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   const list = await inv('list'); assert.equal(list.builds.length, 1);
   const saved = JSON.parse(await readFile(join(root, 'figure', 'state.json'), 'utf8'));
   const packDir = saved.build.packDir;
+  const modelsDir = join(packDir, 'models');
+  const modelEntry = (await readdir(modelsDir, {withFileTypes:true})).find(entry => entry.isDirectory());
+  assert.ok(modelEntry);
+  const modelDir = join(modelsDir, modelEntry.name);
+  assert.equal((await readFile(join(modelDir, 'model.moc3'))).toString('ascii', 0, 4), 'MOC3');
+  await assert.rejects(readFile(join(modelDir, 'moc3.js')), {code:'ENOENT'});
+  assert.doesNotMatch(await readFile(join(modelsDir, 'index.js'), 'utf8'), /mocFallback|moc3\.js/);
+  await assert.rejects(readFile(join(packDir, 'backends', 'bongo.js')), {code:'ENOENT'});
+  const soulLink = join('vendor','soullink','chunk-OPVA6SRP.js');
+  const compact = await readFile(join(packDir,soulLink));
+  const projectRuntime = new URL('../workbench/pack/',import.meta.url);
+  const original = await readFile(new URL('vendor/soullink/chunk-OPVA6SRP.js',projectRuntime));
+  assert(compact.length < original.length);
+  assert.deepEqual(await readFile(join(packDir,'vendor','soullink','LICENSE')),
+    await readFile(new URL('vendor/soullink/LICENSE',projectRuntime)));
   assert.equal(JSON.parse(await readFile(join(packDir, 'figure-voice.json'), 'utf8')).version, 3);
   assert.match(await readFile(join(packDir, 'backends', 'emotion-style.js'), 'utf8'), /"kaomoji"/);
+  assert.match(await readFile(join(packDir, 'backends', 'emotion-style.js'), 'utf8'), /export default "native"/);
   assert.match(await readFile(join(packDir, 'backends', 'emotion-style.js'), 'utf8'), /emotionEffectSize = "medium"/);
   assert.match(await readFile(join(packDir, 'backends', 'gaze-config.js'), 'utf8'), /normalizeGazeConfig/);
   const coverFile = join(packDir, 'thumb', 'cover.png');
@@ -337,22 +414,66 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   await writeFile(coverFile, originalCover);
   const manifestFile = join(packDir, 'figure.json');
   const builtManifest = JSON.parse(await readFile(manifestFile, 'utf8'));
+  const themes = builtManifest.axes.find(axis => axis.id === FIGURE_THEME_AXIS);
+  assert.deepEqual(themes.options.map(option => ({ id:option.id.slice(FIGURE_THEME_AXIS.length), name:option.name, accent:option.accent })),
+    FIGURE_THEME_PALETTES.map(({id,name,accent}) => ({id,name,accent})));
+  assert.equal(Object.hasOwn(builtManifest, 'bubble'), false);
+  assert.equal(builtManifest.presets.length, 5);
+  assert.deepEqual(builtManifest.presets.map(preset => preset.console), FIGURE_THEME_PALETTES.map(palette => palette.console));
+  assert.ok(builtManifest.presets.every(preset => preset.pick.figureeffects === 'figurefxnative'));
+  for (const option of themes.options) {
+    assert.equal((await readFile(join(packDir,option.thumb))).subarray(1, 4).toString(), 'PNG');
+  }
   const effects = builtManifest.axes.find(axis => axis.id === 'figureeffects');
-  assert.deepEqual(effects.options.map(option => option.id), [
-    'figurefxkaomoji', 'figurefxnative', 'figurefxorb', 'figurefxflow', 'figurefxbubbles', 'figurefxsoftglow',
+  assert.deepEqual(effects.options.map(option => option.id), ['figurefxnative','figurefxkaomoji','figurefxorb']);
+  assert.deepEqual((await readdir(join(packDir,'thumb','effects'))).sort(),['kaomoji.png','native.png','orb.png']);
+  assert.deepEqual((await readdir(join(packDir,'backends','emotion-effects'))).sort(),[
+    'NOTICE.txt','emotion-effects.js','emotion-finals.js','emotion-kaomoji.js','emotion-orb.js','index.js','wolf-kaomoji.js',
   ]);
   for (const option of effects.options) {
     assert.equal((await readFile(join(packDir, option.thumb))).subarray(1, 4).toString(), 'PNG');
   }
-  // A card saved with the older runtime gains the options when installed.
+  const receiver = join(root,'receiver');
+  await mkdir(receiver);
+  const receiveWorld = LIVE2D.create(makeCtx(receiver, {enabled:true, figuresDir:join(receiver,'figures')}));
+  await receiveWorld.start({});
+  t.after(() => receiveWorld.stop());
+  const receive = (method, args = []) => receiveWorld.webUi().invoke('workbench', method, args);
+  await receive('noticeAccept', [1]);
+  let offered = await receive('importPaths', [[packDir]]);
+  const received = await receive('importInstall', [offered.token, [offered.packs[0].dir]]);
+  const receivedFile = join(received.state.install.target,'figure.json');
+  const checkReceivedThemes = async () => {
+    const manifest = JSON.parse(await readFile(receivedFile,'utf8'));
+    assert.deepEqual(manifest.axes.find(axis => axis.id === FIGURE_THEME_AXIS), themes);
+    assert.deepEqual(manifest.presets.map(preset => preset.console), builtManifest.presets.map(preset => preset.console));
+  };
+  await checkReceivedThemes();
+  offered = await receive('importPaths', [[packDir]]);
+  const kept = await receive('importKeep', [offered.token,offered.packs[0].dir]);
+  await receive('install', ['',kept.buildId,true]);
+  await checkReceivedThemes();
+  // Installing an older pack assembles the requested effects in the private copy.
   builtManifest.axes = builtManifest.axes.filter(axis => axis !== effects);
+  for (const preset of builtManifest.presets) delete preset.pick.figureeffects;
+  builtManifest.bubble = { light:{fill:'#fff5f7',text:'#552438',line:'#a34c6e'}, dark:{fill:'#34202a',text:'#ffe2ec',line:'#dc91aa'} };
   await writeFile(manifestFile, JSON.stringify(builtManifest));
   await rm(join(packDir, 'thumb', 'effects'), { recursive: true });
   const oldVoiceBackend = 'export function createFigureVoicePlayback() {}\n';
   await writeFile(join(packDir, 'backends', 'voice-playback.js'), oldVoiceBackend);
-  cfg.emotionEffect = 'flow';
+  cfg.emotionEffects = 'flow,softglow';
   cfg.emotionEffectSize = 'small';
+  cfg.themePalettes = 'qwen,kimi';
   const installed = await inv('install', ['', list.builds[0].id]);
+  const installedFigureFile = join(installed.state.install.target, 'figure.json');
+  await assert.rejects(readFile(join(installed.state.install.target, 'backends', 'bongo.js')), {code:'ENOENT'});
+  assert.deepEqual(await readFile(join(installed.state.install.target,soulLink)),compact);
+  const withThemes = JSON.parse(await readFile(installedFigureFile, 'utf8'));
+  assert.deepEqual(withThemes.axes.find(axis => axis.id === FIGURE_THEME_AXIS).options.map(option => option.id), ['figurethemedeepseek','figurethemeqwen']);
+  assert.deepEqual(withThemes.presets.map(preset => preset.pick.figureeffects), ['figurefxnative','figurefxnative']);
+  assert.equal(Object.hasOwn(withThemes, 'bubble'), false);
+  assert.deepEqual(JSON.parse(await readFile(manifestFile, 'utf8')), builtManifest);
+  assert.deepEqual(await readdir(join(installed.state.install.target,'thumb','themes')), ['deepseek.png','qwen.png']);
   const licenses = await readFile(join(installed.state.install.target, 'LICENSES.txt'), 'utf8');
   assert.match(licenses, /请勿上传、分享或再次分发/);
   assert.equal(JSON.parse(await readFile(join(installed.state.install.target, 'figure-voice.json'), 'utf8')).version, 3);
@@ -360,6 +481,8 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'voice-playback.js'), 'utf8'), /createVoiceMouthEnvelope/);
   assert.equal(await readFile(join(packDir, 'backends', 'voice-playback.js'), 'utf8'), oldVoiceBackend);
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'emotion-style.js'), 'utf8'), /"flow"/);
+  assert.deepEqual((await readdir(join(installed.state.install.target,'thumb','effects'))).sort(),['flow.png','native.png','softglow.png']);
+  await assert.rejects(readFile(join(installed.state.install.target,'backends','emotion-effects','emotion-kaomoji.js')),{code:'ENOENT'});
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'emotion-style.js'), 'utf8'), /emotionEffectSize = "small"/);
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'emotion-effects', 'index.js'), 'utf8'), /createPetEmotionEffects/);
   assert.match(await readFile(join(packDir, 'backends', 'emotion-style.js'), 'utf8'), /"kaomoji"/);
@@ -375,19 +498,19 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   assert.deepEqual((await inv('detail', [list.builds[0].id])).crop, crop);
   assert.deepEqual((await inv('detail', [list.builds[0].id])).gaze, gaze);
   assert.match((await inv('cropPreview', [list.builds[0].id])).image, /^data:image\/png;base64,/);
-  cfg.emotionEffect = 'native';
+  cfg.emotionEffects = 'native';
+  cfg.themePalettes = '';
   assert.deepEqual(await inv('install', ['', list.builds[0].id]), { replacementRequired: true });
   await inv('install', ['', list.builds[0].id, true]);
   const installedManifest = JSON.parse(await readFile(join(installed.state.install.target, 'figure.json'), 'utf8'));
-  assert.equal(installedManifest.effects.reach, 1.95);
+  assert.equal(Object.hasOwn(installedManifest, 'bubble'), false);
+  assert.equal(installedManifest.axes.some(axis => axis.id === FIGURE_THEME_AXIS), false);
+  assert.deepEqual(installedManifest.presets, []);
   assert.deepEqual(installedManifest.axes.find(axis => axis.id === 'figureframing').options.map(option => option.id), ['figureupperframe','figurefullframe']);
-  const installedEffects = installedManifest.axes.find(axis => axis.id === 'figureeffects');
-  assert.deepEqual(installedEffects.options.map(option => option.id), [
-    'figurefxnative', 'figurefxkaomoji', 'figurefxorb', 'figurefxflow', 'figurefxbubbles', 'figurefxsoftglow',
-  ]);
-  for (const option of installedEffects.options) {
-    assert.equal((await readFile(join(installed.state.install.target, option.thumb))).subarray(1, 4).toString(), 'PNG');
-  }
+  assert.equal(installedManifest.axes.some(axis=>axis.id==='figureeffects'),false);
+  assert.notEqual(installedManifest.effects?.reach,1.95);
+  assert.deepEqual((await readdir(join(installed.state.install.target,'backends','emotion-effects'))).sort(),['NOTICE.txt','emotion-effects.js','index.js']);
+  await assert.rejects(readFile(join(installed.state.install.target,'thumb','effects','native.png')),{code:'ENOENT'});
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'body-crop.js'), 'utf8'), /createCropMask/);
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'crop-config.js'), 'utf8'), /curve: between/);
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'gaze-config.js'), 'utf8'), /normalizeGazeConfig/);

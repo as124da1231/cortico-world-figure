@@ -9,8 +9,12 @@ function voiceView(ctx) {
     return node;
   };
   const button = (label, style = '') => {
-    const node = el('button', ('l2d-btn ' + style).trim(), label);
-    node.type = 'button';
+    const tokens = style.split(' ');
+    const node = figureControlButton(ctx, label, {
+      size: tokens.includes('sm') ? 'sm' : 'md',
+      variant: tokens.find(token => token === 'primary' || token === 'danger'),
+    });
+    node.classList.add(...tokens.filter(token => token && !['sm','primary','danger'].includes(token)));
     return node;
   };
   return { doc, t, el, button };
@@ -44,142 +48,107 @@ async function refreshVoiceTool(ctx, before, after) {
 
 const speechProviders = {
   async mount(ctx) {
-    const [state, cfg] = await Promise.all([
-      ctx.invoke('voiceState', []), ctx.invoke('settings', []),
-    ]);
+    const state = await ctx.invoke('voiceState', []);
     if (ctx.signal?.aborted) return;
     const { doc, t, el, button } = voiceView(ctx);
-    const restore = ownAppearance(ctx.root);
-    applyAppearance(ctx.root, cfg);
     const page = el('section', 'l2d-config-page l2d-voice-page');
-    const current = el('section', 'l2d-voice-current');
-    current.setAttribute('aria-label', t('当前语音服务', 'Current speech service'));
-    const currentMain = el('div', 'l2d-voice-current-main');
-    const identity = el('div', 'l2d-voice-identity');
-    const tag = el('span', 'l2d-voice-kicker', t('当前语音服务', 'Current speech service'));
-    const currentName = el('h2');
-    const currentDetails = el('p', 'l2d-voice-current-detail');
+    holdFigurePanelPaint(page);
+    const services = el('section', 'l2d-voice-services');
+    const header = el('header', 'l2d-voice-services-head');
+    const title = el('h2', null, t('语音服务', 'Speech services'));
+    const count = el('span', 'l2d-voice-count');
+    const add = button(t('添加语音服务', 'Add speech service'), 'sm');
+    add.setAttribute('aria-haspopup', 'dialog');
+    add.onclick = () => openService();
+    title.append(count);
+    header.append(title, add);
+    const grid = el('div', 'l2d-voice-service-grid');
+    grid.setAttribute('role', 'region');
+    grid.setAttribute('aria-label', t('已保存的语音服务', 'Saved speech services'));
+    const audition = el('div', 'l2d-voice-audition');
+    audition.setAttribute('aria-label', t('播放控制', 'Playback controls'));
     const transport = el('div', 'l2d-voice-transport');
-    const management = el('div', 'l2d-voice-management');
     const feedback = el('div', 'l2d-voice-feedback');
-    const manage = button(t('管理服务', 'Manage services'), 'quiet');
-    const add = button(t('添加语音服务', 'Add speech service'), 'primary');
-    for (const control of [manage, add]) control.setAttribute('aria-haspopup', 'dialog');
-    add.addEventListener('click', () => openService());
-    manage.addEventListener('click', openManager);
-    identity.append(tag, currentName, currentDetails);
-    management.append(manage, add);
-    currentMain.append(identity, transport, management);
-    current.append(currentMain, feedback);
-
+    audition.append(feedback, transport);
+    services.append(header, audition, grid);
     const sound = el('section', 'l2d-voice-controls');
-    page.append(current, sound);
+    page.append(services, sound);
     ctx.root.append(page);
-    const soundControls = mountVoiceControls(ctx, sound, state, transport, feedback);
-    let snapshot = state, modal, manager, switching = false, disposed = false;
-    const serviceTitle = service => service.name || VOICE_PROVIDERS[service.provider].name;
-    const voiceName = service => service.profile.voice || (service.provider === 'sovitsLocal'
-      ? t('使用插件当前音色', 'Use the plugin’s current voice') : '');
+    const soundControls = mountVoiceControls(ctx, sound, transport, feedback, state);
+    let snapshot = state, modal, switching = false, disposed = false;
+
     function paint() {
-      const selected = snapshot.services.find(service => service.id === snapshot.selectedId);
-      current.dataset.serviceState = !selected ? 'empty' : selected.ready ? 'ready' : 'incomplete';
-      currentName.textContent = selected ? serviceTitle(selected) : t('还未选择服务', 'No service selected');
-      const provider = selected && VOICE_PROVIDERS[selected.provider].name;
-      const hasServices = snapshot.services.length > 0;
-      currentDetails.textContent = selected
-        ? [selected.name ? provider : '', selected.profile.model, voiceName(selected)].filter(Boolean).join(' · ')
-        : hasServices
-          ? t('选择现有服务，即可试听和朗读桌宠回复。', 'Choose a saved service to preview and read desktop pet replies.')
-          : t('添加语音服务，即可试听和朗读桌宠回复。', 'Add a service to preview and read desktop pet replies.');
-      currentDetails.title = currentDetails.textContent;
-      manage.hidden = !hasServices;
-      manage.textContent = selected ? t('管理服务', 'Manage services') : t('选择服务', 'Choose service');
-      manage.classList.toggle('quiet', Boolean(selected));
-      manage.classList.toggle('primary', !selected);
-      add.hidden = hasServices;
-      transport.hidden = !selected;
-      sound.hidden = !selected;
+      grid.replaceChildren();
+      count.textContent = snapshot.services.length ? String(snapshot.services.length) : '';
+      if (!snapshot.services.length) {
+        grid.append(el('p', 'l2d-voice-empty', t('添加一个服务，即可试听并朗读桌宠回复。', 'Add a service to preview and read desktop pet replies.')));
+      }
+      for (const service of snapshot.services) {
+        const provider = VOICE_PROVIDERS[service.provider].name;
+        const name = service.name || provider;
+        const active = snapshot.selectedId === service.id;
+        const item = el('article', 'l2d-voice-service' + (active ? ' is-current' : ''));
+        item.dataset.serviceId = service.id;
+        const identity = el('div', 'l2d-voice-service-identity');
+        const model = [service.name && provider, service.profile.model || service.profile.version].filter(Boolean).join(' · ');
+        const voice = service.profile.voice || (service.provider === 'sovitsLocal'
+          ? t('使用插件当前音色', 'Use the plugin’s current voice') : '');
+        identity.append(el('h3', null, name));
+        if (model || voice) {
+          const details = el('p', null, [model, voice].filter(Boolean).join(' · '));
+          details.title = details.textContent;
+          item.setAttribute('aria-label', name + ' · ' + details.textContent);
+          identity.append(details);
+        }
+        const actions = el('div', 'l2d-voice-service-actions');
+        const edit = button(t('配置', 'Configure'), 'quiet sm');
+        edit.setAttribute('aria-label', t('配置 ', 'Configure ') + name);
+        edit.setAttribute('aria-haspopup', 'dialog');
+        edit.addEventListener('click', () => openService(service.id));
+        if (active || !service.ready) {
+          actions.append(el('span', 'l2d-voice-service-state', !service.ready
+            ? t('待配置', 'Incomplete') : t('当前使用', 'Selected')));
+        } else {
+          const use = button(t('使用', 'Use'), 'sm');
+          use.setAttribute('aria-label', t('使用 ', 'Use ') + name);
+          use.onclick = () => void activate(service, item);
+          actions.append(use);
+        }
+        actions.append(edit);
+        item.append(identity, actions);
+        grid.append(item);
+      }
+    }
+
+    function focusService(id) {
+      const card = [...grid.children].find(item => item.dataset.serviceId === id);
+      (card?.querySelector('.quiet') || add).focus({preventScroll:true});
+    }
+
+    async function activate(service, item) {
+      if (switching || modal || disposed) return;
+      switching = true;
+      const buttons = [add, ...grid.querySelectorAll('button')];
+      buttons.forEach(control => { control.disabled = true; });
+      soundControls.message(t('正在切换服务…', 'Switching service…'));
+      try {
+        const next = await ctx.invoke('voiceSave', [service.id, service.provider, service.name || '', service.profile, '', true]);
+        if (disposed) return;
+        snapshot = next;
+        paint();
+        soundControls.update(snapshot);
+        focusService(service.id);
+      } catch (error) {
+        if (disposed) return;
+        soundControls.message(String(error?.message || error), true);
+        const button = item.querySelector('button:not(.quiet)');
+        if (button) { button.disabled = false; button.focus({preventScroll:true}); }
+      } finally {
+        switching = false;
+        buttons.forEach(control => { control.disabled = false; });
+      }
     }
     paint();
-
-    function openManager() {
-      if (disposed || manager || modal) return;
-      const library = el('div', 'l2d-dialog-body l2d-voice-library');
-      const grid = el('div', 'l2d-voice-library-list');
-      const footer = el('div', 'l2d-voice-library-footer');
-      const status = el('span', 'l2d-voice-message');
-      status.setAttribute('role', 'status');
-      const addService = button(t('添加语音服务', 'Add speech service'));
-      addService.setAttribute('aria-haspopup', 'dialog');
-      addService.addEventListener('click', () => openService());
-      footer.append(status, addService);
-      library.append(grid, footer);
-
-      function paintList() {
-        grid.replaceChildren();
-        for (const service of snapshot.services) {
-          const selected = snapshot.selectedId === service.id;
-          const name = serviceTitle(service);
-          const item = el('div', 'l2d-voice-library-item' + (selected ? ' is-current' : ''));
-          const details = el('div', 'l2d-voice-library-identity');
-          details.append(el('strong', null, name),
-            el('small', null, [service.name ? VOICE_PROVIDERS[service.provider].name : '', voiceName(service)].filter(Boolean).join(' · ')));
-          const edit = button(t('编辑', 'Edit'), 'quiet sm');
-          edit.setAttribute('aria-label', t('配置 ', 'Configure ') + name);
-          edit.dataset.serviceId = service.id;
-          edit.addEventListener('click', () => openService(service.id));
-          edit.disabled = switching;
-          const action = el('div', 'l2d-voice-library-actions');
-          if (selected || !service.ready) {
-            action.append(el('span', 'l2d-voice-service-state', selected ? t('当前使用', 'Selected') : t('待补全', 'Incomplete')));
-          } else {
-            const use = button(t('使用', 'Use'), 'sm');
-            use.setAttribute('aria-label', t('使用 ', 'Use ') + name);
-            use.disabled = switching;
-            use.addEventListener('click', async () => {
-              if (switching || modal || disposed) return;
-              switching = true;
-              status.classList.remove('bad');
-              status.textContent = t('正在切换服务…', 'Switching service…');
-              paintList();
-              try {
-                const next = await ctx.invoke('voiceSave', [service.id, service.provider, service.name || '', service.profile, '', true]);
-                if (disposed) return;
-                snapshot = next;
-                paint();
-                soundControls.update(snapshot);
-                manager?.dispose();
-                manage.focus({preventScroll:true});
-              } catch (error) {
-                if (disposed) return;
-                status.classList.add('bad');
-                status.textContent = String(error?.message || error);
-              } finally {
-                switching = false;
-                if (manager) {
-                  paintList();
-                  const use = [...grid.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === t('使用 ', 'Use ') + name);
-                  use?.focus({preventScroll:true});
-                }
-              }
-            });
-            action.append(use);
-          }
-          action.append(edit);
-          item.append(details, action);
-          grid.append(item);
-        }
-        if (!snapshot.services.length) grid.append(el('p', 'l2d-voice-empty', t('还没有可用的语音服务。','Add a speech service to get started.')));
-        addService.disabled = switching;
-      }
-
-      paintList();
-      const dialog = openFigureDialog(page, t('语音服务', 'Speech services'), library, {
-        closeLabel: t('关闭', 'Close'), variant: 'l2d-voice-library-popup', locked: () => switching,
-        onClose() { manager = undefined; },
-      });
-      manager = { ...dialog, paint: paintList };
-    }
 
     function openService(id = null) {
       if (modal || switching) return;
@@ -382,9 +351,7 @@ const speechProviders = {
           paint();
           soundControls.update(snapshot);
           modal.dispose();
-          if (select) manager?.dispose();
-          else manager?.paint();
-          if (!manager && !manage.hidden) manage.focus({preventScroll:true});
+          focusService(id);
         } catch (error) {
           if (!closed) message(String(error?.message || error), true);
         } finally {
@@ -400,7 +367,7 @@ const speechProviders = {
         removing = on;
         actions.hidden = on;
         confirmation.hidden = !on;
-        message(!on ? '' : snapshot.selectedId === id && snapshot.controls.voiceEnabled
+        message(!on ? '' : snapshot.selectedId === id && soundControls.narrationEnabled()
           ? t('删除当前服务并关闭朗读？', 'Remove the active service and turn off narration?')
           : t('删除这项语音服务？', 'Remove this speech service?'));
         lock();
@@ -410,6 +377,7 @@ const speechProviders = {
       returnToEdit.onclick = () => confirmDeletion(false);
       confirmRemove.onclick = async () => {
         if (saving || !id) return;
+        const position = snapshot.services.findIndex(service => service.id === id);
         saving = true;
         lock();
         message(t('正在删除…', 'Removing…'));
@@ -420,9 +388,7 @@ const speechProviders = {
           paint();
           soundControls.update(snapshot);
           modal.dispose();
-          if (snapshot.services.length) manager?.paint();
-          else manager?.dispose();
-          if (!manager) (manage.hidden ? add : manage).focus({preventScroll:true});
+          focusService((snapshot.services[position] ?? snapshot.services.at(-1))?.id);
         } catch (error) {
           if (!closed) message(String(error?.message || error), true);
         } finally {
@@ -430,7 +396,7 @@ const speechProviders = {
           if (!closed) lock();
         }
       };
-      modal = openFigureDialog(manager?.el || page, details ? t('编辑语音服务', 'Edit speech service') : t('添加语音服务', 'Add speech service'), form, {
+      modal = openFigureDialog(page, details ? t('编辑语音服务', 'Edit speech service') : t('添加语音服务', 'Add speech service'), form, {
         closeLabel: t('关闭', 'Close'), variant: 'l2d-voice-popup', locked: () => saving,
         onClose() {
           closed = true;
@@ -446,20 +412,19 @@ const speechProviders = {
       if (disposed) return;
       disposed = true;
       modal?.dispose();
-      manager?.dispose();
       soundControls.dispose();
       page.remove();
-      restore();
     } };
   },
 };
 
-function mountVoiceControls(ctx, section, initial, transport, feedback) {
-  const { doc, t, el, button } = voiceView(ctx);
-  const win = doc.defaultView;
+function mountVoiceControls(ctx, section, transport, feedback, initial) {
+  const { t, el, button } = voiceView(ctx);
   let snapshot = initial;
-  let disposed = false, saving = false, testing = false, testSent = false, request = 0, auditionTimer;
+  let disposed = false, saving = false, testing = false, testSent = false, request = 0;
+  let speaking = initial?.speaking === true, stopping = false, pollPending = false;
   let inFlight = {}, saveFailed = false;
+  let serviceRevision = 0;
   let prefixRefresh = Promise.resolve();
   const updateTool = (before, after) => {
     if (before?.syncToolReady !== after?.syncToolReady) {
@@ -468,16 +433,18 @@ function mountVoiceControls(ctx, section, initial, transport, feedback) {
   };
   const pending = {};
   const inputs = new Map();
-  const rows = el('div', 'l2d-settings l2d-dialog-body');
+  const narration = el('section', 'l2d-voice-control-group');
+  const mouth = el('section', 'l2d-voice-control-group');
+  narration.append(el('h3', null, t('朗读', 'Narration')));
+  mouth.append(el('h3', null, t('口型', 'Lip sync')));
   const status = el('span', 'l2d-voice-message');
   status.setAttribute('role', 'status');
-  const heading = el('h3', 'l2d-settings-heading', t('朗读设置', 'Narration settings'));
   const controls = [
-    ['voiceEnabled', t('朗读桌宠回复', 'Read desktop pet replies'), t('使用当前语音服务朗读对话', 'Read replies with the current voice service')],
-    ['voiceTiming', t('朗读时机', 'Narration timing'), t('同步档让第一声和气泡接近同时出现。', 'Sync mode starts speech and the bubble at nearly the same time.')],
+    ['voiceEnabled', t('朗读桌宠回复', 'Read desktop pet replies'), ''],
+    ['voiceTiming', t('朗读时机', 'Narration timing'), t('同步档等到首声再显示气泡。', 'Sync waits for audio to start before showing the bubble.')],
     ['voiceVolume', t('播放音量', 'Playback volume'), '', { min: 0, max: 1, step: .01 }],
     ['voiceLipSync', t('口型跟随音频', 'Audio-driven lip sync'), t('关闭时使用原有的气泡口型', 'Turn off to use the existing bubble timing')],
-    ['voiceMouthGain', t('张嘴幅度', 'Mouth opening gain'), t('调高后轻声时张嘴更明显，可在桌宠上试听', 'Increase it for clearer mouth movement on quiet sounds. Test it on the desktop pet.'), MOUTH_GAIN],
+    ['voiceMouthGain', t('张嘴幅度', 'Mouth opening gain'), t('调高后，轻声时张嘴更明显。', 'Higher values make quiet speech more expressive.'), MOUTH_GAIN],
   ];
   for (const [key, label, hint, range] of controls) {
     const row = el('label', 'l2d-setting-row');
@@ -516,56 +483,63 @@ function mountVoiceControls(ctx, section, initial, transport, feedback) {
       pending[key] = timing ? input.value : range ? input.valueAsNumber : input.checked;
       void save();
     });
-    if (key === 'voiceLipSync') rows.append(el('h4', 'l2d-voice-control-heading', t('口型', 'Lip sync')));
-    rows.append(row);
+    (['voiceLipSync', 'voiceMouthGain'].includes(key) ? mouth : narration).append(row);
   }
   const sample = button(t('在桌宠试听', 'Test on desktop pet'), 'primary');
-  const stop = button(t('停止试听', 'Stop sample'), 'quiet');
-  const hush = button(t('停止朗读', 'Stop narration'), 'quiet');
   const retry = button(t('重试保存', 'Retry saving'), 'quiet');
   const retryRegion = el('div');
   retryRegion.hidden = true;
   retryRegion.append(retry);
   retry.onclick = () => void save();
-  sample.disabled = stop.disabled = true;
-  const stopSlot = el('div', 'l2d-voice-stop-slot');
-  stopSlot.append(hush, stop);
-  transport.append(sample, stopSlot);
+  sample.classList.add('l2d-voice-playback');
+  transport.append(sample);
   feedback.append(status, retryRegion);
-  section.append(heading, rows);
+  section.append(narration, mouth);
   function paintSlider(key) {
     const { input, output } = inputs.get(key);
     if (!output) return;
     const label = key === 'voiceMouthGain' ? Number(input.value).toFixed(1) + '×'
       : Math.round(Number(input.value) * 100) + '%';
     output.value = label;
-    const ratio = (input.valueAsNumber - Number(input.min)) / (Number(input.max) - Number(input.min));
-    input.style.setProperty('--figure-range', (ratio * 100) + '%');
     input.setAttribute('aria-valuetext', label);
+  }
+  function paintTiming(value) {
+    const { input, description, hint } = inputs.get('voiceTiming');
+    const ready = snapshot?.timingReady === true;
+    input.value = value;
+    input.options[1].disabled = !ready;
+    description.textContent = ready ? hint : value === 'sync'
+      ? t('当前设备使用快速播报，同步设置会保留。', 'This device uses fast narration and keeps your sync preference.')
+      : t('当前设备支持快速播报，暂无法对齐气泡起点。', 'Fast narration is available on this device. Bubble timing sync is unavailable.');
+  }
+  function controlValue(key) {
+    return pending[key] ?? inFlight[key] ?? snapshot?.controls[key] ?? VOICE_CONTROLS[key];
   }
   function paint() {
     if (disposed) return;
-    for (const [key, { input, output, description, hint }] of inputs) {
-      const value = pending[key] ?? inFlight[key] ?? snapshot?.controls[key] ?? VOICE_CONTROLS[key];
-      if (key === 'voiceTiming') {
-        const ready = snapshot?.timingReady === true;
-        input.value = value;
-        input.options[1].disabled = !ready;
-        description.textContent = ready ? hint : value === 'sync'
-          ? t('当前设备使用快速播报，同步设置会保留。', 'This device uses fast narration and keeps your sync preference.')
-          : t('当前设备支持快速播报，暂无法对齐气泡起点。', 'Fast narration is available on this device. Bubble timing sync is unavailable.');
-      } else if (output) { input.value = String(value); paintSlider(key); }
+    for (const [key, { input, output }] of inputs) {
+      const value = controlValue(key);
+      if (key === 'voiceTiming') paintTiming(value);
+      else if (output) { input.value = String(value); paintSlider(key); }
       else input.checked = value;
       input.disabled = !snapshot || key === 'voiceEnabled' && !snapshot.selectedId && !value;
     }
-    const selected = snapshot?.services.find(service => service.id === snapshot.selectedId);
-    sample.disabled = testing || !selected || !selected.ready || !(snapshot?.playbackReady ?? snapshot?.bodyReady);
-    stop.disabled = !testing && !testSent;
-    stop.hidden = stop.disabled;
-    hush.hidden = !stop.hidden;
-    hush.disabled = !snapshot?.controls.voiceEnabled;
+    paintPlayback();
     retryRegion.hidden = !saveFailed;
     retry.disabled = saving;
+  }
+  function playbackMode() {
+    return testing || testSent ? 'sample' : speaking ? 'narration' : 'idle';
+  }
+  function paintPlayback() {
+    if (disposed) return;
+    const mode = playbackMode();
+    const selected = snapshot?.services.find(service => service.id === snapshot.selectedId);
+    const label = mode === 'sample' ? t('停止试听', 'Stop sample')
+      : mode === 'narration' ? t('停止朗读', 'Stop narration') : t('在桌宠试听', 'Test on desktop pet');
+    if (sample.textContent !== label) sample.textContent = label;
+    sample.disabled = stopping || mode === 'idle' && (!selected?.ready || !(snapshot?.playbackReady ?? snapshot?.bodyReady));
+    sample.classList.toggle('primary', mode === 'idle' && !sample.disabled);
   }
   function message(value, bad = false) {
     if (disposed) return;
@@ -574,7 +548,7 @@ function mountVoiceControls(ctx, section, initial, transport, feedback) {
   }
   function hint() {
     if (!snapshot?.selectedId) return snapshot?.services.length
-      ? t('打开「管理服务」可切换到已保存的音色。', 'Open Manage services to choose a saved voice.')
+      ? t('选择要用于朗读的服务。', 'Choose a service for narration.')
       : '';
     if (snapshot.services.find(service => service.id === snapshot.selectedId)?.ready === false) {
       return t('当前服务的配置还未完成。', 'Complete the current service settings.');
@@ -593,11 +567,19 @@ function mountVoiceControls(ctx, section, initial, transport, feedback) {
     paint();
     message(t('正在保存…', 'Saving…'));
     try {
-      const previous = snapshot;
-      snapshot = await ctx.invoke('voiceControls', [patch]);
+      let revision = serviceRevision;
+      let result = await ctx.invoke('voiceControls', [patch]);
+      if (!disposed && revision !== serviceRevision) {
+        revision = serviceRevision;
+        result = await ctx.invoke('voiceState', []).catch(() => undefined);
+      }
+      if (!disposed && result && revision === serviceRevision) {
+        const previous = snapshot;
+        snapshot = result;
+        updateTool(previous, snapshot);
+      }
       saveFailed = false;
       message(hint() || t('已保存', 'Saved'));
-      updateTool(previous, snapshot);
     } catch (error) {
       // Keep the failed edits unless a newer edit already superseded a value.
       for (const [key, value] of Object.entries(patch)) {
@@ -612,28 +594,60 @@ function mountVoiceControls(ctx, section, initial, transport, feedback) {
       if (!saveFailed) void save();
     }
   }
-  async function followAudition(id) {
-    if (disposed || id !== request || !testSent) return;
+  async function refreshPlayback() {
+    if (disposed || pollPending || testing || stopping || !snapshot?.selectedId) return;
+    pollPending = true;
+    const id = request;
+    const revision = serviceRevision;
     try {
       const current = await ctx.invoke('voiceState', []);
-      if (disposed || id !== request) return;
-      if (!current.speaking) {
+      if (disposed || id !== request || revision !== serviceRevision || current.selectedId !== snapshot.selectedId) return;
+      const previous = snapshot;
+      const previousHint = hint();
+      const { bodyReady, playbackReady, timingReady, message: playbackMessage } = current;
+      snapshot = { ...snapshot, bodyReady, playbackReady, timingReady, message: playbackMessage };
+      if (previous.timingReady !== timingReady) paintTiming(controlValue('voiceTiming'));
+      speaking = current.speaking === true;
+      if (testSent && !speaking) {
         testSent = false;
-        paint();
         message(current.message || t('试听已结束', 'Sample finished'));
-        return;
+      } else if (playbackMode() === 'idle' && !saving && !status.classList.contains('bad') && previousHint !== hint()) {
+        message(hint());
       }
+      paintPlayback();
     } catch {
-      if (disposed || id !== request) return;
+      // The next refresh can recover a temporary unavailable status.
+    } finally {
+      pollPending = false;
     }
-    auditionTimer = win.setTimeout(() => void followAudition(id), 750);
   }
   sample.onclick = async () => {
+    const mode = playbackMode();
     const id = ++request;
-    win.clearTimeout(auditionTimer);
+    if (mode !== 'idle') {
+      stopping = true;
+      paintPlayback();
+      try {
+        await ctx.invoke(mode === 'sample' ? 'voiceStop' : 'voiceHush', []);
+        if (disposed || id !== request) return;
+        testing = testSent = speaking = false;
+        message(mode === 'sample' ? t('试听已停止', 'Sample stopped') : t('朗读已停止', 'Narration stopped'));
+      } catch (error) {
+        if (id === request) {
+          testing = false;
+          message(String(error?.message || error), true);
+        }
+      } finally {
+        if (id === request) {
+          stopping = false;
+          paintPlayback();
+          void refreshPlayback();
+        }
+      }
+      return;
+    }
     testing = true;
-    testSent = false;
-    paint();
+    paintPlayback();
     message(t('正在准备桌宠试听…', 'Preparing the desktop sample…'));
     try {
       const result = await ctx.invoke('voiceAudition', []);
@@ -644,43 +658,37 @@ function mountVoiceControls(ctx, section, initial, transport, feedback) {
       }
       testSent = true;
       message(t('已将试听送到桌宠', 'Sample sent to the desktop pet'));
-      auditionTimer = win.setTimeout(() => void followAudition(id), 650);
     } catch (error) {
       if (id === request) message(String(error?.message || error), true);
     } finally {
-      if (id === request) { testing = false; paint(); }
+      if (id === request) {
+        testing = false;
+        paintPlayback();
+        if (testSent) void refreshPlayback();
+      }
     }
   };
-  stop.onclick = async () => {
-    request++;
-    win.clearTimeout(auditionTimer);
-    testing = testSent = false;
-    paint();
-    try {
-      await ctx.invoke('voiceStop', []);
-      if (!testing) message(t('试听已停止', 'Sample stopped'));
-    } catch (error) { message(String(error?.message || error), true); }
-  };
-  hush.onclick = async () => {
-    hush.disabled = true;
-    try {
-      snapshot = await ctx.invoke('voiceHush', []);
-      message(t('朗读已停止', 'Narration stopped'));
-    } catch (error) { message(String(error?.message || error), true); }
-    finally { paint(); }
-  };
+  const playbackPoll = ctx.interval?.(() => void refreshPlayback(), 900);
   paint();
   message(hint());
   const guard = ctx.guardLeave?.(() => !disposed && (saving || Object.keys(pending).length)
     ? t('语音设置尚未保存，确定离开？', 'Voice settings are unsaved. Leave anyway?') : null);
   return {
+    message,
+    narrationEnabled: () => snapshot?.controls.voiceEnabled,
     update(result) {
       const previous = snapshot;
+      serviceRevision++;
       snapshot = result;
+      if (previous?.selectedId !== result.selectedId) {
+        request++;
+        testing = testSent = stopping = false;
+        speaking = result.speaking === true;
+      }
       paint();
       if (!saving && !saveFailed) message(hint());
       updateTool(previous, snapshot);
     },
-    dispose() { disposed = true; win.clearTimeout(auditionTimer); guard?.dispose(); },
+    dispose() { disposed = true; playbackPoll?.dispose(); guard?.dispose(); },
   };
 }

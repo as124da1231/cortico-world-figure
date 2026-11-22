@@ -9,94 +9,127 @@ const NOTICE_TEXT = {
   zh: 'Live2D 运行组件从官方来源获取并保存在本机。生成的 Live2D 形象包包含 Cubism Core、Framework 和着色器，仅供本机使用。请保留模型、贴图和第三方组件各自的许可。',
   en: 'Live2D runtime components are obtained from official sources and stored locally. Generated Live2D figure packs include Cubism Core, Framework and shaders for local use only. Keep the licenses for models, textures and third-party components.',
 };
-function figureProviderChrome(root) {
-  const chrome = root.previousElementSibling;
-  const route = root.ownerDocument.defaultView?.location.hash || '';
-  if (root.classList.contains('panelslot') && chrome?.matches('.providerchrome')
-      && /^#\/provider\/world(?:%3a|:)figure(?:\/|$)/i.test(route)) return chrome;
-  return null;
-}
-
-const figureHeaders = new WeakMap();
-
 function paintVersionBadge(button, version, acknowledged, t) {
   button.textContent = version ? `v${version}` : '…';
-  button.classList.toggle('unack', !acknowledged);
-  button.classList.toggle('ack', acknowledged);
-  button.title = acknowledged ? t('查看须知', 'Read notice') : t('请阅读并确认须知', 'Read and acknowledge the notice');
-  button.setAttribute('aria-label', `${button.textContent} · ${acknowledged ? t('已确认', 'Acknowledged') : t('未确认', 'Not acknowledged')}`);
+  const needsAcknowledgement = acknowledged === false;
+  button.classList.toggle('unack', needsAcknowledgement);
+  button.classList.toggle('ack', acknowledged === true);
+  button.title = needsAcknowledgement ? t('请阅读并确认须知', 'Read and acknowledge the notice') : t('查看须知', 'Read notice');
+  const status = needsAcknowledgement ? t('未确认须知', 'Notice not acknowledged')
+    : acknowledged === true ? t('已确认', 'Acknowledged') : t('查看须知', 'Read notice');
+  button.setAttribute('aria-label', `${button.textContent} · ${status}`);
 }
 
-function figureHeader(ctx) {
-  const { root } = ctx;
-  const chrome = figureProviderChrome(root);
-  if (!chrome?.querySelector(':scope > .providerintro > .pagetitle-row')) return null;
-  const existing = figureHeaders.get(chrome);
-  if (existing) return existing;
+function figureControlButton(ctx, label, opts = {}) {
+  if (ctx.ui?.button) return ctx.ui.button(label, opts);
+  const button = ctx.root.ownerDocument.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.className = ['btn', opts.size === 'sm' ? 'sm' : '', opts.variant || ''].filter(Boolean).join(' ');
+  return button;
+}
 
-  const doc = root.ownerDocument;
-  const win = doc.defaultView;
-  const t = (zh, en) => String(ctx.language || 'zh').toLowerCase().startsWith('zh') ? zh : en;
+function holdFigurePanelPaint(node) {
+  // Cortico can mount the panel before its stylesheet has finished loading.
+  node.style.setProperty('display', 'var(--l2d-panel-display, none)');
+}
+
+function watchFigurePanelStyles(ctx, node, t) {
+  let status;
+  const timer = ctx.timeout?.(() => {
+    if (!node.isConnected || ctx.signal?.aborted || node.ownerDocument.defaultView.getComputedStyle(node).display !== 'none') return;
+    status = node.ownerDocument.createElement('p');
+    status.className = 'l2d-panel-style-failure';
+    status.setAttribute('role', 'status');
+    status.textContent = t('界面样式暂未加载。若持续出现，请重新打开 Coo。', 'Panel styles are taking longer to load. If this persists, reopen Coo.');
+    node.after(status);
+  }, 6000);
+  return () => { timer?.dispose(); status?.remove(); };
+}
+
+function readStudioTheme(root) {
+  const style = root.ownerDocument.defaultView.getComputedStyle(root);
+  const keys = ['paper', 'paper-2', 'sheet', 'sheet-2', 'ink', 'ink-soft', 'ink-dim',
+    'line', 'line-2', 'accent', 'on-accent', 'ok', 'warn', 'danger'];
+  const colors = {};
+  for (const key of keys) {
+    const color = style.getPropertyValue('--' + key).trim();
+    if (/^#[0-9a-f]{6}$/i.test(color)) colors[key] = color;
+  }
+  return {mode: style.colorScheme, colors};
+}
+
+function createVersionButton(doc, t) {
   const button = doc.createElement('button');
   button.type = 'button';
   button.className = 'l2d-version-corner';
   button.setAttribute('aria-haspopup', 'dialog');
-  const state = { button, version: FIGURE_UI_VERSION, acknowledged: false, core: null, workbench: null, dialog: null };
-  state.update = ({ version, acknowledged, core }) => {
-    if (version) state.version = version;
-    if (acknowledged != null) state.acknowledged = acknowledged;
-    if (core) state.core = core;
-    paintVersionBadge(button, state.version, state.acknowledged, t);
-  };
-  state.update({});
-  const place = () => {
-    if (figureProviderChrome(root) !== chrome) {
-      button.remove();
-      state.dialog?.dispose();
-      chrome.classList.remove('l2d-provider-chrome', 'l2d-themed');
-      delete chrome.dataset.uiMode;
-      delete chrome.dataset.uiStyle;
-      chrome.style.removeProperty('--appearance-accent');
-      observer.disconnect();
-      figureHeaders.delete(chrome);
-      return;
-    }
-    const title = chrome.querySelector(':scope > .providerintro:has(> .pagetitle-row)');
-    if (title && button.parentElement !== title) title.append(button);
-  };
-  // Coo keeps the provider chrome when switching tabs and can rebuild its header contents.
-  const observer = new win.MutationObserver(place);
-  observer.observe(chrome, { childList: true });
-  chrome.classList.add('l2d-provider-chrome');
-  place();
+  paintVersionBadge(button, FIGURE_UI_VERSION, undefined, t);
+  return button;
+}
 
+function mountPanelVersion(ctx) {
+  const { root } = ctx;
+  const doc = root.ownerDocument;
+  const t = (zh, en) => String(ctx.language || 'zh').toLowerCase().startsWith('zh') ? zh : en;
+  const header = doc.createElement('header');
+  header.className = 'l2d-panel-version';
+  holdFigurePanelPaint(header);
+  const button = createVersionButton(doc, t);
+  header.append(button);
+  root.append(header);
+  const stopWatchingStyles = watchFigurePanelStyles(ctx, header, t);
+  let core, dialog, paintRuntime, coreFailed = false, disposed = false;
+  void ctx.invoke('core', []).then(status => {
+    if (disposed || ctx.signal?.aborted) return;
+    core = status;
+    paintVersionBadge(button, FIGURE_UI_VERSION, core?.notice?.acknowledged, t);
+    paintRuntime?.();
+  }, () => {
+    if (disposed || ctx.signal?.aborted) return;
+    coreFailed = true;
+    paintRuntime?.();
+  });
   button.addEventListener('click', () => {
-    if (state.workbench) { state.workbench(); return; }
-    if (state.dialog || figureProviderChrome(root) !== chrome) return;
+    if (disposed || dialog) return;
     const body = doc.createElement('div');
     body.className = 'l2d-dialog-body';
     const summary = doc.createElement('p');
     summary.textContent = t(NOTICE_TEXT.zh, NOTICE_TEXT.en);
     body.append(summary);
     const card = doc.createElement('div');
-    card.className = 'l2d-license l2d-license-core' + (state.core?.ok ? ' ok' : '');
+    card.className = 'l2d-license l2d-license-core';
     const status = doc.createElement('div');
     status.className = 'l2d-license-core-status';
     const title = doc.createElement('strong');
     title.className = 'l2d-license-title';
     title.textContent = 'Live2D';
     status.append(title);
-    if (state.core?.ok) {
-      const ready = doc.createElement('span');
-      ready.textContent = runtimeReadyText(state.core, t);
-      status.append(ready);
-    }
+    const runtime = doc.createElement('span');
+    runtime.setAttribute('role', 'status');
+    status.append(runtime);
+    const actions = doc.createElement('div');
+    actions.className = 'l2d-dialog-actions';
+    const confirmLink = doc.createElement('a');
+    confirmLink.className = 'l2d-btn sm';
+    confirmLink.href = '#/provider/world%3Afigure/workbench';
+    confirmLink.textContent = t('前往工作台确认须知', 'Acknowledge in Workbench');
+    actions.append(confirmLink);
+    paintRuntime = () => {
+      actions.hidden = core?.notice?.acknowledged !== false;
+      card.classList.toggle('ok', core?.ok === true);
+      runtime.textContent = core?.ok ? runtimeReadyText(core, t)
+        : coreFailed ? t('暂时无法读取运行组件状态', 'Could not read runtime status')
+        : core ? t('运行组件未就绪', 'Runtime not ready')
+        : t('正在读取运行组件状态…', 'Reading runtime status…');
+    };
+    paintRuntime();
     const links = doc.createElement('span');
     links.className = 'l2d-license-docs';
     for (const [label, href] of [
       [t('Core 许可', 'Core license'), 'https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html'],
       [t('SDK 许可', 'SDK license'), 'https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html'],
-      [t('打开官网', 'Download page'), state.core?.home || 'https://www.live2d.com/en/sdk/download/web/'],
+      [t('打开官网', 'Download page'), core?.home || 'https://www.live2d.com/en/sdk/download/web/'],
     ]) {
       const link = doc.createElement('a');
       link.className = 'l2d-link';
@@ -107,14 +140,18 @@ function figureHeader(ctx) {
       links.append(link);
     }
     card.append(status, links);
-    body.append(card);
-    state.dialog = openFigureDialog(chrome, t('须知', 'Notice'), body, {
+    body.append(card, actions);
+    dialog = openFigureDialog(root, t('须知', 'Notice'), body, {
       closeLabel: t('关闭', 'Close'), variant: 'l2d-notice-popup',
-      onClose() { state.dialog = null; },
+      onClose() { dialog = null; paintRuntime = undefined; },
     });
   });
-  figureHeaders.set(chrome, state);
-  return state;
+  return {dispose() {
+    disposed = true;
+    stopWatchingStyles();
+    dialog?.dispose();
+    header.remove();
+  }};
 }
 
 function runtimeReadyText(core, t) {
@@ -125,47 +162,29 @@ function runtimeReadyText(core, t) {
 
 function withFigureHeader(panel) {
   return {
-    mount(ctx) {
-      const header = figureHeader(ctx);
-      if (header && !header.core) {
-        void ctx.invoke('core', []).then(core => {
-          if (!ctx.signal?.aborted) header.update({ core, acknowledged: core.notice?.acknowledged });
-        }).catch(() => {});
+    async mount(ctx) {
+      const version = mountPanelVersion(ctx);
+      try {
+        const mounted = await panel.mount(ctx);
+        if (ctx.signal?.aborted) {
+          mounted?.dispose();
+          version.dispose();
+          return;
+        }
+        return {dispose() {
+          mounted?.dispose();
+          version.dispose();
+        }};
+      } catch (error) {
+        version.dispose();
+        throw error;
       }
-      return panel.mount(ctx);
     },
   };
 }
 
-// Restore panel theme values on unmount.
-function applyAppearance(root, cfg) {
-  const preferences=normalizeAppearance(cfg),classic=preferences.uiStyle==='classic';
-  const appearance=classic?{...preferences,gearTheme:'purple',particleEffect:'stars',uiMaterial:'matte',uiMode:'auto',uiCorners:'standard',uiGlow:'off',uiButtonFill:'solid'}:preferences;
-  const theme=GEAR_THEMES.find(t=>t.id===appearance.gearTheme);
-  root.classList.add('l2d-themed');
-  for(const [key,value] of Object.entries(appearance)) root.dataset[key]=value;
-  root.style.setProperty('--appearance-accent',theme.color);
-  root.style.setProperty('--gear-max-color',classic?theme.color:'var(--appearance-effective, '+theme.color+')');
-  root.style.setProperty('--gear-max-fill',theme.fill);
-  root.style.setProperty('--gear-spark-glow',theme.glow);
-  const chrome = figureProviderChrome(root);
-  if (chrome) {
-    // Coo reuses this header between tabs of the same provider and drops it on exit.
-    chrome.classList.add('l2d-themed', 'l2d-provider-chrome');
-    chrome.dataset.uiMode = appearance.uiMode;
-    chrome.dataset.uiStyle = appearance.uiStyle;
-    chrome.style.setProperty('--appearance-accent', theme.color);
-  }
-}
-function ownAppearance(root) {
-  const keys=Object.keys(normalizeAppearance()),props=['--appearance-accent','--gear-max-color','--gear-max-fill','--gear-spark-glow'];
-  const data=keys.map(k=>root.dataset[k]),styles=props.map(k=>[root.style.getPropertyValue(k),root.style.getPropertyPriority(k)]),hadClass=root.classList.contains('l2d-themed');
-  let restored=false;
-  return ()=>{if(restored)return;restored=true;keys.forEach((k,i)=>{if(data[i]===undefined)delete root.dataset[k];else root.dataset[k]=data[i];});props.forEach((k,i)=>{if(styles[i][0])root.style.setProperty(k,...styles[i]);else root.style.removeProperty(k);});if(!hadClass)root.classList.remove('l2d-themed');};
-}
-
 // Primary configuration and the quick popup share saving and dependency handling.
-function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNotice, onSaved, onAppearance, isDisposed = () => ctx.signal?.aborted } = {}) {
+function settingsForm(ctx, cfg, { autosave = false, onNotice, onSaved, isDisposed = () => ctx.signal?.aborted } = {}) {
   const doc = ctx.root.ownerDocument;
   const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
   const t = (a, b) => zh ? a : b;
@@ -176,38 +195,25 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     return n;
   };
   const body = el('form', 'l2d-settings l2d-dialog-body');
-  const section = (title, className = '') => {
-    const container = el('section', ('l2d-settings-section ' + className).trim());
-    if (title) container.append(el('h3', 'l2d-settings-heading', title));
-    body.append(container);
-    return container;
-  };
-  let fieldsRoot = body;
   cfg={...cfg,assistAuto:cfg.assistAuto !== false,adaptationMode:cfg.adaptationMode || (cfg.assistMotions ? 'ai' : 'none')};
   const dirty = {};
+  let changeVersion = 0;
+  function changeSetting(key, value) {
+    dirty[key] = value;
+    changeVersion++;
+  }
   const performanceKey = 'worlds.figure.performanceMode';
   let savedMode = cfg.performanceMode || 'vocab';
   let toolSyncPending = false;
   const controls = [];
   const fields = new Map();
-  const appearance=normalizeAppearance(cfg);
-  const paintAppearance=()=>{
-    applyAppearance(body,appearance);onAppearance?.(appearance);
-    if(appearanceOnly)for(const input of controls){if(input.type==='radio'&&input.name!=='l2d-uiStyle'){input.disabled=appearance.uiStyle==='classic';input.closest('.l2d-setting-row').classList.toggle('inactive',input.disabled);}}
+  const section = title => {
+    const group = el('section', 'l2d-settings-section');
+    group.append(el('h3', null, title));
+    body.append(group);
+    return group;
   };
-  paintAppearance();
-  function appearanceField(section,key,title,hint,choices){
-    const row=el('div','l2d-setting-row l2d-appearance-row'),label=el('span','l2d-setting-label');label.append(el('span',null,title),el('small',null,hint));
-    const group=el('div',key==='gearTheme'?'l2d-theme-options':'l2d-particle-options');group.style.setProperty('--appearance-options',String(choices.length));group.setAttribute('role','radiogroup');group.setAttribute('aria-label',title);
-    group.classList.toggle('l2d-appearance-six-options', choices.length === 6);
-    for(const choice of choices){
-      const option=el('label','l2d-appearance-option'),input=el('input','l2d-appearance-radio');input.type='radio';input.name='l2d-'+key;input.value=choice.id;input.checked=appearance[key]===choice.id;input.setAttribute('aria-label',zh?choice.name:choice.en);
-      const icon=el('span',key==='gearTheme'?'l2d-theme-swatch':'l2d-particle-icon',key==='gearTheme'?null:choice.icon);icon.setAttribute('aria-hidden','true');if(choice.fill){icon.style.background=choice.fill;option.style.setProperty('--choice-color',choice.color);}
-      option.append(input,icon,el('span',null,zh?choice.name:choice.en));group.append(option);controls.push(input);
-      input.addEventListener('change',()=>{if(input.disabled||!input.checked)return;appearance[key]=choice.id;paintAppearance();dirty['worlds.figure.'+key]=choice.id;});
-    }
-    row.append(label,group);section.append(row);
-  }
+  let group = section(t('画质与预览', 'Quality and preview'));
   function field(key, title, hint, type, choices) {
     const row = el('label', 'l2d-setting-row');
     const label = el('span', 'l2d-setting-label');
@@ -220,13 +226,6 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
       const value = el('output', 'l2d-gear-value'); value.setAttribute('aria-hidden', 'true');
       const track = el('span', 'l2d-gear-track');
       const fill = el('span', 'l2d-gear-fill');
-      const sparks = el('span', 'l2d-gear-sparks'); sparks.setAttribute('aria-hidden', 'true');
-      for (let i = 0; i < 10; i++) {
-        const spark = el('i');
-        spark.style.cssText = `--spark-x:${8 + i * 8.4}%;--spark-y:${6 + (i * 7 % 18)}px;--spark-delay:${-i * .37}s;--spark-duration:${1.8 + i % 3 * .4}s`;
-        sparks.append(spark);
-      }
-      fill.append(sparks);
       const stops = el('span', 'l2d-gear-stops'); stops.setAttribute('aria-hidden', 'true');
       choices.forEach(() => stops.append(el('i')));
       input = el('input', 'l2d-gear-input');
@@ -250,42 +249,21 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
       else { input.value = cfg[key] || ''; input.placeholder = t('留空使用 Coo 默认目录', 'Leave empty for the Coo default'); }
     }
     input.setAttribute('aria-label', title);
-    input.addEventListener('change', () => { if (input.disabled) return; paint(); dirty['worlds.figure.' + key] = type === 'checkbox' ? input.checked : readValue ? readValue() : input.value.trim(); });
+    if (hint) {
+      const description = label.querySelector('small');
+      description.id = `figure-setting-${key}`;
+      input.setAttribute('aria-describedby', description.id);
+    }
+    input.addEventListener('change', () => {
+      if (input.disabled) return;
+      paint();
+      changeSetting('worlds.figure.' + key, type === 'checkbox' ? input.checked : readValue ? readValue() : input.value.trim());
+    });
     fields.set(key,{input,paint,readValue,choices});
-    controls.push(input); row.append(label, control || input); fieldsRoot.append(row); return input;
+    controls.push(input); row.append(label, control || input); group.append(row); return input;
   }
   let depend=()=>{};
   let performanceSettings;
-  if(appearanceOnly){
-    const appearanceGroup = title => {
-      const section = el('section', 'l2d-appearance-group');
-      section.append(el('h3', 'l2d-appearance-heading', title));
-      body.append(section);
-      return section;
-    };
-    const preview=el('section','l2d-appearance-preview');preview.setAttribute('aria-label',t('外观实时预览','Live appearance preview'));
-    const intro=el('div','l2d-preview-intro');intro.append(el('strong',null,t('实时预览','Live preview')),el('small',null,t('修改即时显示并自动保存','Changes appear and save automatically')));
-    const bar=el('div','l2d-gear is-max l2d-preview-bar');bar.setAttribute('role','img');bar.setAttribute('aria-label',t('满档光效预览','Maximum effect preview'));
-    const track=el('span','l2d-gear-track'),fill=el('span','l2d-gear-fill'),sparks=el('span','l2d-gear-sparks');sparks.setAttribute('aria-hidden','true');
-    for(let i=0;i<10;i++){const spark=el('i');spark.style.cssText=`--spark-x:${8+i*8.4}%;--spark-y:${6+i*7%18}px;--spark-delay:${-i*.37}s;--spark-duration:${1.8+i%3*.4}s`;sparks.append(spark);}fill.append(sparks);track.append(fill,el('span','l2d-preview-thumb'));bar.append(track);
-    const samples=el('div','l2d-preview-samples'),sample=el('div','l2d-card l2d-preview-card');sample.append(el('strong',null,t('模型卡片','Model card')),el('small',null,t('材质与边角','Material and corners')));
-    const button=el('button','l2d-btn primary',t('主要按钮','Primary button'));button.type='button';button.disabled=true;
-    const input=el('input','l2d-input');input.value=t('输入框预览','Input preview');input.readOnly=true;input.setAttribute('aria-label',input.value);
-    samples.append(sample,input,button);preview.append(intro,bar,samples);body.append(preview);
-    const theme = appearanceGroup(t('主题','Theme'));
-    appearanceField(theme,'uiStyle',t('外观方案','Appearance preset'),t('默认使用原版蓝紫风格，自定义选项会保留','Default uses the original blue and purple look. Custom choices are kept.'),UI_STYLES);
-    appearanceField(theme,'gearTheme',t('主题配色','Theme colour'),t('统一标题区、页签、按钮和满档滑杆的配色','Colours the header, tabs, buttons and sliders at their highest setting'),GEAR_THEMES);
-    appearanceField(theme,'uiMode',t('明暗模式','Light and dark mode'),t('设置 Figure 页面与标题区的明暗','Controls brightness across the Figure panel and its header'),UI_MODES);
-    const controlsGroup = appearanceGroup(t('控件与材质','Controls and materials'));
-    appearanceField(controlsGroup,'uiMaterial',t('表面材质','Surface material'),t('用于卡片、面板和弹窗','Applies to cards, panels and dialogs'),UI_MATERIALS);
-    appearanceField(controlsGroup,'uiCorners',t('边角风格','Corners'),t('统一卡片、弹窗和控件的圆角','Sets corner shapes for cards, dialogs and controls'),UI_CORNERS);
-    appearanceField(controlsGroup,'uiButtonFill',t('按钮填色','Button fill'),t('用于主要操作按钮','Applies to primary action buttons'),UI_BUTTON_FILLS);
-    appearanceField(controlsGroup,'uiGlow',t('光晕强度','Glow intensity'),t('调整按钮和面板周围的光晕','Sets the glow around buttons and panels'),UI_GLOWS);
-    const sliders = appearanceGroup(t('滑杆','Sliders'));
-    appearanceField(sliders,'particleEffect',t('粒子效果','Particle effect'),t('用于满档滑杆。桌宠演出请到「特效」页选择。','Applies to sliders at their highest setting. Choose pet effects on the Effects tab.'),GEAR_PARTICLES);
-    paintAppearance();
-  } else {
-  fieldsRoot = section(t('画质与预览', 'Quality and preview'));
   field('cover', t('生成封面', 'Generate cover'), t('同时自动调整模型取景', 'Also fits the model framing'), 'checkbox');
   const quality = field('quality',t('画质','Quality'),t('画布随显示大小调整；原图不设软件精度上限。已有形象需重新打包安装。','Canvas follows display size; Original has no software cap. Repack existing figures to apply.'),'gear',[['economy',t('流畅','Smooth')],['balanced',t('标准','Standard')],['high',t('高清','HD')],['original',t('原图','Original')]]);
   const texture = field('texture', t('贴图精度', 'Texture resolution'), t('原图档可调整；较小的贴图占用更少显存', 'Adjustable in Original mode; smaller textures use less VRAM'), 'gear', ['512','1024','2048','4096','original'].map(value=>[value,value==='original'?t('原精度','Original'):value+' px']));
@@ -308,13 +286,13 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
   }
   syncQuality();
   field('previewSize',t('预览精度','Preview resolution'),t('动作与装扮预览默认 1024；无上限时按设备能力渲染','Action and wardrobe previews default to 1024. Unlimited uses device limits.'),'gear',figurePreviewChoices(t));
-  fieldsRoot = section(t('打包与安装', 'Packing and installation'));
+  group = section(t('打包与安装', 'Packing and installation'));
   field('clean', t('清理', 'Clean'), '', 'checkbox');
   field('autoDelete', t('安装后删除打包产物', 'Delete pack after installation'), t('仅在安装成功后执行，保留原始素材', 'Only after a successful install; source files are kept'), 'checkbox');
   const folder = field('figuresDir', t('安装目录', 'Install folder'), t('通常无需修改', 'Usually no change needed'), 'text');
   if (ctx.pickPath) {
     const picker = el('span', 'l2d-folder-control');
-    const browse = el('button', 'l2d-btn sm', t('选择', 'Browse')); browse.type = 'button';
+    const browse = figureControlButton(ctx, t('选择', 'Browse'), {size:'sm'});
     folder.replaceWith(picker); picker.append(folder, browse);
     browse.addEventListener('click', async () => {
       try {
@@ -327,7 +305,7 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     });
     controls.push(browse);
   }
-  fieldsRoot = section(t('动作适配', 'Action mapping'));
+  group = section(t('动作适配', 'Action mapping'));
   const mode = field('adaptationMode',t('适配方式','Adaptation mode'),t('无：仅通用配方；人工：预览并绑定；AI：交给 Coo 分析','None: generic recipes; Manual: preview and bind; AI: let Coo analyze'),'gear',[['none',t('无','None')],['manual',t('人工','Manual')],['ai','AI']]);
   const gear = field('assistGear',t('分析方式','Analysis mode'),t('图片不受支持时自动使用文本','Falls back to text when the current model cannot use images'),'gear', [['text',t('文本','Text')],['auto',t('自动','Auto')],['image',t('文本＋图片','Text + images')]]);
   const depth = field('assistDepth',t('适配深度','Adaptation depth'),t('仅文本＋图片时启用：基础取样、针对性补查、映射对照复核','Available with text + images: basic sampling, targeted inspection, mapping comparison'),'gear', [['quick',t('快速','Quick')],['standard',t('标准','Standard')],['deep',t('深入','Deep')]]);
@@ -335,7 +313,8 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
   const confirmFallback = field('assistConfirmFallback',t('降级前确认','Confirm fallback'),t('需要沿用通用表现时先确认，默认直接继续','Ask before keeping generic behavior. Off by default.'),'checkbox');
   const roots = field('modelRoots',t('模型搜索目录','Model search folders'),t('每行一个目录；用于按名字找模型','One folder per line, used when finding models by name'),'textarea');
   roots.placeholder = t('留空时只搜索最近使用的模型目录','Leave empty to search recently used model folders');
-  performanceSettings = mountPerformanceSettings(ctx, section(null, 'l2d-performance-box'), cfg, value => { dirty[performanceKey] = value; });
+  group = section(t('运行时表演', 'Runtime performance'));
+  performanceSettings = mountPerformanceSettings(ctx, group, cfg, value => changeSetting(performanceKey, value));
   controls.push(...performanceSettings.controls);
   body.disposePlanner = performanceSettings.dispose;
   depend = () => {
@@ -348,7 +327,6 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     confirmFallback.closest('.l2d-setting-row').classList.toggle('inactive', confirmFallback.disabled);
   };
   mode.addEventListener('change',depend); mode.addEventListener('input',depend); gear.addEventListener('change',depend); gear.addEventListener('input',depend); automatic.addEventListener('change',depend); depend();
-  }
   const actions = el('div', 'l2d-dialog-actions');
   if (onNotice) {
     const note = el('button', 'l2d-notice-entry', t('须知', 'Notice')); note.type = 'button';
@@ -357,10 +335,10 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
   }
   const status = el('span', 'l2d-settings-status', autosave ? t('修改后自动保存。', 'Changes save automatically.') : '');
   status.setAttribute('role', 'status');
-  const save = el('button', 'l2d-btn primary', t('保存设置', 'Save settings')); save.type = 'submit'; save.hidden = autosave;
+  const save = figureControlButton(ctx, t('保存设置', 'Save settings'), {variant:'primary'}); save.type = 'submit'; save.hidden = autosave;
   actions.append(status, save); body.append(actions);
   let saving = false;
-  ctx.guardLeave?.(() => body.isConnected && (saving || Object.keys(dirty).length) ? t('设置尚未保存，确定离开？', 'Settings are not saved. Leave anyway?') : null);
+  const leave = ctx.guardLeave?.(() => body.isConnected && (saving || Object.keys(dirty).length) ? t('设置尚未保存，确定离开？', 'Settings are not saved. Leave anyway?') : null);
   async function syncPerformanceTools() {
     if (!toolSyncPending) return true;
     status.textContent = t('正在同步会话工具…', 'Updating conversation tools…');
@@ -385,8 +363,9 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
     if (saving || isDisposed()) return;
     const patch = {...dirty};
     const keys = Object.keys(patch);
+    const version = changeVersion;
     if (!keys.length && !toolSyncPending) { if (!autosave) await onSaved?.(); return; }
-    saving = true; save.disabled = true;
+    saving = true; body.setAttribute('aria-busy','true'); save.disabled = true;
     if (!autosave) controls.forEach(input => { input.disabled = true; });
     let succeeded = false;
     try {
@@ -411,20 +390,21 @@ function settingsForm(ctx, cfg, { autosave = false, appearanceOnly = false, onNo
         await onSaved?.();
       }
     } catch (error) {
-      if (patch[performanceKey] === 'direct') performanceSettings?.showSync(t('档位保存失败，点下方重试。', 'Mode could not be saved. Retry below.'));
-      if (!isDisposed()) {
+      if (!isDisposed() && (!autosave || changeVersion === version)) {
+        if (patch[performanceKey] === 'direct') performanceSettings?.showSync(t('档位保存失败，点下方重试。', 'Mode could not be saved. Retry below.'));
         status.textContent = t('保存失败，请重试。', 'Save failed. Please retry.');
         save.hidden = false; if (autosave) save.textContent = t('重试保存', 'Retry save');
         ctx.ui.toast(String(error?.message || error), 'bad');
       }
     } finally {
-      saving = false; save.disabled = false;
+      saving = false; body.removeAttribute('aria-busy'); save.disabled = false;
       if (!autosave) { controls.forEach(input => { input.disabled = false; }); depend(); }
     }
-    if (autosave && succeeded && Object.keys(dirty).length && !isDisposed()) await persist();
+    if (autosave && (succeeded || changeVersion !== version) && Object.keys(dirty).length && !isDisposed()) await persist();
   }
   body.addEventListener('submit', event => { event.preventDefault(); void persist(); });
   if (autosave) body.addEventListener('change', () => { void persist(); });
+  body.dispose = () => { leave?.dispose(); body.disposePlanner?.(); };
   return body;
 }
 
@@ -432,14 +412,15 @@ const configuration = {
   async mount(ctx) {
     const cfg = await ctx.invoke('settings', []);
     if (ctx.signal?.aborted) return;
-    const restoreAppearance=ownAppearance(ctx.root);applyAppearance(ctx.root,cfg);
     const doc = ctx.root.ownerDocument;
     const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
     const shell = doc.createElement('section'); shell.className = 'l2d-config-page';
+    holdFigurePanelPaint(shell);
     shell.setAttribute('aria-label', zh ? '模型设置' : 'Model settings');
-    const form = settingsForm(ctx, cfg, {autosave:true});
+    let disposed = false;
+    const form = settingsForm(ctx, cfg, {autosave:true, isDisposed:() => disposed || ctx.signal?.aborted});
     shell.append(form); ctx.root.append(shell);
-    return {dispose() { form.disposePlanner?.(); shell.remove();restoreAppearance(); }};
+    return {dispose() { disposed = true; form.dispose(); shell.remove(); }};
   },
 };
 
@@ -448,24 +429,11 @@ export default {
     settings: withFigureHeader(configuration),
     effects: withFigureHeader(effectsGallery),
     voice: withFigureHeader(speechProviders),
-    appearance: withFigureHeader({
-      async mount(ctx){
-        const cfg=await ctx.invoke('settings',[]);
-        if(ctx.signal?.aborted)return;
-        const restoreAppearance=ownAppearance(ctx.root),doc=ctx.root.ownerDocument,zh=String(ctx.language||'zh').startsWith('zh');
-        const shell=doc.createElement('section');shell.className='l2d-config-page l2d-appearance-page';
-        shell.setAttribute('aria-label',zh?'外观':'Appearance');
-        const form=settingsForm(ctx,cfg,{autosave:true,appearanceOnly:true,onAppearance:value=>applyAppearance(ctx.root,value)});
-        shell.append(form);ctx.root.append(shell);
-        return {dispose(){shell.remove();restoreAppearance();}};
-      },
-    }),
     workbench: {
       mount(ctx) {
         const ui = ctx.ui;
         const doc = ctx.root.ownerDocument;
         const win = doc.defaultView;
-        const restoreAppearance=ownAppearance(ctx.root);
         const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
         const t = (a, b) => (zh ? a : b);
         const el = (tag, cls, text) => {
@@ -481,35 +449,17 @@ export default {
         let startupFailed = false;
         let notice = null;
         let version = '';
-        let activeImportToken = null;
         let resumeHandle = null;
         let resuming = false;
         let resumePolling = false;
         let resumePhase;
         let editingId = null;
-        let overlay = null;
-        let popup = null;
         let noticeDialog = null;
         let settingsLoading = false;
+        let settingsDialog = null;
         let assistTimer = null;
         let assistPolling = false;
         let assistState = {enabled:false,plans:[]};
-        let currentAppearance=normalizeAppearance();
-        function showDialog(title, body) {
-          overlay?.dispose?.();
-          if(body?.nodeType===1)applyAppearance(body,currentAppearance);
-          overlay = ui.drawer(title, body);
-          return overlay;
-        }
-        function showPopup(title, body, options = {}) {
-          popup?.dispose();
-          const handle = openFigureDialog(shell, title, body, {
-            closeLabel:t('关闭','Close'), ...options,
-            onClose() { if (popup === handle) popup = null; options.onClose?.(); },
-          });
-          popup = handle;
-          return handle;
-        }
         const state = { dir: '', busy: false, builds: [], installed: null, figuresDir: '' };
 
         // ---- Live2D 运行组件：Core 和 Framework 共用已有许可流程 ----
@@ -547,7 +497,6 @@ export default {
 
         function paintCore() {
           if (disposed) return;
-          sharedHeader?.update({ core });
           coreCard.classList.toggle('ok', coreReady());
           if (coreReady()) {
             coreText.textContent = runtimeReadyText(core, t);
@@ -584,38 +533,28 @@ export default {
         });
 
         const shell = el('section', 'l2d-sheet');
-        const header = el('header', 'l2d-header');
+        holdFigurePanelPaint(shell);
+        const header = el('header', 'l2d-header l2d-panel-version');
         header.setAttribute('aria-label',t('模型工坊操作','Figure workshop actions'));
-        const toolbar = el('div','l2d-toolbar');
-        const settingsButton = el('button', 'l2d-btn l2d-settings-button', t('设置', 'Settings'));
+        const settingsButton = figureControlButton(ctx, t('设置', 'Settings'), {size:'sm'});
+        settingsButton.classList.add('l2d-settings-button');
         settingsButton.type = 'button';
         settingsButton.addEventListener('click', openSettings);
-        toolbar.append(settingsButton);header.append(toolbar);
         const sheet = { el: shell, body: el('div', 'l2d-body') };
         shell.append(header, sheet.body);
         ctx.root.appendChild(shell);
+        const stopWatchingStyles = watchFigurePanelStyles(ctx, shell, t);
         const operation = el('section','l2d-operation');
         operation.setAttribute('aria-label',t('导入与处理','Import and processing'));
         const operationBottom = el('div','l2d-operation-bottom');
-        sheet.body.append(operation);
-        const sharedHeader = figureHeader(ctx);
-        if (sharedHeader) header.hidden = true;
-        const versionCorner = sharedHeader?.button ?? el('button', 'l2d-version-corner', '…');
-        versionCorner.type = 'button';
+        const versionCorner = createVersionButton(doc, t);
         versionCorner.disabled = true;
-        versionCorner.setAttribute('aria-haspopup', 'dialog');
-        const openVersion = () => openNotice();
-        if (sharedHeader) sharedHeader.workbench = openVersion;
-        else {
-          header.append(versionCorner);
-          versionCorner.addEventListener('click', openVersion);
-        }
+        versionCorner.addEventListener('click', () => openNotice());
+        header.append(versionCorner);
         function paintNotice() {
           if (disposed) return;
-          const ack = notice?.acknowledged === true;
-          if (sharedHeader) {
-            if (notice) sharedHeader.update({ version, acknowledged: ack });
-          } else paintVersionBadge(versionCorner, version, ack, t);
+          const ack = notice?.acknowledged;
+          paintVersionBadge(versionCorner, version || FIGURE_UI_VERSION, ack, t);
           versionCorner.disabled = !notice || state.busy;
           noticeEntry.hidden = !ack;
           if (noticeDialog) {
@@ -648,20 +587,20 @@ export default {
 
 
         // ---- 导入区与两个主操作 ----
-        const bar = el('div', 'l2d-import-bar');
         const dropZone = el('div', 'l2d-drop-zone');
         dropZone.tabIndex = 0;
         dropZone.setAttribute('role', 'region');
         dropZone.setAttribute('aria-label', t('模型导入区域，点击后可粘贴', 'Model import area; click to paste'));
         const sourceTitle = el('div', 'l2d-source-title');
         const sourceHint = el('div', 'l2d-source-hint');
-        dropZone.append(sourceTitle, sourceHint);
+        const source = el('div', 'l2d-source-copy');
+        source.append(sourceTitle, sourceHint);
         const actions = el('div', 'l2d-import-controls');
-        const chooseFolder = el('button', 'l2d-btn', t('选择文件夹', 'Choose folder'));
-        const chooseZip = el('button', 'l2d-btn', t('选择 ZIP', 'Choose ZIP'));
-        const pack = el('button', 'l2d-btn primary', t('一键打包', 'Pack models'));
-        const installNow = el('button', 'l2d-btn primary', t('一键安装', 'Install now'));
-        const skipCover = el('button', 'l2d-btn sm', t('跳过封面', 'Skip cover'));
+        const chooseFolder = figureControlButton(ctx, t('导入文件夹', 'Import folder'), {size:'sm', variant:'primary'});
+        const chooseZip = figureControlButton(ctx, t('导入 ZIP', 'Import ZIP'), {size:'sm'});
+        const pack = figureControlButton(ctx, t('一键打包', 'Pack'), {size:'sm'});
+        const installNow = figureControlButton(ctx, t('一键安装', 'Install'), {size:'sm', variant:'primary'});
+        const skipCover = figureControlButton(ctx, t('跳过封面', 'Skip cover'), {size:'sm'});
         skipCover.type = 'button';
         skipCover.hidden = true;
         const folderInput = doc.createElement('input');
@@ -673,43 +612,30 @@ export default {
         zipInput.type = 'file';
         zipInput.accept = '.zip,application/zip';
         zipInput.hidden = true;
-        const intro = el('div', 'l2d-workflow-heading');
-        const introCopy = el('div', 'l2d-workflow-copy');
-        introCopy.append(el('h2', null, t('导入一个形象', 'Bring in a figure')),
-          el('p', null, t('支持 Live2D、BongoCat，也可以导入已有的形象包。', 'Use a Live2D or BongoCat model, or bring in an existing figure pack.')));
-        intro.append(introCopy, settingsButton);
-        const steps = el('ol', 'l2d-workflow-steps');
-        steps.setAttribute('aria-label', t('导入流程', 'Import workflow'));
-        const stepsUI = [t('选择素材', 'Choose source'), t('处理模型', 'Prepare figure'), t('前往装扮', 'Wear in Coo')].map((label, index) => {
-          const step = el('li', 'l2d-workflow-step');
-          const number = el('span', 'l2d-step-number', String(index + 1).padStart(2, '0'));
-          number.setAttribute('aria-hidden', 'true');
-          step.append(number, el('span', 'l2d-step-label', label));
-          steps.append(step);
-          return step;
-        });
-        const glyph = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        glyph.setAttribute('viewBox', '0 0 24 24');
-        glyph.setAttribute('class', 'l2d-drop-icon');
-        glyph.setAttribute('aria-hidden', 'true');
-        const stroke = doc.createElementNS(glyph.namespaceURI, 'path');
-        stroke.setAttribute('d', 'M12 15V4m-4 4 4-4 4 4M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5');
-        glyph.append(stroke);
-        dropZone.prepend(glyph);
         const pickers = el('div', 'l2d-source-pickers');
         pickers.append(chooseFolder, chooseZip);
-        const guidance = el('div', 'l2d-workflow-next');
+        const installPane = el('section', 'l2d-install-pane');
+        installPane.setAttribute('aria-labelledby', 'figure-install-title');
+        const installCopy = el('div', 'l2d-source-copy');
+        const installTitle = el('div', 'l2d-source-title', t('安装形象', 'Install figure'));
+        installTitle.id = 'figure-install-title';
+        const guidance = el('div', 'l2d-workflow-next l2d-source-hint');
         guidance.setAttribute('role', 'status');
         const guidanceText = el('span', 'l2d-workflow-next-copy');
         const dressLink = wardrobeLink(el, t('前往装扮穿戴', 'Wear in Dress up'), 'l2d-btn sm l2d-workflow-dress');
         dressLink.hidden = true;
-        guidance.append(guidanceText, dressLink);
-        actions.append(pack, installNow);
-        bar.append(dropZone, pickers, folderInput, zipInput);
-        operation.append(intro, steps, bar, guidance, operationBottom);
+        guidance.append(guidanceText);
+        installCopy.append(installTitle, guidance);
+        actions.append(pack, installNow, dressLink);
+        installPane.append(installCopy, actions);
+        dropZone.append(source, pickers);
+        const lanes = el('div', 'l2d-import-lanes');
+        lanes.append(dropZone, installPane);
+        operation.append(lanes, folderInput, zipInput, operationBottom);
         let staged = null;
+        let hasChosenImport = false;
+        let sourceFeedback = '';
         let currentCover = null;
-        let installedReceipt = null;
         const completed = new Map();
         const installedSources = new Set();
         function stagedWorkflow(source) {
@@ -726,38 +652,40 @@ export default {
           const {mode, models, packs} = stagedWorkflow(staged);
           const count = models.length + packs.length;
           const request = mode === 'ai' && currentSubmission();
-          const isInstalled = Boolean(installedReceipt || count && installedSources.size === count);
-          const stage = isInstalled ? 2 : count ? 1 : 0;
-          for (const [index, step] of stepsUI.entries()) {
-            step.classList.toggle('done', index < stage);
-            if (index === stage) step.setAttribute('aria-current', 'step');
-            else step.removeAttribute('aria-current');
-          }
+          const isInstalled = count > 0 && installedSources.size === count;
           dressLink.hidden = !isInstalled;
-          const next = isInstalled ? t('已安装。前往 Coo 装扮，选中形象才会穿戴。', 'Installed. Open Coo Dress up and select the figure to wear it.')
-            : !count ? t('先选择素材。导入只识别文件，不会自动打包或安装。', 'Choose a source. Import identifies files without packing or installing them.')
+          pack.hidden = !count || isInstalled;
+          installNow.hidden = isInstalled || Boolean(count && mode !== 'direct');
+          installTitle.textContent = isInstalled ? t('形象已安装', 'Figure installed') : t('安装形象', 'Install figure');
+          installPane.classList.toggle('is-ready', Boolean(count && !isInstalled));
+          chooseFolder.classList.toggle('primary', !count && !state.busy);
+          const next = isInstalled ? t('在装扮页选中形象即可穿戴。', 'Select the figure in Dress up to wear it.')
+            : !count ? t('导入后可打包或安装。', 'Import a model to pack or install it.')
             : request?.error || request?.canRetry ? t('分析尚未完成。查看进展，或重新提交。', 'Analysis did not finish. Check progress or retry.')
             : request ? t('在「进展与结果」查看分析；如果需要确认，也在那边处理。', 'Check Progress & results for analysis and any decisions.')
             : completed.size === count ? t('已加入模型包。可以从下方编辑，或直接安装。', 'Added to the library. Edit below or install directly.')
             : mode === 'manual' ? t('先预览动作和表情，确认绑定后保存模型包。', 'Preview motions and expressions, then save your bindings to a pack.')
             : mode === 'ai' ? t('提交给 Coo 分析动作和表情，再到「进展与结果」查看方案。', 'Ask Coo to map motions and expressions, then review its proposal in Progress & results.')
             : !models.length ? t('加入模型包只保存到工作台；一键安装会同时安装到 Coo。', 'Add to library saves the pack here. Install now also installs it in Coo.')
-            : t('想直接穿戴，选「一键安装」；想先编辑或保留模型包，选「一键打包」。', 'Choose Install now to get it into Coo, or Pack models to save and edit first.');
-          if (guidanceText.textContent !== next) guidanceText.textContent = next;
+            : t('可直接安装，也可先打包编辑。', 'Install now, or pack it to edit later.');
+          if (guidanceText.textContent !== next) {
+            guidanceText.textContent = next;
+            guidance.title = next;
+          }
         }
         function paintImportButtons(count) {
           const {mode} = stagedWorkflow(staged);
           const direct = mode === 'direct';
           const request = mode === 'ai' && currentSubmission();
-          pack.classList.toggle('primary', !direct);
           pack.disabled = state.busy || !count || completed.size === count;
           pack.textContent = request?.canRetry ? t('重新提交分析','Retry analysis')
             : request ? (request.waiting?.length ? t('等待 Coo 分析','Awaiting Coo') : t('已生成方案','Proposal ready'))
               : mode === 'ai' ? t('提交 AI 适配','Submit to Coo')
                 : mode === 'manual' ? t('预览并绑定','Preview & bind') : packsOnlyLabel(staged);
-          installNow.hidden = !direct;
           installNow.disabled = state.busy || !count || installedSources.size === count;
           if (request && !request.error && !request.canRetry) pack.disabled = true;
+          pack.classList.toggle('primary', !direct && !pack.disabled);
+          installNow.classList.toggle('primary', direct && !installNow.disabled);
           paintGuidance();
         }
         function packsOnlyLabel(source) {
@@ -768,19 +696,20 @@ export default {
           const packs = staged?.packs ?? [];
           const count = models.length + packs.length;
           const names = [...models.map(m => m.title), ...packs.map(p => (zh ? p.nameZh : p.nameEn) || p.id)];
-          sourceTitle.textContent = count ? names.slice(0, 3).join('、') + (count > 3 ? t(` 等 ${count} 项`, ` and ${count - 3} more`) : '') : t('拖入模型或 ZIP', 'Drop a model folder or ZIP');
+          sourceTitle.textContent = count ? names.slice(0, 3).join('、') + (count > 3 ? t(` 等 ${count} 项`, ` and ${count - 3} more`) : '') : t('拖入模型文件夹或 ZIP', 'Drop a model folder or ZIP');
           sourceTitle.title = names.join('\n');
           const submission = currentSubmission();
           const aiHint = submission?.error ? t('提交失败 · 可重新提交分析', 'Submission failed · Retry analysis')
             : !submission ? t('准备好后提交 AI 适配', 'Submit for AI mapping when ready')
               : submission.waiting?.length ? t('已交给 Coo · 在「进展与结果」查看', 'Sent to Coo · See Progress & results')
                 : t('方案已生成 · 在「进展与结果」查看', 'Proposal ready · See Progress & results');
-          sourceHint.textContent = !count
-            ? t('点击此区域后，按 Ctrl+V 粘贴文件或目录路径', 'Click here, then press Ctrl+V to paste files or a local path')
+          sourceHint.textContent = sourceFeedback || (!count
+            ? t('支持 Live2D、BongoCat 和 Coo 形象包 · 可粘贴', 'Live2D, BongoCat and Coo figure packs. Paste is supported.')
             : stagedWorkflow(staged).mode === 'ai' ? aiHint
                 : installedSources.size === count ? t('已安装 · 在「进展与结果」继续', 'Installed · Continue in Progress & results')
                 : completed.size === count ? t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install')
-                  : t(`已识别 ${count} 项`, `${count} recognized`);
+                  : t(`已识别 ${count} 项`, `${count} recognized`));
+          sourceHint.title = sourceHint.textContent;
           dropZone.classList.toggle('ready', count > 0);
           dropZone.setAttribute('aria-disabled', String(state.busy));
           paintImportButtons(count);
@@ -795,14 +724,13 @@ export default {
         status.setAttribute('role', 'status');
         status.setAttribute('aria-live', 'polite');
         status.append(dot, spinner, statusText);
-        const resultButton = el('button', 'l2d-btn sm l2d-result-entry', t('进展与结果', 'Progress & results'));
-        resultButton.type = 'button';
+        const resultButton = figureControlButton(ctx, t('进展与结果', 'Progress & results'), {size:'sm'});
+        resultButton.classList.add('l2d-result-entry');
         resultButton.setAttribute('aria-haspopup', 'dialog');
         const statusGroup = el('div', 'l2d-status-group');
         const coverSlot = el('span', 'l2d-cover-slot'); coverSlot.append(skipCover);
-        statusGroup.append(status, coverSlot, resultButton);
-        const actionRow = el('div', 'l2d-action-row');
-        actionRow.append(statusGroup, actions); operationBottom.append(actionRow);
+        statusGroup.append(status, coverSlot);
+        operationBottom.append(statusGroup, resultButton);
         const resultBody = el('div', 'l2d-dialog-body l2d-results');
         const resultFeedback = el('div', 'l2d-result-feedback');
         const adaptationNote = el('div', 'l2d-adaptation-note');
@@ -850,7 +778,8 @@ export default {
         const libraryTitle = el('div', 'l2d-library-title');
         const countLabel = el('span', 'l2d-count', '—');
         libraryTitle.append(el('h3', null, t('模型包', 'Packs')), countLabel);
-        const search = el('input', 'l2d-input l2d-search');
+        const search = ctx.ui.input?.({type:'search', placeholder:t('搜索模型包', 'Search packs')}) ?? el('input', 'l2d-input');
+        search.classList.add('l2d-search');
         search.type = 'search'; search.placeholder = t('搜索模型包', 'Search packs');
         search.setAttribute('aria-label', search.placeholder);
         const sort = el('select', 'l2d-input l2d-sort');
@@ -859,16 +788,18 @@ export default {
           const option = el('option', null, label); option.value = value; sort.append(option);
         }
         const clearAll = el('button', 'l2d-btn sm quiet', t('清空旧打包', 'Clear old packs'));
-        head.append(libraryTitle, search, sort, clearAll);
-        sheet.body.appendChild(head);
+        const libraryTools = el('div', 'l2d-library-tools');
+        libraryTools.append(search, sort, clearAll, settingsButton);
+        head.append(libraryTitle, libraryTools);
+        const dashboard = el('div', 'l2d-workbench-tools');
+        dashboard.append(operation, head);
+        sheet.body.append(dashboard);
         const workspace = el('div', 'l2d-workspace');
         const assistDock = el('div', 'l2d-assist-dock');
         resultBody.append(assistDock);
         const grid = el('div', 'l2d-grid');
         grid.setAttribute('aria-label', t('模型包卡片', 'Pack cards'));
         workspace.append(grid); sheet.body.append(workspace);
-        search.addEventListener('input', renderGrid);
-        sort.addEventListener('change', renderGrid);
 
         const foot = el('footer', 'l2d-foot');
         const noticeEntry = el('button', 'l2d-notice-entry', t('须知', 'Notice'));
@@ -888,7 +819,8 @@ export default {
           append(line, tone) { rawLog.append(line, tone); if (tone === 'bad' || tone === 'warn') resultButton.classList.add('has-error'); } };
         logBody.append(logHead, log.el);
         resultBody.append(logBody);
-        resultButton.addEventListener('click', () => showPopup(t('进展与结果', 'Progress & results'), resultBody, {variant:'l2d-result-popup'}));
+        const popups = createWorkbenchPopups({ctx, shell, el, t, resultButton, resultBody, resultFeedback});
+        resultButton.addEventListener('click', () => popups.openResults());
         logClear.addEventListener('click', () => log.clear());
 
         function finishNotice(flow) {
@@ -909,7 +841,7 @@ export default {
           const flow = {resume, needsCore, accept, error, saving:false, handle:null};
           body.append(coreCard);
           body.append(error, buttons);
-          flow.handle = showPopup(t('须知', 'Notice'), body, {
+          flow.handle = popups.show(t('须知', 'Notice'), body, {
             variant:'l2d-notice-popup',
             locked:() => flow.saving,
             onClose() { if (noticeDialog === flow) noticeDialog = null; },
@@ -936,15 +868,20 @@ export default {
             if (disposed || state.busy) return;
             let dialog;
             const body = settingsForm(ctx, cfg, {
-              isDisposed: () => disposed,
+              isDisposed: () => disposed || ctx.signal?.aborted || !dialog?.el.open,
               onNotice: openNotice,
               onSaved: async () => {
                 if (disposed) return;
                 dialog?.dispose?.(); ui.toast(t('设置已保存', 'Settings saved'), 'ok');
-                await refresh();
+                await refresh().catch(error => { if (!disposed) log.append(text(error), 'warn'); });
               },
             });
-            dialog = showDialog(t('设置', 'Settings'), body);
+            dialog = openFigureDialog(shell, t('设置', 'Settings'), body, {
+              closeLabel:t('关闭','Close'), variant:'l2d-settings-popup', returnFocus:settingsButton,
+              onClose() { body.dispose(); settingsDialog = null; },
+              locked: () => body.hasAttribute('aria-busy'),
+            });
+            settingsDialog = dialog;
           } catch (error) { if (!disposed) ui.toast(text(error), 'bad'); }
           finally { settingsLoading = false; if (!disposed) settingsButton.disabled = state.busy; }
         }
@@ -962,7 +899,7 @@ export default {
           if (assistState.enabled && !assistTimer && ctx.interval) assistTimer = ctx.interval(async () => {
             if (disposed || state.busy || assistPolling) return;
             assistPolling = true;
-            try { const value = await ctx.invoke('assistState', []); if (!disposed) {
+            try { const value = await ctx.invoke('assistState', []); if (!disposed && !state.busy) {
               const completed = (value.plans || []).some(p=>p.status==='done' && !(assistState.plans || []).some(old=>old.id===p.id && old.status==='done'));
               if (completed) await refresh(); else paintAutomation(value);
             } }
@@ -1018,10 +955,10 @@ export default {
                 setBusy(true,t('处理方案…','Processing proposal…'));
                 try {
                   const result = await ctx.invoke(method,[plan.id]);
-                  if (method === 'assistApprove' && result.figureId) reportResult(t('安装完成','Installation complete'), [result.warning], false, result.figureId);
+                  if (method === 'assistApprove' && result.figureId) popups.reportResult(t('安装完成','Installation complete'), [result.warning], false, result.figureId);
                   await refresh();
                 }
-                catch(error){reportResult(t('处理方案失败，可以重试。','Could not process the proposal. Try again.'),[text(error)],true);log.append(text(error),'bad');await refresh().catch(()=>{});}
+                catch(error){popups.reportResult(t('处理方案失败，可以重试。','Could not process the proposal. Try again.'),[text(error)],true);log.append(text(error),'bad');await refresh().catch(()=>{});}
                 finally {setBusy(false);}
               }); actions.append(button);
             }
@@ -1037,27 +974,7 @@ export default {
           statusText.textContent = text;
           statusText.title = text;
           status.classList.toggle('bad', Boolean(bad));
-        }
-
-        function reportResult(heading, lines = [], bad = false, figureId) {
-          resultFeedback.replaceChildren();
-          installedReceipt = figureId || null;
-          paintGuidance();
-          if (heading) resultFeedback.append(el('strong', null, heading));
-          for (const line of lines) if (line) resultFeedback.append(el('p', null, line));
-          if (figureId) {
-            const row = el('div', 'l2d-install-next');
-            const dress = wardrobeLink(el, t('前往装扮穿戴', 'Wear in Dress up'), 'l2d-btn sm primary');
-            const configure = el('a', 'l2d-btn sm', t('打开模型设置', 'Open Model settings'));
-            configure.href = '#/provider/world%3Afigure/settings';
-            const feedback = el('p', 'l2d-install-feedback');
-            feedback.setAttribute('role', 'status');
-            feedback.textContent = t('穿戴后可在模型设置选择该形象，启用编排或语音口型。', 'Once worn, select the figure in Model settings to enable planning or audio lip sync.');
-            row.append(dress, configure);
-            resultFeedback.append(row, feedback);
-          }
-          resultFeedback.classList.toggle('has-error', bad);
-          resultButton.classList.toggle('has-error', bad);
+          status.setAttribute('aria-atomic','true');
         }
 
         /** 忙碌时：转圈 + 一条来回走的进度线 + 秒数。 */
@@ -1088,7 +1005,6 @@ export default {
           paintImportButtons(count);
           for (const b of grid.querySelectorAll('button')) b.disabled = on;
           for (const b of assistDock.querySelectorAll('button')) b.disabled = on;
-          for (const input of modal?.querySelectorAll('button, input, textarea, select') ?? []) input.disabled = on;
           status.classList.toggle('busy', on);
           progress.classList.toggle('on', on);
           if (on) {
@@ -1107,7 +1023,12 @@ export default {
 
         function paintStatus() {
           const bits = [];
-          if (state.installed?.target) bits.push(t('已安装 ', 'Installed ') + state.installed.target.split(/[\\/]/).pop());
+          if (state.installed?.target) {
+            const card = state.builds.find(build => build.id === state.installed.buildId);
+            const name = (zh ? card?.nameZh : card?.nameEn) || card?.nameZh || card?.nameEn
+              || state.installed.target.split(/[\\/]/).pop();
+            bits.push(t('最近安装 · ', 'Last installed · ') + name);
+          }
           else if (notice && !notice.acknowledged) bits.push(t('首次使用需确认须知','Read the notice before first use'));
           else if (notice && !coreReady()) bits.push(t('Live2D 运行组件待获取','Live2D runtime is missing'));
           if (!bits.length) bits.push(t('就绪', 'Ready'));
@@ -1122,138 +1043,39 @@ export default {
           renderGrid();
         }
 
-        function openCover(build, title) {
-          const body = el('div', 'l2d-cover-preview');
-          const image = el('img', 'l2d-large-cover'); image.src = build.thumb; image.alt = title;
-          const hint = el('p', 'l2d-hint', t('正在读取封面…', 'Loading the cover…'));
-          hint.setAttribute('role','status');
-          body.append(image, hint);
-          const handle = showPopup(title, body, {variant:'l2d-image-popup'});
-          ctx.invoke('coverPreview', [build.id]).then(result => {
-            if (!handle.el.open) return;
-            if (result?.image) { image.src = result.image; hint.textContent = ''; }
-            else hint.textContent = t('当前显示这份模型包的缩略图。', 'Showing this pack’s thumbnail.');
-          }).catch(error => {
-            if (handle.el.open) hint.textContent = t('大图读取失败，仍可查看缩略图。', 'Could not load the cover. The thumbnail is still shown. ') + text(error);
+        async function deletePack(id) {
+          if (state.busy) return;
+          const ok = await ui.confirm({
+            title: t('删除这份打包产物？', 'Delete this pack?'),
+            body: t('只删这一份打包，已安装的形象不受影响。', 'Only this pack folder is removed.'),
+            danger: true,
           });
+          if (!ok || disposed || state.busy) return;
+          setBusy(true, t('删除…', 'Deleting…'));
+          try {
+            const r = await ctx.invoke('remove', [id]);
+            if (disposed) return;
+            state.builds = r.builds ?? [];
+            forgetRemovedPacks();
+            paint();
+            log.append(t('已删除 ', 'Deleted ') + id, 'dim');
+            if (r.warn) popups.reportResult(t('已删除', 'Deleted'), [r.warn]);
+            ui.toast(r.warn || t('已删除', 'Deleted'), r.warn ? undefined : 'ok');
+          } catch (e) {
+            if (!disposed) ui.toast(text(e), 'bad');
+          } finally { setBusy(false); }
         }
 
-        function renderGrid() {
-          grid.replaceChildren();
-          countLabel.textContent = initialized ? String(state.builds.length) : '—';
-          clearAll.disabled = state.busy || state.builds.length < 2;
-          if (!initialized) {
-            const empty = el('div', 'l2d-empty');
-            empty.append(el('strong', null, startupFailed ? t('暂时无法读取模型包', 'Could not load packs') : t('正在读取模型包…', 'Loading packs…')));
-            if (startupFailed) {
-              const retry = el('button', 'l2d-btn', t('重新读取', 'Retry loading'));
-              retry.type = 'button';
-              retry.addEventListener('click', startWorkbench);
-              empty.append(retry);
-            }
-            grid.append(empty);
-            return;
-          }
-          if (!state.builds.length) {
-            const empty = el('div', 'l2d-empty');
-            empty.append(el('span', 'l2d-empty-mark', '◇'), el('strong', null, t('让一个新形象来到这里', 'Make room for a new figure')),
-              el('p', null, t('从上方导入模型，打包后即可安装。', 'Import a model above, then pack and install it.')));
-            grid.append(empty);
-            return;
-          }
-          const installedId = state.installed?.buildId;
-          const query = search.value.trim().toLocaleLowerCase();
-          const builds = state.builds.filter(b => [b.id, b.nameZh, b.nameEn].some(value => String(value || '').toLocaleLowerCase().includes(query)));
-          builds.sort((a, b) => sort.value === 'name' ? String(a.nameZh || a.nameEn || a.id).localeCompare(String(b.nameZh || b.nameEn || b.id), zh ? 'zh' : 'en') : b.at - a.at);
-          if (!builds.length) {
-            const empty = el('div', 'l2d-empty');
-            empty.append(el('strong', null, t('没有匹配的模型包', 'No matching packs')));
-            const reset = el('button', 'l2d-btn sm', t('清除搜索', 'Clear search'));
-            reset.type = 'button';
-            reset.addEventListener('click', () => { search.value = ''; renderGrid(); search.focus(); });
-            empty.append(reset); grid.append(empty);
-          }
-          const kindLabels = new Map([['live2d', 'Live2D'], ['bongocat', 'BongoCat']]);
-          for (const b of builds) {
-            const card = el('article', 'l2d-card l2d-model-card' + (installedId === b.id ? ' installed' : '') + (editingId === b.id ? ' selected' : ''));
-            card.dataset.id = b.id;
-            const shown = (zh ? b.nameZh : b.nameEn) || b.nameZh || b.nameEn || b.id.replace(/(-\d{6,})+$/, '');
-            if (b.thumb) {
-              const preview = el('button','l2d-card-cover');
-              preview.type = 'button';
-              preview.setAttribute('aria-label', t(`查看 ${shown} 的封面`, `View cover for ${shown}`));
-              preview.setAttribute('aria-haspopup','dialog');
-              preview.addEventListener('click', () => openCover(b, shown));
-              const img = doc.createElement('img');
-              img.src = b.thumb;
-              img.alt = ''; img.loading = 'lazy'; img.width = 160; img.height = 88;
-              preview.append(img); card.append(preview);
-            } else {
-              card.appendChild(el('div', 'empty', t('无封面', 'no cover')));
-            }
-            const kindLabel = kindLabels.get(b.kind);
-            if (kindLabel) card.append(el('span', 'l2d-card-kind', kindLabel));
-            const info = el('div', 'l2d-card-info');
-            const titleEl = el('button', 'title', shown);
-            titleEl.addEventListener('click', () => { if (!state.busy) openEdit(b, card, titleEl); });
-            titleEl.title = b.id;
-            info.appendChild(titleEl);
-            const metaRow = el('div', 'l2d-card-meta');
-            const metadata = `${(b.bytes / 1048576).toFixed(1)} MB · ${clock(b.at)}`;
-            const meta = el('span', 'meta', metadata);
-            meta.title = metadata;
-            metaRow.append(meta);
-            if (installedId === b.id) metaRow.append(el('span', 'tagline', t('已安装', 'Installed')));
-            info.append(metaRow);
-            card.appendChild(info);
-            const adaptation = adaptationDetails(b.adaptation);
-            if (adaptation) {
-              const details = el('button', 'l2d-adaptation-link', adaptation.title);
-              details.type = 'button';
-              details.setAttribute('aria-haspopup', 'dialog');
-              details.title = adaptation.title;
-              details.addEventListener('click', () => showPopup(t('适配详情','Adaptation details'), adaptation.detail));
-              info.append(details);
-            }
-
-            const install = el('button', 'l2d-btn sm l2d-install', t('安装', 'Install'));
-            install.addEventListener('click', () => run('install', b.id));
-            const cardActions = el('div', 'l2d-card-actions');
-            cardActions.appendChild(install);
-
-            const row = el('div', 'row');
-            const edit = el('button', 'l2d-btn sm', t('编辑', 'Edit'));
-            edit.addEventListener('click', () => { if (!state.busy) openEdit(b, card, edit); });
-            const del = el('button', 'l2d-btn sm danger', t('删除', 'Delete'));
-            del.addEventListener('click', async () => {
-              if (state.busy) return;
-              const ok = await ui.confirm({
-                title: t('删除这份打包产物？', 'Delete this pack?'),
-                body: t('只删这一份打包，已安装的形象不受影响。', 'Only this pack folder is removed.'),
-                danger: true,
-              });
-              if (!ok) return;
-              setBusy(true, t('删除…', 'Deleting…'));
-              try {
-                const r = await ctx.invoke('remove', [b.id]);
-                state.builds = r.builds ?? [];
-                forgetRemovedPacks();
-                paint();
-                log.append(t('已删除 ', 'Deleted ') + b.id, 'dim');
-                ui.toast(t('已删除', 'Deleted'), 'ok');
-              } catch (e) {
-                ui.toast(text(e), 'bad');
-              } finally { setBusy(false); }
-            });
-            del.classList.add('quiet');
-            if(b.manualAvailable){const bind=el('button','l2d-btn sm l2d-card-binding',b.id===state.browserBuildId?t('编辑中','Editing'):t('动作','Actions'));bind.dataset.buildId=b.id;bind.title=t('在浏览器中编辑动作与装扮','Edit actions and wardrobe in the browser');bind.addEventListener('click',()=>openBindings('manualOpenBuild',[b.id]));card.appendChild(bind);}
-            row.append(edit, del);
-            cardActions.appendChild(row);
-            card.appendChild(cardActions);
-            for (const button of card.querySelectorAll('button')) button.disabled = state.busy;
-            grid.appendChild(card);
-          }
-        }
+        const library = mountWorkbenchLibrary({
+          grid, search, sort, countLabel, clearAll, el, t, zh,
+          readState: () => ({state, initialized, startupFailed, editingId}),
+          actions: {
+            retry:startWorkbench, cover:popups.openCover, edit:openEdit, remove:deletePack,
+            adaptationDetails, showAdaptation:detail => popups.show(t('适配详情','Adaptation details'), detail),
+            install:id => run('install', id), bind:id => openBindings('manualOpenBuild', [id]), paintBinding:paintBindingButton,
+          },
+        });
+        const renderGrid = library.render;
 
         async function refresh() {
           const r = await ctx.invoke('list', []);
@@ -1299,17 +1121,33 @@ export default {
           try {
             const r = kind === 'install' ? await installBuild(id) : await ctx.invoke(kind, [state.dir]);
             if (disposed || !r) return;
-            reportResult(kind === 'install' ? t('安装完成','Installation complete') : `${label} ✓`, r.warn ? [r.warn] : [], false, r.figureId);
+            if (kind === 'install') {
+              for (const [key, buildId] of completed) {
+                if (buildId === id) installedSources.add(key);
+              }
+              const {models, packs} = stagedWorkflow(staged);
+              if (installedSources.size && installedSources.size === models.length + packs.length) {
+                sourceFeedback = '';
+                dropZone.classList.remove('bad');
+              }
+              paintSource();
+            }
+            popups.reportResult(kind === 'install' ? t('安装完成','Installation complete') : `${label} ✓`, r.warn ? [r.warn] : [], false, r.figureId);
             for (const line of r.log ?? []) log.append(line, 'dim');
             log.append(`✓ ${label} · ${((performance.now() - startedAt) / 1000).toFixed(1)}s`, 'plain');
             ui.toast(`${label} ✓`, 'ok');
             if (r.warn) log.append('! ' + r.warn, 'warn');
             await refresh().catch(e => log.append(t('操作已完成，列表刷新失败：', 'Completed, but the list could not refresh: ') + text(e), 'warn'));
-            if (kind === 'install' && r.figureId && !disposed && !popup) resultButton.click();
+            if (kind === 'install' && r.figureId && !disposed && !popups.isOpen()) {
+              popups.openResults(() => {
+                const card = [...grid.children].find(item => item.dataset.id === id);
+                return card?.querySelector('.l2d-install:not(:disabled)') ?? resultButton;
+              });
+            }
           } catch (e) {
             const s = text(e);
             say(t(`${label}失败 · 查看结果`, `${label} failed · See results`), true);
-            reportResult(t(`${label}失败，可以重试。`, `${label} failed. Try again.`),[s],true);
+            popups.reportResult(t(`${label}失败，可以重试。`, `${label} failed. Try again.`),[s],true);
             log.append(`✗ ${s}`, 'bad');
             ui.toast(`${label} ✗`, 'bad');
           } finally {
@@ -1318,13 +1156,36 @@ export default {
         }
 
         let bindingEditor = null;
-        let bindingOpening = false;
+        let bindingOpening = null;
         let browserSessionDialog = null;
+        function paintBindingButton(button) {
+          const opening = button.dataset.buildId === bindingOpening?.buildId;
+          const editing = button.dataset.buildId === state.browserBuildId;
+          button.querySelector('.l2d-card-binding-label').textContent = opening ? t('稍候','Wait') : editing ? t('编辑中','Editing') : t('动作','Actions');
+          button.title = opening ? t('正在打开动作编辑器','Opening the action editor') : t('在浏览器中编辑动作与装扮','Edit actions and wardrobe in the browser');
+          if (opening) {
+            button.setAttribute('aria-busy','true');
+            button.setAttribute('aria-label',button.title);
+          } else {
+            button.removeAttribute('aria-busy');
+            button.removeAttribute('aria-label');
+          }
+          button.setAttribute('aria-description', button.title);
+          if (bindingOpening) button.setAttribute('aria-disabled','true');
+          else button.removeAttribute('aria-disabled');
+        }
+        function paintBindingButtons() {
+          for (const button of grid.querySelectorAll('.l2d-card-binding')) paintBindingButton(button);
+        }
+        function stopBindingFeedback(opening) {
+          if (!opening) return;
+          opening.timer?.dispose();
+          opening.notice?.dispose?.();
+          opening.timer = opening.notice = undefined;
+        }
         function markBrowserEditor(buildId) {
           state.browserBuildId = buildId;
-          for (const button of grid.querySelectorAll('.l2d-card-binding')) {
-            button.textContent = button.dataset.buildId===buildId?t('编辑中','Editing'):t('动作','Actions');
-          }
+          paintBindingButtons();
         }
         function showBrowserSession(current) {
           if (browserSessionDialog) return;
@@ -1354,14 +1215,20 @@ export default {
           };
         }
         async function openBindings(method,args,onSaved) {
-          if (state.busy || bindingOpening || !ensureNotice(() => openBindings(method,args,onSaved), method === 'manualOpen')) return;
+          if (disposed || ctx.signal?.aborted || state.busy || bindingOpening || !ensureNotice(() => openBindings(method,args,onSaved), method === 'manualOpen')) return;
           if (bindingEditor && !bindingEditor.browser) return;
-          bindingOpening=true;
+          const opening = bindingOpening = {buildId:method === 'manualOpenBuild' ? args[0] : undefined};
           try {
+            paintBindingButtons();
+            if (opening.buildId) opening.timer = ctx.timeout?.(() => {
+              if (!disposed && !ctx.signal?.aborted && bindingOpening === opening) {
+                opening.notice = ui.toast(t('正在准备模型并打开浏览器…','Preparing the model and opening the browser…'));
+              }
+            }, 3000);
             const current = await ctx.invoke('manualBrowserStatus', []);
             if (disposed) return;
             if (current.status === 'open') { markBrowserEditor(current.buildId); showBrowserSession(current); return; }
-            const opened = await ctx.invoke('manualBrowserOpen', [method, args, zh ? 'zh' : 'en']);
+            const opened = await ctx.invoke('manualBrowserOpen', [method, args, zh ? 'zh' : 'en', readStudioTheme(ctx.root)]);
             if (disposed) return;
             if (opened.fallback) {
               ui.toast(t('未能打开浏览器，已切换到 Coo 内编辑。', 'Browser unavailable. Editing in Coo.'));
@@ -1396,8 +1263,13 @@ export default {
             };
             timer = win.setTimeout(poll, 1400);
           }
-          catch(error){ui.toast(text(error),'bad');}
-          finally{bindingOpening=false;if(bindingEditor?.closed)bindingEditor=null;}
+          catch (error) { if (!disposed && !ctx.signal?.aborted) ui.toast(text(error),'bad'); }
+          finally {
+            stopBindingFeedback(opening);
+            bindingOpening = null;
+            if (!disposed) paintBindingButtons();
+            if (bindingEditor?.closed) bindingEditor = null;
+          }
         }
         // ---------------- 编辑弹层 ----------------
         let modal = null;
@@ -1407,18 +1279,18 @@ export default {
         let cropEditor = null;
 
         function closeEdit() {
-          if (state.busy) return;
+          if (disposed || state.busy) return;
           if (modal) {
             const previousId = editingId;
             cropEditor?.dispose(); cropEditor = null;
             modal.close(); modal.remove(); modal = null; editingId = null;
             const previous = [...grid.querySelectorAll('.l2d-card')].find(card => card.dataset.id === previousId);
             previous?.classList.remove('selected');
-            (editReturnFocus?.isConnected ? editReturnFocus : previous?.querySelector('button.title'))?.focus({ preventScroll: true });
+            (previous?.querySelector(editReturnFocus) ?? search).focus({preventScroll:true});
           }
         }
 
-        async function openEdit(b, cardEl, trigger) {
+        async function openEdit(b, focusSelector) {
           if (state.busy || editLoading) return;
           if (modal && editingId === b.id) { modal.querySelector('[role="tab"][aria-selected="true"], input')?.focus(); return; }
           editLoading = true;
@@ -1426,11 +1298,11 @@ export default {
             const discard = await ui.confirm({ title: t('放弃未保存的修改？', 'Discard unsaved edits?'), body: t('切换到另一份模型包。', 'Open the other pack.') });
             if (!discard || disposed || state.busy) { editLoading = false; return; }
           }
-          editReturnFocus = trigger;
           const d = await ctx.invoke('detail', [b.id]).catch(() => null);
           editLoading = false;
           if (disposed || state.busy) return;
           if (!d) { ui.toast(t('读不到这份打包的信息', 'Cannot read this pack'), 'bad'); return; }
+          editReturnFocus = focusSelector;
           cropEditor?.dispose();
           const framing = cropEditor = d.crop ? createCropEditor({
             doc, t, initial:d.crop,
@@ -1633,8 +1505,9 @@ export default {
             if (state.busy) return;
             if (!fields.name.value.trim()) { error.textContent = t('请输入名字后保存。', 'Enter a name and try again.'); showEditInfo(); fields.name.focus({preventScroll:true}); return; }
             error.textContent = '';
-            save.disabled = true;
+            close.disabled = cancel.disabled = save.disabled = true;
             setBusy(true, t('保存…', 'Saving…'));
+            info.inert = true;
             if (editScroll) editScroll.inert = true;
             if (editTabs) editTabs.inert = true;
             try {
@@ -1651,25 +1524,27 @@ export default {
                   ? {gaze:updatedGaze} : {}),
               };
               if (Object.keys(patch).length) await ctx.invoke('edit', [b.id, patch]);
-              // 先就地更新卡片，再拉一次完整列表
-              if (cardEl && name) {
-                const titleEl = cardEl.querySelector('.title');
-                if (titleEl) titleEl.textContent = name;
-              }
+              if (disposed) return;
+              const currentCard = [...grid.children].find(item => item.dataset.id === b.id);
+              const title = currentCard?.querySelector('button.title');
+              if (title) title.textContent = name;
               if (patch.nameZh !== undefined) b.nameZh = name;
               if (patch.nameEn !== undefined) b.nameEn = name;
+              await refresh().catch(() => {});
+              if (disposed) return;
               setBusy(false);
               closeEdit();
               ui.toast(t('已保存', 'Saved'), 'ok');
               log.append(t('编辑 · ', 'Edited · ') + b.id, 'dim');
-              refresh().catch(() => {});
             } catch (e) {
-              error.textContent = t('保存失败，可以重试。', 'Could not save. Try again. ') + text(e);
+              if (!disposed) error.textContent = t('保存失败，可以重试。', 'Could not save. Try again. ') + text(e);
             } finally {
-              save.disabled = false;
+              close.disabled = cancel.disabled = save.disabled = false;
+              info.inert = false;
               if (editScroll) editScroll.inert = false;
               if (editTabs) editTabs.inert = false;
               setBusy(false);
+              if (!disposed && modal?.open && error.textContent) save.focus({preventScroll:true});
             }
           });
 
@@ -1679,193 +1554,54 @@ export default {
           fields.name.focus({preventScroll:true});
         }
 
-        // ---------------- 导入 ----------------
-        const MAX_MB = 32;
-
-        function toBase64(buffer) {
-          const bytes = new Uint8Array(buffer);
-          const parts = [];
-          const chunk = 0x8000;
-          for (let i = 0; i < bytes.length; i += chunk) {
-            parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunk)));
-          }
-          return btoa(parts.join(''));
-        }
-
-        /** 面板拼的文件夹包：与桌宠同一套格式（路径长度 + 路径 + 内容长度 + 内容）。 */
-        function bundle(files) {
-          const enc = new TextEncoder();
-          const u32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); return b; };
-          return new Blob(files.flatMap(({ path, file }) => {
-            const name = enc.encode(path);
-            return [u32(name.length), name, u32(file.size), file];
-          }));
-        }
-
-        function modelEntryName(name) {
-          const lower = name.toLowerCase();
-          return lower === 'figure.json' || lower.endsWith('.model3.json');
-        }
-
-        /** Find model or pack roots before uploading a selected folder, up to three levels deep. */
-        function packFiles(files, depth = 3) {
-          const dirs = [...new Set(files
-            .map((f) => f.path.split('/'))
-            .filter((p) => {
-              return p.length - 2 <= depth && modelEntryName(p[p.length - 1] || '');
-            })
-            .map((p) => p.slice(0, -1).join('/')))]
-            .sort((a, b) => a.length - b.length);
-          const roots = dirs.filter((d, i) => !dirs.slice(0, i).some((r) => d.startsWith(r + '/')));
-          if (!roots.length) return [];
-          return files.filter((f) => roots.some((r) => (r ? f.path.startsWith(r + '/') : true)));
-        }
-
-        async function droppedFiles(entry, path, depth) {
-          const list = [];
-          const reader = entry.createReader();
-          for (let batch; (batch = await new Promise((ok, bad) => reader.readEntries(ok, bad))).length;) list.push(...batch);
-          const inPack = depth === Infinity || list.some((e) => e.isFile && modelEntryName(e.name));
-          const out = [];
-          for (const e of list) {
-            if (e.isFile && inPack) out.push({ path: `${path}/${e.name}`, file: await new Promise((ok, bad) => e.file(ok, bad)) });
-            else if (e.isDirectory && (inPack || depth > 0)) out.push(...await droppedFiles(e, `${path}/${e.name}`, inPack ? Infinity : depth - 1));
-          }
-          return out;
-        }
-
-        function cancelOwnedImport(token = activeImportToken) {
-          if (!token) return;
-          if (disposed && ctx.notifyOnUnmount) ctx.notifyOnUnmount('importCancel', [token]);
-          else ctx.invoke('importCancel', [token]).catch(() => {});
-        }
-
         const importView = {
           loading(label) { sourceTitle.textContent = label; sourceHint.textContent = ''; },
           note(title, detail, bad) {
-            staged = null; completed.clear(); installedSources.clear(); paintSource();
-            sourceHint.textContent = [detail || title, t('可重新选择文件夹或 ZIP','Choose a folder or ZIP again')].join(' · ');
-            sourceHint.title = detail || title;
-            reportResult(title,[detail,t('可重新选择文件夹、ZIP，或粘贴模型路径。','Choose a folder or ZIP again, or paste the model path.')],Boolean(bad));
+            clearSource();
+            sourceFeedback = [detail || title, t('可重新选择文件夹或 ZIP','Choose a folder or ZIP again')].join(' · ');
+            paintSource();
+            popups.reportResult(title,[detail,t('可重新选择文件夹、ZIP，或粘贴模型路径。','Choose a folder or ZIP again, or paste the model path.')],Boolean(bad));
             dropZone.classList.toggle('bad', Boolean(bad));
           },
           result(result) {
-            if (disposed) { cancelOwnedImport(result.token); return; }
-            activeImportToken = result.token;
+            if (disposed) { importTransfer.cancelOwnedImport(result.token); return; }
+            importTransfer.ownImport(result.token);
             staged = result; completed.clear(); installedSources.clear(); dropZone.classList.remove('bad');
+            sourceFeedback = '';
             if (result.submission) {
               assistState = { ...assistState, submissions: [...(assistState.submissions || []).filter(r => r.token !== result.token), result.submission] };
             }
-            showAdaptation(null); paintSource();
+            showAdaptation(null);
             const count = (result.models?.length || 0) + (result.packs?.length || 0);
             const problems = (result.problems || []).map(p => p.reason).filter(Boolean);
             if (!count) {
               const reason = problems.join('；') || t('未找到 Live2D 模型或现成形象包', 'No Live2D model or figure pack found');
-              sourceHint.textContent = reason; sourceHint.title = reason;
-              reportResult(t('未找到可导入的模型，可重新选择。','No model could be imported. Choose again.'),[reason],true);
+              sourceFeedback = reason;
+              popups.reportResult(t('未找到可导入的模型，可重新选择。','No model could be imported. Choose again.'),[reason],true);
             } else {
-              reportResult(t(`已识别 ${count} 项`, `${count} recognized`),problems);
+              popups.reportResult(t(`已识别 ${count} 项`, `${count} recognized`),problems);
               if (assistState.enabled) {
                 void ctx.invoke('assistState', []).then(value => {
                   if (!disposed && staged === result && typeof value?.enabled === 'boolean') paintAutomation(value);
                 }).catch(() => {});
               }
             }
+            paintSource();
           },
         };
 
         function clearSource() {
+          hasChosenImport = true;
+          sourceFeedback = '';
           staged = null; completed.clear(); installedSources.clear(); showAdaptation(null); paintSource();
-          reportResult('');
+          popups.reportResult('');
           dropZone.classList.remove('bad');
         }
 
-        async function stageZip(file) {
-          if (state.busy || disposed) return;
-          if (file.size > MAX_MB * 1048576) { importView.note(t('ZIP 太大', 'ZIP too large'), t('请解压后选择文件夹', 'Extract it and choose the folder'), true); return; }
-          clearSource(); setBusy(true, t('读取 ZIP…', 'Reading ZIP…'));
-          importView.loading(t('解包中…', 'Unpacking…'));
-          try {
-            const bytes = await file.arrayBuffer();
-            if (disposed) return;
-            if (bytes.byteLength > MAX_MB * 1048576) throw new Error(t('ZIP 超过 32 MB，请解压后导入文件夹', 'ZIP exceeds 32 MB; import the extracted folder'));
-            importView.result(await ctx.invoke('importStage', [toBase64(bytes), 'zip']));
-          } catch (error) { if (!disposed) importView.note(t('导入失败', 'Import failed'), text(error), true); }
-          finally { setBusy(false); }
-        }
-
-        async function stageFolder(files, view) {
-          if (state.busy || disposed) return;
-          const picked = packFiles(files, 3);
-          if (!picked.length) { view.note(t('这里没有模型包', 'No model pack here'), t('没有找到 Live2D 模型或现成形象包', 'No Live2D model or figure pack found'), false); return; }
-          if (picked.length > 20000 || picked.reduce((n, f) => n + (Number(f.file.size) || 0), 0) > 512 * 1048576) { view.note(t('目录过大', 'Folder too large'), t('请改用粘贴本机目录路径', 'Paste its local directory path instead'), true); return; }
-          clearSource(); setBusy(true, t('读取文件夹…', 'Reading folder…'));
-          view.loading(t('读取文件夹…', 'Reading folder…'));
-          let token;
-          try {
-            token = (await ctx.invoke('importBegin', [])).token;
-            activeImportToken = token;
-            let batch = [], bytes = 0;
-            const flush = async () => { if (batch.length) { await ctx.invoke('importAppend', [token, batch]); batch = []; bytes = 0; } };
-            for (const item of picked) {
-              if (disposed) return;
-              if (item.file.size > 4 * 1048576 && typeof item.file.slice === 'function') {
-                await flush();
-                for (let offset = 0; offset < item.file.size; offset += 2 * 1048576) {
-                  const data = await item.file.slice(offset, offset + 2 * 1048576).arrayBuffer();
-                  if (disposed) return;
-                  await ctx.invoke('importAppendChunk', [token, {path:item.path,offset,total:item.file.size,b64:toBase64(data)}]);
-                }
-              } else {
-                const data = await item.file.arrayBuffer();
-                if (disposed) return;
-                const b64 = toBase64(data); batch.push({path:item.path,b64}); bytes += b64.length;
-                if (bytes >= 4 * 1048576) await flush();
-              }
-            }
-            await flush();
-            if (!disposed) view.result(await ctx.invoke('importFinish', [token, true]));
-          } catch (error) { if (!disposed) view.note(t('导入失败', 'Import failed'), text(error), true); if (token) cancelOwnedImport(token); }
-          finally { if (disposed && token) cancelOwnedImport(token); setBusy(false); }
-        }
-
-        async function importPaths(paths) {
-          if (state.busy || disposed || !paths.length) return;
-          clearSource();
-          setBusy(true, t('读取…', 'Reading…'));
-          importView.loading(t('识别模型…', 'Recognizing model…'));
-          try { const result = await ctx.invoke('importPaths', [paths]); if (!disposed) importView.result(result); }
-          catch (e) { if (!disposed) importView.note(t('导入失败', 'Import failed'), text(e), true); }
-          finally { setBusy(false); }
-        }
-
-        function textPaths(value) {
-          const paths = [];
-          for (let path of String(value || '').split(/\r?\n/)) {
-            path = path.trim().replace(/^["']|["']$/g, '');
-            if (/^file:/i.test(path)) {
-              try {
-                const url = new URL(path);
-                if (url.hostname && url.hostname !== 'localhost') continue;
-                path = decodeURIComponent(url.pathname);
-                if (/^\/[a-z]:\//i.test(path)) path = path.slice(1);
-              } catch { continue; }
-            }
-            if (!/[\x00-\x1f]/.test(path) && (/^[a-z]:[\\/]/i.test(path) || path.startsWith('/'))) paths.push(path);
-          }
-          return [...new Set(paths)].slice(0, 16);
-        }
-
-        async function importFiles(files) {
-          if (state.busy || disposed || !files.length) return;
-          const local = files.map(f => f.path || f.file.path).filter(p => /^[a-z]:[\\/]/i.test(p || '') || p?.startsWith('/'));
-          if (local.length === files.length) return importPaths(local);
-          if (files.length === 1 && /\.zip$/i.test(files[0].path)) return stageZip(files[0].file);
-          if (files.length === 1 && /\.json$/i.test(files[0].path)) {
-            importView.note(t('缺少同目录资源', 'Sibling files required'), t('请选择入口文件的完整路径，或拖入整个模型文件夹', 'Choose the entry file by its local path, or drop the whole model folder'), true); return;
-          }
-          return stageFolder(files, importView);
-        }
+        const importTransfer = mountWorkbenchImport({
+          ctx, t, chooseFolder, chooseZip, folderInput, zipInput, dropZone, importView, clearSource, setBusy,
+          isBusy: () => state.busy, isDisposed: () => disposed,
+        });
 
         skipCover.addEventListener('click', async () => {
           const cover = currentCover;
@@ -1892,17 +1628,22 @@ export default {
             setBusy(true,t('交给 Coo 分析…','Asking Coo to analyze…'));
             try {
               const result = await ctx.invoke('assistAnalyze',[source.token,models.map(m=>m.dir),packs.map(p=>p.dir)]);
-              reportResult(result.queued===false?t('已提交，请等待 Coo 的方案','Already submitted; wait for Coo'):t('已交给 Coo 分析','Sent to Coo for analysis'));
+              popups.reportResult(result.queued===false?t('已提交，请等待 Coo 的方案','Already submitted; wait for Coo'):t('已交给 Coo 分析','Sent to Coo for analysis'));
               await refresh().catch(error=>log.append(text(error),'warn'));
             } catch (error) {
-              reportResult(t('提交失败，可以重新提交。','Submission failed. Try again.'),[text(error)],true);
+              popups.reportResult(t('提交失败，可以重新提交。','Submission failed. Try again.'),[text(error)],true);
               log.append(text(error),'bad'); await refresh().catch(()=>{});
             }
             finally{setBusy(false);}return;
           }
           if (mode === 'manual' && models.length) {
             const next = newModels[0];
-            if(next) { await openBindings('manualOpen',[staged.token,next.dir],result=>{completed.set('importBuild:'+next.dir,result.buildId);}); return; }
+            if (next) {
+              await openBindings('manualOpen', [source.token, next.dir], result => {
+                if (staged === source) completed.set('importBuild:' + next.dir, result.buildId);
+              });
+              return;
+            }
           }
           const pending = [
             ...models.map(item => ({ ...item, method: 'importBuild' })),
@@ -1952,18 +1693,23 @@ export default {
           try { await refresh(); }
           catch (e) { log.append('! ' + text(e), 'warn'); }
           finally { setBusy(false); }
-          if (disposed) { cancelOwnedImport(token); return; }
-          sourceHint.textContent = failures.length
+          if (disposed) return;
+          sourceFeedback = failures.length
             ? t(`${failures.length} 项失败；再次点击只重试未完成项，原因见结果`, `${failures.length} failed; click again to retry unfinished items; see results`)
-            : deferred ? t(`${deferred} 项已打包，等待确认替换`, `${deferred} packed; awaiting replacement approval`)
-            : installAfterBuild ? t('已安装 · 在「进展与结果」继续', 'Installed · Continue in Progress & results')
-            : t('已加入模型包列表，可编辑或安装', 'Added to packs; edit or install');
-          sourceHint.title = sourceHint.textContent;
+            : deferred ? t(`${deferred} 项已打包；再次点击可确认替换`, `${deferred} packed; click again to confirm replacement`)
+            : '';
+          paintSource();
           dropZone.classList.toggle('bad', failures.length > 0);
           const done = installAfterBuild ? t('安装完成', 'Installation complete') : t('打包完成', 'Packing complete');
-          reportResult(failures.length || deferred ? sourceHint.textContent : done, [...failures,...warnings], failures.length > 0, newInstalls.length === 1 ? newInstalls[0] : undefined);
+          popups.reportResult(sourceFeedback || done, [...failures,...warnings], failures.length > 0, newInstalls.length === 1 ? newInstalls[0] : undefined);
           if (newInstalls.length > 1) resultFeedback.append(wardrobeLink(el, t('打开装扮', 'Open Dress up')));
-          if (newInstalls.length && !popup) resultButton.click();
+          if (newInstalls.length && !popups.isOpen()) {
+            popups.openResults(() => {
+              if (!dressLink.hidden) return dressLink;
+              if (!installNow.hidden && !installNow.disabled) return installNow;
+              return resultButton;
+            });
+          }
         }
 
         function accessibleModal(node, title) {
@@ -1971,82 +1717,14 @@ export default {
           node.setAttribute('aria-modal', 'true');
           node.setAttribute('aria-label', title);
           node.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') { e.preventDefault(); closeEdit(); }
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeEdit(); }
           });
           node.addEventListener('cancel', (e) => { e.preventDefault(); closeEdit(); });
         }
 
         // ---------------- 绑定 ----------------
-        // Browser inputs are owned by the Coo window and open its native system dialogs.
-        chooseFolder.addEventListener('click', () => { if (!state.busy) folderInput.click(); });
-        chooseZip.addEventListener('click', () => { if (!state.busy) zipInput.click(); });
-        folderInput.addEventListener('change', async () => {
-          if (disposed || state.busy) return;
-          const files = [...(folderInput.files ?? [])].map(file => ({ path: file.webkitRelativePath || file.name, file }));
-          if (!files.length) return;
-          try { await stageFolder(files, importView); }
-          catch (e) { importView.note(t('导入失败', 'Import failed'), text(e), true); }
-          finally { folderInput.value = ''; }
-        });
-        zipInput.addEventListener('change', async () => {
-          if (disposed || state.busy) return;
-          try { await importFiles([...(zipInput.files ?? [])].map(file => ({ path: file.name, file }))); }
-          catch (e) { importView.note(t('导入失败', 'Import failed'), text(e), true); }
-          finally { zipInput.value = ''; }
-        });
         pack.addEventListener('click', () => buildSources());
         installNow.addEventListener('click', () => buildSources(true));
-        dropZone.addEventListener('click', () => dropZone.focus({ preventScroll: true }));
-        dropZone.addEventListener('paste', async (event) => {
-          event.preventDefault();
-          if (state.busy) return;
-          const data = event.clipboardData;
-          const clipboardFiles = [...(data?.files ?? [])];
-          const clipboardText = data?.getData('text/plain') || data?.getData('text/uri-list');
-          try {
-            let paths = textPaths(clipboardText);
-            if (!paths.length) {
-              setBusy(true, t('读取剪贴板…', 'Reading clipboard…'));
-              try { paths = (await ctx.invoke('clipboard', [])).paths ?? []; }
-              catch (e) { if (!clipboardFiles.length) throw e; }
-              finally { setBusy(false); }
-            }
-            if (disposed) return;
-            if (paths.length) return await importPaths(paths);
-            const files = clipboardFiles.map(file => ({ path: file.name, file }));
-            if (files.length) return await importFiles(files);
-            importView.note(t('未读到模型', 'No model found'), t('请复制文件、文件夹，或其完整路径后粘贴', 'Copy files, a folder, or their full local path, then paste'), false);
-          } catch (e) { importView.note(t('粘贴失败', 'Paste failed'), text(e), true); }
-        });
-        dropZone.addEventListener('dragover', event => { event.preventDefault(); if (!state.busy) dropZone.classList.add('over'); });
-        dropZone.addEventListener('dragleave', event => { if (!dropZone.contains(event.relatedTarget)) dropZone.classList.remove('over'); });
-        dropZone.addEventListener('drop', async event => {
-          event.preventDefault(); dropZone.classList.remove('over');
-          if (state.busy || disposed) return;
-          const data = event.dataTransfer;
-          if (!data) return;
-          // Capture all handles synchronously; the drag data store closes after this event.
-          const paths = textPaths(data.getData('text/plain') || data.getData('text/uri-list'));
-          const entries = [...(data.items ?? [])].filter(item => item.kind === 'file').map(item => item.webkitGetAsEntry?.()).filter(Boolean);
-          const plain = [...(data.files ?? [])].map(file => ({path:file.name,file}));
-          if (paths.length) return importPaths(paths);
-          setBusy(true, t('读取拖入内容…', 'Reading dropped files…'));
-          try {
-            const files = [];
-            for (const entry of entries) {
-              if (disposed) return;
-              if (entry.isDirectory) files.push(...await droppedFiles(entry, entry.name, 3));
-              else files.push({path:entry.name,file:await new Promise((ok,bad)=>entry.file(ok,bad))});
-            }
-            setBusy(false);
-            if (!disposed) {
-              const captured = files.length ? files : plain;
-              if (!captured.length) throw new Error(t('未读到文件，请拖入模型文件夹或 ZIP', 'No files found; drop a model folder or ZIP'));
-              await importFiles(captured);
-            }
-          } catch (error) { if (!disposed) importView.note(t('导入失败', 'Import failed'), text(error), true); }
-          finally { setBusy(false); }
-        });
         clearAll.addEventListener('click', async () => {
           if (state.busy) return;
           const ok = await ui.confirm({
@@ -2054,17 +1732,22 @@ export default {
             body: t('保留最新一份，其余打包目录直接删除。已安装的形象不受影响。', 'Keeps the newest pack; installed figures stay.'),
             danger: true,
           });
-          if (!ok) return;
+          if (!ok || disposed || state.busy) return;
           setBusy(true, t('清理…', 'Clearing…'));
           try {
             const r = await ctx.invoke('clearAll', []);
+            if (disposed) return;
             state.builds = r.builds ?? [];
             forgetRemovedPacks();
             paint();
             log.append(t('清空旧打包 · 删除 ', 'Cleared ') + r.removed + t(' 份', ' packs'), 'dim');
-            ui.toast(t('已清空', 'Cleared'), 'ok');
+            const failures = r.failures ?? [];
+            const warnings = [...failures, r.warn].filter(Boolean);
+            const heading = failures.length ? t('有打包目录未删除', 'Some pack folders could not be deleted') : t('已清空', 'Cleared');
+            if (warnings.length) popups.reportResult(heading, warnings, failures.length > 0);
+            ui.toast(failures.length ? heading : r.warn || heading, failures.length ? 'bad' : r.warn ? undefined : 'ok');
           } catch (e) {
-            ui.toast(text(e), 'bad');
+            if (!disposed) ui.toast(text(e), 'bad');
           } finally { setBusy(false); }
         });
 
@@ -2092,15 +1775,13 @@ export default {
           startupTimer = null;
           if (disposed || ctx.signal?.aborted) return;
           try {
-            const [coreState, initial, cfg] = await Promise.all([
-              ctx.invoke('core', []), ctx.invoke('state', []), ctx.invoke('settings', []),
+            const [coreState, initial] = await Promise.all([
+              ctx.invoke('core', []), ctx.invoke('state', []),
             ]);
             if (disposed) return;
             await refresh();
             if (disposed) return;
             core = coreState;
-            currentAppearance = normalizeAppearance(cfg);
-            applyAppearance(ctx.root, cfg);
             notice = initial.notice;
             version = initial.version;
             paintCore();
@@ -2113,7 +1794,10 @@ export default {
             } else {
               setBusy(false);
               const imported = await ctx.invoke('takeDesktopImport', []).catch(() => null);
-              if (!disposed && !activeImportToken && typeof imported?.token === 'string' && Array.isArray(imported.models)) importView.result(imported);
+              if (typeof imported?.token === 'string' && Array.isArray(imported.models)) {
+                if (!disposed && !hasChosenImport && !state.busy) importView.result(imported);
+                else importTransfer.cancelOwnedImport(imported.token);
+              }
             }
             if (recovering || attempt) ctx.refresh?.().catch(() => {});
           } catch (error) {
@@ -2144,25 +1828,23 @@ export default {
         return { dispose() {
           if (disposed) return;
           disposed = true;
+          stopWatchingStyles();
           if (startupTimer?.dispose) startupTimer.dispose();
           else if (startupTimer != null) win.clearTimeout(startupTimer);
           stopTicker();
           stopResume();
           assistTimer?.dispose?.();
+          stopBindingFeedback(bindingOpening);
           bindingEditor?.dispose?.();
           browserSessionDialog?.dispose();
           cropEditor?.dispose(); cropEditor = null;
           modal?.close(); modal?.remove();
-          popup?.dispose(); overlay?.dispose?.();
+          popups.dispose(); settingsDialog?.dispose();
           observer?.disconnect(); win.removeEventListener('resize', resize);
-          if (sharedHeader) {
-            if (sharedHeader.workbench === openVersion) sharedHeader.workbench = null;
-            versionCorner.disabled = false;
-          } else versionCorner.remove();
           shell.remove();
-          cancelOwnedImport();
+          importTransfer.dispose();
+          library.dispose();
           ctx.root.removeAttribute('aria-busy');
-          restoreAppearance();
         } };
       },
     },

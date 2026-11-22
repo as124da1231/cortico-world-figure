@@ -39,6 +39,6 @@ node workbench/tools/convert.mjs --model 'D:\models\example' --core 'D:\Coo-data
 
 ## 产物与许可
 
-形象包包含 `figure.json`、`figure.js`、`models/`、`backends/` 和 `sdk/`。公共 puppet 引擎由 Coo 通过 `opts.kit` 提供，原生 `.moc3` 读取保留旧宿主的 Base64 回退。
+形象包包含 `figure.json`、`figure.js`、`models/`、`backends/` 和 `sdk/`。公共 puppet 引擎由 Coo 通过 `opts.kit` 提供。新包直接读取原始 `model.moc3`，需要 Coo 0.2.14 或更新版本。渲染器仍支持已有形象包声明的 Base64 模型。
 
 扩展不附带 Cubism Core 二进制。用户从官方获取并校验后，打包会将 Core 复制进形象包，因此生成包仅供本机使用，请勿上传、分享或再次分发。模型素材与第三方组件分别遵循原许可，见 `NOTICE`、`pack/sdk/` 与 `pack/vendor/soullink/LICENSE`。

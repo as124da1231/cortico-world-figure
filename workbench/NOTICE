@@ -11,11 +11,13 @@ Copyright (C) 2026 as124da1231
    上游：AGPL-3.0-or-later，含第 7 节 Steamworks 附加许可；版权属于 Pal AI Lab。
    各目录 LICENSE 保留上游原文，来源和修改说明见各目录 README。
    Kit 副本供开发／临时预览；正式形象包不复制该副本，而由 Coo 的 opts.kit 提供引擎。
+   tools/theme-palette.mjs 的色值来自 Coo 0.2.23 内置大肥鱼的形象清单（web/whale/figure.json）。
 
 2. SoulLink Emotion Engine 0.2.0-beta.1
    文件：pack/vendor/soullink/；许可：Apache-2.0，原文见该目录 LICENSE。
    Copyright 2026 Soullink Emotion contributors。
    上游及集成说明见该目录 README；保留原有构建产物、版权和许可，不改为 AGPL。
+   生成形象包时压缩该引擎的 JavaScript，保留模块接口、版权与许可文件。
 
 3. Live2D Cubism SDK for Web
    Framework 和着色器不随扩展 npm 包分发。源自 Live2D 官方 CubismWebFramework 5-r.5。

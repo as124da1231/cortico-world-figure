@@ -1,6 +1,6 @@
 const figurePreviewChoices = t => [['1024','1024 px'],['2048','2048 px'],['unlimited',t('无上限','Unlimited')]];
 
-function openFigureDialog(parent, title, body, { closeLabel, variant = '', onClose, locked = () => false } = {}) {
+function openFigureDialog(parent, title, body, { closeLabel, variant = '', onClose, returnFocus, locked = () => false } = {}) {
   const doc = parent.ownerDocument;
   const previous = doc.activeElement;
   const dialog = doc.createElement('dialog');
@@ -20,7 +20,8 @@ function openFigureDialog(parent, title, body, { closeLabel, variant = '', onClo
     closed = true;
     dialog.close(); dialog.remove();
     onClose?.();
-    previous?.focus?.({preventScroll:true});
+    const target = typeof returnFocus === 'function' ? returnFocus() : returnFocus ?? previous;
+    if (target?.isConnected) target.focus?.({preventScroll:true});
   }
   const requestClose = () => { if (!locked()) dispose(); };
   close.addEventListener('click', requestClose);
@@ -112,6 +113,33 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     toolbar.append(previewModes,replay,reset,resolutionLabel,retry);
     stage.append(hint,toolbar);
   }
+  let editorNavigation;
+  function showEditorPane(next) {
+    if (!editorNavigation) return;
+    layout.dataset.editorPane = next;
+    for (const control of editorNavigation.children) {
+      control.setAttribute('aria-pressed', String(control.dataset.pane === next));
+    }
+  }
+  if (studio) {
+    editorNavigation = el('div','figure-editor-navigation');
+    editorNavigation.setAttribute('role','group');
+    editorNavigation.setAttribute('aria-label',t('编辑面板','Editor panes'));
+    for (const [key, name, target] of [
+      ['targets', t('绑定目标','Binding targets'), leftShell],
+      ['resources', t('原生资源','Native resources'), right],
+    ]) {
+      target.id = `figure-studio-${key}`;
+      const control = el('button','l2d-btn sm',name);
+      control.type = 'button';
+      control.dataset.pane = key;
+      control.setAttribute('aria-controls', target.id);
+      control.onclick = () => showEditorPane(key);
+      editorNavigation.append(control);
+    }
+    layout.append(editorNavigation);
+    showEditorPane('targets');
+  }
   layout.append(leftShell,stage,right);
   studio?.mount({stage,gallery,toolbar,playbackControls,resolutionLabel,onFailure(message){
     if(closed)return;
@@ -187,13 +215,14 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   }
   async function pollSaveProgress(sequence){
     if(!alive()||!saving||sequence!==saveSequence)return;
-    let progress;
-    try{progress=await ctx.invoke('manualSaveProgress',[data.token]);}
-    catch{return;}
-    if(!alive()||!saving||sequence!==saveSequence)return;
-    const index=saveStages.findIndex(([stage])=>stage===progress?.stage);
-    if(index>saveStage){saveStage=index;paintSaveProgress();}
-    saveProgressTimer=win.setTimeout(()=>void pollSaveProgress(sequence),450);
+    try{
+      const progress=await ctx.invoke('manualSaveProgress',[data.token]);
+      if(!alive()||!saving||sequence!==saveSequence)return;
+      const index=saveStages.findIndex(([stage])=>stage===progress?.stage);
+      if(index>saveStage){saveStage=index;paintSaveProgress();}
+    }catch{}finally{
+      if(alive()&&saving&&sequence===saveSequence)saveProgressTimer=win.setTimeout(()=>void pollSaveProgress(sequence),450);
+    }
   }
   const syncControls=()=>{
     layout.inert=saving||!connected;pages.inert=saving||!connected;save.disabled=!canSave();close.disabled=cancel.disabled=saving;
@@ -316,12 +345,10 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
       updatePaging();
     };
     previousPage.onclick=()=>pageBy(-1);nextPage.onclick=()=>pageBy(1);
-    previousPage.setAttribute('aria-keyshortcuts','PageUp');
-    nextPage.setAttribute('aria-keyshortcuts','PageDown');
-    list.addEventListener('keydown',event=>{
-      if(event.key!=='PageUp'&&event.key!=='PageDown')return;
+    list.addEventListener('keydown', event => {
+      if (event.key !== 'PageUp' && event.key !== 'PageDown') return;
       event.preventDefault();
-      pageBy(event.key==='PageUp'?-1:1);
+      pageBy(event.key === 'PageUp' ? -1 : 1);
     });
     list.addEventListener('scroll',updatePaging,{passive:true});
     if(win.ResizeObserver){listResize=new win.ResizeObserver(updatePaging);listResize.observe(list);}
@@ -343,7 +370,12 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     for(const [key,title]of [['expressions',t('表情','Expressions')],['motions',t('动作','Motions')]]){
     left.append(el('h3',null,title));for(const w of data.words[key]){
       const b=el('button','l2d-bind-target'+(w===word?' selected':''));b.type='button';b.setAttribute('aria-pressed',String(w===word));
-      b.append(el('span',null,label(w)),el('small',null,bindings.some(b=>b.word===w)?t(`${1+(bindings.find(b=>b.word===w).overlays?.length||0)} 个效果`,'Bound'):t('通用','Generic')));
+      const current = bindings.filter(item => item.word === w);
+      const saved = (data.bindings || []).filter(item => item.word === w);
+      const edited = signature(current) !== signature(saved);
+      const status = edited ? t('待保存','Unsaved')
+        : current.length ? t(`已绑定 ${1+(current[0].overlays?.length||0)} 项`,'Bound') : t('通用','Generic');
+      b.append(el('span',null,label(w)),el('small',edited?'figure-draft-state':null,status));
       b.onclick=()=>{word=w;resource=null;combinationError='';pendingCombination=null;paintTargets();paintResources();play();};left.append(b);
     }
   }};
@@ -443,6 +475,8 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     binding.append(caption,chips,warning,actions);paintSummary();
   };
   const paintResources=(scroll=list.scrollTop)=>{list.replaceChildren();const q=search.value.trim().toLocaleLowerCase(),ids=currentIds();
+    const saved = (data.bindings || []).find(item => item.word === word);
+    const savedIds = new Set(saved ? [saved.resource, ...(saved.overlays || [])] : []);
     const activeGroup=page==='wardrobe'?groups.find(g=>g.id===groupId):null;
     const assignedResource=activeGroup?.options.find(o=>o.id===optionId)?.resource;
     const canCombine=page==='actions'&&data.words.expressions.includes(word);
@@ -483,8 +517,13 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
       b.title=detail?`${r.title}\n${detail}`:r.title;
       b.dataset.audition=r.id;
       if(audition)b.setAttribute('aria-current','true');
-      const status=assigned?t('已绑定','Bound'):blocked?t('参数冲突','Conflict'):audition?t('试看中','Previewing'):kind;
-      b.append(el('span',null,r.title),el('small',constraint?'l2d-bind-constraint':overlap?'l2d-bind-overlap':studio&&(audition||assigned)?'figure-audition-label':null,rowHint||(studio?status:kind)));
+      const draft = selected && !savedIds.has(r.id);
+      const boundLabel = draft ? t('待保存','Unsaved') : t('已绑定','Bound');
+      const status = blocked ? t('参数冲突','Conflict')
+        : [audition && t('试看中','Previewing'), (selected || assigned) && boundLabel].filter(Boolean).join(' · ');
+      const statusClass = constraint ? 'l2d-bind-constraint' : draft ? 'figure-draft-state'
+        : overlap ? 'l2d-bind-overlap' : studio && status ? 'figure-audition-label' : null;
+      b.append(el('span',null,r.title),el('small',statusClass,rowHint||(studio&&status)||kind));
       b.onclick=()=>{
         const refocus=studio&&doc.activeElement===b;
         if(page==='actions'&&resource?.id!==r.id)auditionNativeOnly=bindings.some(item=>item.word===word&&item.resource===r.id&&item.nativeOnly);

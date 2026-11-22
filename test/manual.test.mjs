@@ -10,7 +10,7 @@ import {makeCtx,fixtureManifest} from './_ctx.mjs';
 import {readPackManifest} from '../src/pack-manifest.ts';
 import {wardrobeConfig} from '../workbench/pack/backends/wardrobe.js';
 import {Live2dWorld} from '../src/world.ts';
-import {editPack,packDetail} from '../src/pipeline.ts';
+import {editPack,packDetail,setPackAppearance} from '../src/pipeline.ts';
 import {BODY_CROP_AXIS,BODY_CROP_DEFAULT,bodyCropForScheme} from '../workbench/pack/backends/crop-config.js';
 
 const catalog={model:{title:'Example'},fingerprint:'source',resources:[
@@ -96,8 +96,9 @@ test('AI mode can execute with the legacy switch off, and switching to manual st
  cfg.adaptationMode='manual';built=false;await assert.rejects(world.executeAutomation({kind:'live2d',dir:root},{version:1,bindings:[],resources:[]}),/关闭/);assert.equal(built,false);
 });
 
-async function editableWorld(t){
+async function editableWorld(t,prepare){
  const f=await fixture(t);await writeNativePack(f.pack,catalog,[]);
+ await prepare?.(f.pack);
  const world=new Live2dWorld({getConfig:()=>({enabled:true,workDir:join(f.root,'work')}),persist(){},dataDir:f.root});
  world.captureWardrobe=async()=>{}; // Transaction fixtures have no Core; real rendering is covered separately.
  const record={id:'existing',packDir:f.pack,at:1,bytes:1,words:0,cover:false,fit:false,manualAvailable:true};
@@ -105,6 +106,22 @@ async function editableWorld(t){
  t.after(()=>world.stop());const opened=await world.manual.open(f.pack,catalog,[],undefined,record.id);
  return {...f,world,token:opened.token};
 }
+test('saving actions and wardrobe on an existing pack preserves its themes and effects',async t=>{
+ const {world,token}=await editableWorld(t,pack=>setPackAppearance(pack,['native','kaomoji','orb'],'large',['deepseek','minimax']));
+ const groups=[{id:'lookarms',name:'手部',options:[{id:'raised',name:'抬起',resource:'wave'}]}];
+ await world.saveManual(token,binding,groups);
+ const pack=world.state.builds[0].packDir;
+ const manifest=JSON.parse(await readFile(join(pack,'figure.json'),'utf8'));
+ assert.deepEqual(manifest.axes.map(axis=>axis.id), ['lookarms','figuretheme','figureeffects']);
+ assert.deepEqual(manifest.presets.map(preset=>preset.pick), [
+   {lookarms:'default',figuretheme:'figurethemedeepseek',figureeffects:'figurefxnative'},
+   {lookarms:'default',figuretheme:'figurethememinimax',figureeffects:'figurefxnative'},
+ ]);
+ assert.deepEqual(manifest.axes.find(axis=>axis.id==='figureeffects').options.map(option=>option.id),
+   ['figurefxnative','figurefxkaomoji','figurefxorb']);
+ assert.match(await readFile(join(pack,'backends','emotion-style.js'),'utf8'),/emotionEffectSize = "large"/);
+ assert.ok(!(await readdir(join(pack,'backends','emotion-effects'))).includes('emotion-softglow.js'));
+});
 test('opening a second browser editor leaves the current editor and draft intact',async t=>{
  const {world,token}=await editableWorld(t);
  let saving=true;
@@ -152,7 +169,7 @@ test('wardrobe saves into host axes and runtime data; clearing axes keeps the re
  const {world,token}=await editableWorld(t),groups=[{id:'lookarms',name:'手部',options:[{id:'raised',name:'抬起',resource:'wave',ground:true}]}];
  await world.saveManual(token,binding,groups);let pack=world.state.builds[0].packDir,m=JSON.parse(await readFile(join(pack,'figure.json')));assert.equal(m.axes[0].id,'lookarms');assert.deepEqual(m.axes[0].options.map(o=>o.id),['default','raised']);
  const profile=await readFile(join(pack,'models/sample/profile.js'),'utf8');assert.match(profile,/wardrobe:.*"axisOffset":0/);const library=JSON.parse(await readFile(join(pack,LIBRARY)));assert.deepEqual(library.wardrobe[0].options[0],{id:'raised',name:'抬起',resource:'wave'});assert.doesNotMatch(profile,/"ground":/);
- const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'装扮');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes.map(axis=>axis.id),['figureeffects']);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
+ const open=await world.manual.open(pack,catalog,binding,undefined,'existing',undefined,groups);assert.equal(open.wardrobe[0].name,'装扮');await world.saveManual(open.token,binding,[]);pack=world.state.builds[0].packDir;m=JSON.parse(await readFile(join(pack,'figure.json')));assert.deepEqual(m.axes.map(axis=>axis.id),[]);assert.equal(JSON.parse(await readFile(join(pack,LIBRARY))).catalog.resources.length,3);assert.equal(world.state.builds.length,1);
 });
 test('failed wardrobe thumbnail rendering keeps the original card and draft for retry',async t=>{
  const {world,token,pack,root}=await editableWorld(t),ui=world.webUi('zh');
@@ -167,6 +184,35 @@ test('failed wardrobe thumbnail rendering keeps the original card and draft for 
  assert.deepEqual(await ui.invoke('workbench','manualSaveProgress',[token]),{stage:null});
  assert.equal(world.state.builds[0].packDir,pack);assert.equal(world.state.builds.length,1);assert.equal(world.manual.get(token).saving,false);assert.deepEqual(await readdir(join(root,'work','builds')),[]);
  world.captureWardrobe=async()=>{};await world.saveManual(token,binding,[]);assert.equal(world.state.builds[0].id,'existing');
+});
+
+test('skipping image generation keeps valid wardrobe thumbnails and drops replaced option images', async t => {
+ const {world,token,pack} = await editableWorld(t);
+ const groups = [{id:'lookarms',name:'装扮',options:[{id:'raised',name:'抬起',resource:'wave'}]}];
+ await world.manual.close(token);
+ await writeNativePack(pack,catalog,[],false,groups);
+ const manifest = JSON.parse(await readFile(join(pack,'figure.json'),'utf8'));
+ const axis = manifest.axes.find(axis => axis.id === 'lookarms');
+ axis.options[0].thumb = 'thumb/wardrobe-0.png';
+ axis.options[1].thumb = 'thumb/wardrobe-1.png';
+ await writeFile(join(pack,'figure.json'),JSON.stringify(manifest));
+ await mkdir(join(pack,'thumb'),{recursive:true});
+ const png = Buffer.from([137,80,78,71]);
+ await writeFile(join(pack,axis.options[0].thumb),png);
+ await writeFile(join(pack,axis.options[1].thumb),png);
+
+ const opened = await world.manual.open(pack,catalog,[],undefined,'existing',undefined,groups);
+ const result = await world.saveManual(opened.token,binding,[{...groups[0],options:[{...groups[0].options[0],name:'抬手'}]}]);
+ const saved = world.state.builds.find(build => build.id === result.buildId).packDir;
+ const persisted = await readPackManifest(saved);
+ assert.deepEqual(persisted.axes.find(axis => axis.id === 'lookarms').options.map(option => option.thumb),axis.options.map(option => option.thumb));
+ assert.deepEqual(await readFile(join(saved,axis.options[1].thumb)),png);
+ const library = JSON.parse(await readFile(join(saved,LIBRARY),'utf8'));
+ const reopened = await world.manual.open(saved,library.catalog,library.bindings,undefined,'existing',undefined,library.wardrobe);
+ assert.equal(reopened.wardrobe[0].options[0].name,'抬手');
+ await world.saveManual(reopened.token,[],[{...groups[0],options:[{...groups[0].options[0],resource:'smile'}]}]);
+ const replaced = await readPackManifest(world.state.builds[0].packDir);
+ assert.deepEqual(replaced.axes.find(axis => axis.id === 'lookarms').options.map(option => option.thumb),[axis.options[0].thumb,undefined]);
 });
 
 test('legacy axis order and IDs survive fixed-slot normalization',async t=>{

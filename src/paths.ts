@@ -10,8 +10,7 @@ export function childPath(root: string, path: string): string {
     throw new Error(`路径不合法：${path}`);
   }
   const full = resolve(root, ...parts);
-  const rel = relative(resolve(root), full);
-  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+  if (!isInsideRoot(root, full)) {
     throw new Error(`路径超出目录：${path}`);
   }
   return full;
@@ -27,7 +26,16 @@ export function packId(value: unknown): string {
 
 export function containsPath(root: string, path: string): boolean {
   const rel = relative(root, path);
-  return rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel);
+  return rel === '' || isRelativeChild(rel);
+}
+
+/** A strict descendant. Callers operating on disk can canonicalize separately. */
+export function isInsideRoot(root: string, path: string): boolean {
+  return isRelativeChild(relative(root, path));
+}
+
+function isRelativeChild(rel: string): boolean {
+  return rel !== '' && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel);
 }
 
 /** Resolve existing ancestors too when the destination has yet to be created. */

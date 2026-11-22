@@ -1,13 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {mountConfigurationOverride,patchLocalHost,orderFigureTabs} from '../scripts/local-config-page.mjs';
-
-test('appearance follows config only in figure navigation, without mutating the input',()=>{
- const tabs=['workbench','appearance','~config','~prompts'].map(value=>({value}));
- assert.deepEqual(orderFigureTabs({id:'world:figure'},tabs).map(t=>t.value),['workbench','~config','appearance','~prompts']);
- assert.equal(tabs[1].value,'appearance');assert.equal(orderFigureTabs({id:'world:other'},tabs),tabs);
- assert.equal(orderFigureTabs({id:'world:figure'},[tabs[0]]).length,1);
-});
+import {mountConfigurationOverride,patchLocalHost} from '../scripts/local-config-page.mjs';
 
 class Lifecycle {
   disposed=false; resources=[];

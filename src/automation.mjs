@@ -77,9 +77,10 @@ export class FigureAutomation{
   for(const model of result.models)this.models.set(model.id,model);
   return {...result,automation:automationMode(this.cfg),analysisMode:automationMode(this.cfg).gear};
  }
+ /** @returns {Promise<Awaited<ReturnType<typeof inspectNative>>>} */
  async catalog(id,signal){
   const model=this.models.get(id);if(!model)throw Error('模型记录已过期，请重新识别');
-  return model.kind==='pack'?{model,fingerprint:await packFingerprint(model.dir,signal),resources:[],warnings:[],missingRequiredAssets:[]}:await inspectNative(model,{signal});
+  return model.kind==='pack'?{model,fingerprint:await packFingerprint(model.dir,signal),resources:[],warnings:[],missingRequiredAssets:[],truncated:false}:await inspectNative(model,{signal});
  }
  observation(c){
   let value=this.observations.get(c.model.id);
@@ -89,6 +90,7 @@ export class FigureAutomation{
  }
  async actions(id,offset=0,signal,request={}){
   this.check();const c=await this.catalog(id,signal),mode=automationMode(this.cfg),policy=analysisPolicy(this.cfg),start=Number(offset??0);
+  signal?.throwIfAborted();this.check();
   if(!Number.isInteger(start)||start<0)throw Error('资源分页偏移无效');
   let review=[];
   if(request.review!==undefined){
@@ -99,7 +101,11 @@ export class FigureAutomation{
    request={...request,resources:bindingResourceIds(review[0]).slice(0,3)};
   }
   const page=catalogPage(c,start,request,policy),blobs=[],evidence=[];let evidenceWarning;
-  const requested=page.resources.map(r=>c.resources.find(x=>x.id===r.id));
+  const requested=page.resources.map(row=>{
+   const resource=c.resources.find(item=>item.id===row.id);
+   if(!resource)throw Error('动作目录已变化，请重新读取资源');
+   return resource;
+  });
   const samples=review.length?reviewSamples(c,review[0]):[{id:'__neutral__',time:0},...inspectionSamples(requested,request,policy)];
   const wantsImages=mode.gear==='image'||mode.gear==='auto'&&requested.some(r=>!r.suggestion);
   if(wantsImages) for(const resource of requested) this.observation(c).requested.add(resource.id);
@@ -122,11 +128,14 @@ export class FigureAutomation{
     }
     // Re-read after rendering: receipts cannot attest to a source edited during inspection.
     const current=await this.catalog(id,signal);if(current.fingerprint!==c.fingerprint)throw Error('模型已改变，请重新取证');
+    signal?.throwIfAborted();this.check();
+    if(automationMode(this.cfg).gear!==mode.gear)throw Error('适配分析方式已变化');
     const observed=this.observation(c);
     for(const sample of samples)if(sample.id!=='__neutral__'&&!sample.generic)for(const id of [sample.id,...(sample.overlays||[])])observed.visual.add(id);
     if(review.length)observed.review.add(bindingKey(review[0]));
    }catch(e){blobs.length=0;evidence.length=0;if(signal?.aborted)throw e;evidenceWarning='图片取证未完成，保留人工确认：'+e.message;}
   }else if(wantsImages)evidenceWarning=!canSee?'当前 Coo 模型不支持图片，已使用文本分析':'图片取证不可用，保留人工确认';
+  signal?.throwIfAborted();this.check();
   if(evidence.length)evidenceWarning='对照图已生成。模型服务可能省略附件，依赖图片的方案需要人工确认。';
   const out={model:c.model,fingerprint:c.fingerprint,supportedWords:{expressions:FACE_WORDS,motions:MOTION_WORDS},...page,analysis:{depth:policy.depth,configuredDepth:policy.configuredDepth,depthActive:policy.active,reviewRequired:policy.reviewRequired,maxFrames:policy.maxFrames},evidence,evidenceWarning,
    review:review.length?{binding:review[0].word,provided:evidence.length>0,key:fingerprintKey(c,review[0]),note:'Static comparison supplied; not semantic certification or consent.'}:undefined,genericFallback:true};
@@ -143,7 +152,13 @@ export class FigureAutomation{
   this.check();const c=await this.catalog(id,signal);assertRequiredAssets(c);let selected=validateBindings(c,bindings||[]);const skipped=[];
    const cfg = this.cfg;
    const autoAtCreation = autoInstallEnabled(cfg);
-   if(autoAtCreation)selected=selected.filter(b=>{const r=c.resources.find(r=>r.id===b.resource);if(b.confidence<.7||r.classification==='appearance'){skipped.push(b.word);return false;}return true;});
+   if(autoAtCreation)selected=selected.filter(b=>{
+    const resource=c.resources.find(r=>r.id===b.resource);
+    if(!resource)throw Error('动作目录已变化，请重新读取资源');
+    if(b.confidence>=.7&&resource.classification!=='appearance')return true;
+    skipped.push(b.word);
+    return false;
+   });
   const planId=randomUUID(),code=planId.slice(0,8),title=c.model.title.slice(0,16),labels=selected.slice(0,3).map(b=>b.word).join('、')||'通用动作';
   const question=`方案 ${code}：${title}，适配 ${labels}，安装${wear?'并换上':''}？同 ID 形象会先备份再替换。`;
   const summary=selected.map(b=>({word:b.word,source:[b.resource,...(b.overlays||[])].map(id=>c.resources.find(r=>r.id===id)?.title).join(' ＋ '),reason:b.reason}));
@@ -151,6 +166,7 @@ export class FigureAutomation{
     imageDependent:selected.some(b=>bindingResourceIds(b).some(id=>observed.requested.has(id)))};
    const reviewWarnings=confirmationReasons(c,selected,cfg,analysis);
   const sourceFingerprint=c.model.kind==='live2d'?await packFingerprint(c.model.dir,signal):undefined;
+  signal?.throwIfAborted();this.check();
    const plan={analysis,reviewWarnings,requiresConfirmation:reviewWarnings.length>0,autoAtCreation,id:planId,code,created:Date.now(),cursor:this.host?.store?.latestCursor?.()||0,model:c.model,fingerprint:c.fingerprint,sourceFingerprint,bindings:selected,summary,wear,question,approveLabel:'同意安装',options:['同意安装','暂不安装'],status:'pending',skipped};
   this.plans.set(planId,plan);await this.save();
   return this.publicPlan(plan);
@@ -204,7 +220,16 @@ export class FigureAutomation{
    p.status='done';p.result={...result,wearRequested:p.wear,next:p.wear?'Use the available host wardrobe tool with this figureId, then briefly tell the person what was mapped.':'Tell the person which mappings were applied and which retained generic behavior.'};
    try{await this.save();}catch(error){p.result.warning='已安装，但自动化记录保存失败：'+error.message;}
    return p.result;
-  }catch(e){p.status=prior;p.error=String(e.message||e);await this.save().catch(()=>{});throw e;}
+  }catch(error){
+   p.status=prior;
+   p.error=error instanceof Error?error.message:String(error);
+   try{await this.save();}
+   catch(saveError){
+    const detail=saveError instanceof Error?saveError.message:String(saveError);
+    throw Error(`${p.error}。恢复方案状态后保存失败：${detail}`,{cause:error});
+   }
+   throw error;
+  }
  }
  async imported(result,resolveModel,repeat=false){
   if(!enabled(this.cfg)||!result?.token||this.notifying.has(result.token))return {queued:false};
@@ -212,6 +237,7 @@ export class FigureAutomation{
   if(previous&&!previous.error&&(!repeat||Date.now()-previous.at<30000||!this.waitingModels(previous).length))return {queued:false};
   if(!this.host?.pushEvent)throw Error('Coo 尚未就绪，请稍后再次提交分析');
   this.notifying.add(result.token);
+  /** @type {{token: string, at: number, models: Array<{id: string}>, error: string}} */
   const request={token:result.token,at:Date.now(),models:[],error:''};this.requests.set(result.token,request);
   while(this.requests.size>20)this.requests.delete(this.requests.keys().next().value);
   try{

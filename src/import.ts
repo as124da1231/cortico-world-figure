@@ -1,4 +1,4 @@
-import { childPath } from './paths.ts';
+import { childPath, containsPath, isInsideRoot } from './paths.ts';
 import { findInstalledTargets, installPack } from './pipeline.ts';
 import { readPackManifest } from './pack-manifest.ts';
 /**
@@ -11,19 +11,20 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { strFromU8, unzipSync } from 'fflate';
+import { FIGURE_IMPORT } from './import-limits.mjs';
 
 /** 一次 zip 导入最多这么多（未解压）。 */
-export const IMPORT_MAX = 32 * 1024 * 1024;
+export const IMPORT_MAX = FIGURE_IMPORT.zip;
 /** 文件夹是分块传的，上限放宽得多。 */
-export const UPLOAD_MAX = 512 * 1024 * 1024;
+export const UPLOAD_MAX = FIGURE_IMPORT.folder;
 /** figure.json 最多在选中目录下面几层。 */
 export const PACK_DEPTH = 3;
 /** 面板自己拼的文件夹包（与桌宠同一套格式）：路径长度 + 路径 + 内容长度 + 内容。 */
 export const BUNDLE_TYPE = 'application/x-figure-files';
 const THUMB_MAX = 1024 * 1024;
-const FILES_MAX = 20000;
+const FILES_MAX = FIGURE_IMPORT.files;
 const pathKey = (path: string) => process.platform === 'win32' ? path.replace(/\\/g, '/').toLowerCase() : path.replace(/\\/g, '/');
 const IMAGE: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
 
@@ -223,8 +224,9 @@ export async function thumbOf(dir: string, file: unknown): Promise<string | null
   if (!type) return null;
   try {
     const full = childPath(dir, file);
-    const info = await lstat(full), rel = relative(await realpath(dir), await realpath(full));
-    if (!info.isFile() || info.isSymbolicLink() || !rel || rel.split(sep)[0] === '..' || isAbsolute(rel) || info.size > THUMB_MAX) return null;
+    const info = await lstat(full);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > THUMB_MAX
+        || !isInsideRoot(await realpath(dir), await realpath(full))) return null;
     return `data:${type};base64,${(await readFile(full)).toString('base64')}`;
   } catch {
     return null;
@@ -236,6 +238,7 @@ export async function thumbOf(dir: string, file: unknown): Promise<string | null
  * 同名先备份（与打包产物安装走同一套 backups 目录）。
  */
 export class PackImporter {
+  private currentToken: string | undefined;
   private staged: { token: string; root: string; packs: Set<string>; models: Set<string>; entries: Map<string, string>; paths: Map<string, string> } | null = null;
   private uploads = new Map<string, { root: string; bytes: number; paths: Set<string>; chunks: Map<string,{written:number;total:number}> }>();
 
@@ -245,18 +248,20 @@ export class PackImporter {
     if (!staged || staged.token !== token) throw new Error('这次导入已经过期，重新选一次');
     await this.pruneAutomationInputs(cacheRoot,activePaths);
     const base = resolve(cacheRoot), destination = join(base, token), paths = new Map<string,string>();
-    const inside = (root:string,file:string) => { const rel=relative(root,file);return !rel || rel !== '..' && !rel.startsWith('..'+sep) && !isAbsolute(rel); };
     const owned = [...new Set([...staged.models,...staged.packs])].map(dir=>({dir,source:this.resolve(token,dir)!}));
-    if (owned.some(item=>inside(staged.root,item.source))) {
-      if (inside(staged.root,destination) || inside(destination,staged.root)) throw new Error('自动化缓存与导入目录不能重叠');
+    if (owned.some(item=>containsPath(staged.root,item.source))) {
+      if (containsPath(staged.root,destination) || containsPath(destination,staged.root)) throw new Error('自动化缓存与导入目录不能重叠');
       if (!existsSync(join(destination,'.figure-import-cache'))) {
         if(existsSync(destination))throw new Error('自动化缓存路径已占用');
         await mkdir(base,{recursive:true});
         try { await cp(staged.root,destination,{recursive:true,force:false,errorOnExist:true});await writeFile(join(destination,'.figure-import-cache'),'1'); }
-        catch(error){const rel=relative(base,resolve(destination));if(rel&&rel!== '..'&&!rel.startsWith('..'+sep)&&!isAbsolute(rel))await rm(destination,{recursive:true,force:true}).catch(()=>{});throw error;}
+        catch (error) {
+          if (isInsideRoot(base, destination)) await rm(destination, {recursive:true, force:true}).catch(() => {});
+          throw error;
+        }
       }
     }
-    for(const {dir,source} of owned) paths.set(dir,inside(staged.root,source)?join(destination,relative(staged.root,source)):source);
+    for(const {dir,source} of owned) paths.set(dir,containsPath(staged.root,source)?join(destination,relative(staged.root,source)):source);
     return paths;
   }
 
@@ -265,18 +270,24 @@ export class PackImporter {
     const base=resolve(cacheRoot);
     for(const entry of await readdir(base,{withFileTypes:true}).catch(()=>[])) {
       if(!entry.isDirectory()||entry.isSymbolicLink()||! /^[a-f0-9-]{36}$/i.test(entry.name))continue;
-      const target=resolve(base,entry.name),rel=relative(base,target),marker=join(target,'.figure-import-cache');
-      if(!rel||rel==='..'||rel.startsWith('..'+sep)||isAbsolute(rel))continue;
-      if(activePaths.some(path=>{const child=relative(target,resolve(path));return !child||child!=='..'&&!child.startsWith('..'+sep)&&!isAbsolute(child);}))continue;
+      const target=resolve(base,entry.name),marker=join(target,'.figure-import-cache');
+      if (!isInsideRoot(base, target) || activePaths.some(path => containsPath(target, path))) continue;
       const info=await lstat(marker).catch(()=>null);
       if(info?.isFile()&&!info.isSymbolicLink()&&Date.now()-info.mtimeMs>60*60000)await rm(target,{recursive:true,force:true}).catch(()=>{});
     }
   }
 
+  private async start(token: string) {
+    const cleanup = this.cancel();
+    this.currentToken = token;
+    await cleanup;
+  }
+
   /** Local clipboard/picker input stays read-only; only the owned temp root is removed. */
   async stageLocal(paths:string[],installed:Map<string,string>):Promise<StageResult|{error:string}> {
     if(!paths.length||paths.length>16)return {error:'请选择 1–16 个模型文件夹或 ZIP'};
-    await this.cancel();
+    const token = randomUUID();
+    await this.start(token);
     const root=await mkdtemp(join(tmpdir(),'figure-local-'));
     const sources:Array<{dir:string;full:string;entryFile?:string}>=[];
     try {
@@ -297,13 +308,14 @@ export class PackImporter {
         }
         sources.push({dir:`source-${i}`,full,entryFile});
       }
-      return this.finish(root,false,installed,sources);
+      return this.finish(token,root,false,installed,sources);
     } catch(e){await rm(root,{recursive:true,force:true});return {error:String((e as Error).message??e)};}
   }
 
   /** 摊开文件、读包；`installed` 用来标出哪些已经装过（只用于显示）。 */
   async stage(files: ImportFile[], fromFolders: boolean, installed: Map<string, string>): Promise<StageResult | { error: string }> {
-    await this.cancel();
+    const token = randomUUID();
+    await this.start(token);
     if (files.reduce((n, f) => n + f.bytes.length, 0) > IMPORT_MAX) {
       return { error: `内容太大：超过 ${IMPORT_MAX / 1048576} MB` };
     }
@@ -311,7 +323,7 @@ export class PackImporter {
     try {
       const written = await this.materialize(root, files);
       if (typeof written === 'string') throw new Error(written);
-      return this.finish(root, fromFolders, installed);
+      return this.finish(token, root, fromFolders, installed);
     } catch (error) {
       await rm(root, { recursive: true, force: true });
       return { error: (error as Error).message };
@@ -320,9 +332,13 @@ export class PackImporter {
 
   /** 文件夹分批上传：先要一个临时目录，再一块块写，最后扫描。 */
   async beginUpload(): Promise<string> {
-    await this.cancel();
-    const root = await mkdtemp(join(tmpdir(), 'figure-upload-'));
     const token = randomUUID();
+    await this.start(token);
+    const root = await mkdtemp(join(tmpdir(), 'figure-upload-'));
+    if (this.currentToken !== token) {
+      await rm(root, { recursive: true, force: true });
+      throw Error('这次上传已经取消，重新选一次');
+    }
     this.uploads.set(token, { root, bytes: 0, paths: new Set(), chunks: new Map() });
     return token;
   }
@@ -335,16 +351,21 @@ export class PackImporter {
     for (const f of files) {
       const key = pathKey(f.path);
       if (!segments(f.path) || up.paths.has(key) || up.chunks.has(key) || paths.has(key) || up.paths.size + paths.size >= FILES_MAX) {
-        await this.cancel(); return { error: '文件路径无效、重复或数量过多' };
+        await this.cancel(token); return { error: '文件路径无效、重复或数量过多' };
       }
       paths.add(key);
       up.bytes += f.bytes.length;
-      if (up.bytes > UPLOAD_MAX) { await this.cancel(); return { error: `内容太大：超过 ${UPLOAD_MAX / 1048576} MB` }; }
+      if (up.bytes > UPLOAD_MAX) { await this.cancel(token); return { error: `内容太大：超过 ${UPLOAD_MAX / 1048576} MB` }; }
     }
     try {
       const written = await this.materialize(up.root, files);
       if (typeof written === 'string') throw new Error(written);
-    } catch (error) { await this.cancel(); return { error: (error as Error).message }; }
+      if (this.currentToken !== token) throw Error('这次上传已经取消，重新选一次');
+    } catch (error) {
+      await this.cancel(token);
+      await rm(up.root, { recursive: true, force: true }).catch(() => {});
+      return { error: (error as Error).message };
+    }
     for (const path of paths) up.paths.add(path);
     return { files: files.length };
   }
@@ -364,12 +385,17 @@ export class PackImporter {
       await mkdir(join(up.root, ...parts.slice(0, -1)), {recursive:true});
       if (offset && (await stat(full)).size !== offset) throw new Error('文件分块校验失败，请重新导入');
       await writeFile(full, file.bytes, {flag:offset ? 'a' : 'w'});
+      if (this.currentToken !== token) throw Error('这次上传已经取消，重新选一次');
       up.bytes += file.bytes.length;
       const written = offset + file.bytes.length;
       if (written === total) { up.chunks.delete(key); up.paths.add(key); }
       else up.chunks.set(key, {written,total});
       return {written};
-    } catch (error) { await this.cancel(); return {error:(error as Error).message}; }
+    } catch (error) {
+      await this.cancel(token);
+      await rm(up.root, { recursive: true, force: true }).catch(() => {});
+      return {error:(error as Error).message};
+    }
   }
 
   /** 上传完，扫描临时目录。 */
@@ -378,11 +404,7 @@ export class PackImporter {
     if (!up) return { error: '这次上传已经过期，重新选一次' };
     if (up.chunks.size) return {error:'文件尚未传输完整，请重新导入'};
     this.uploads.delete(token);
-    await this.cancel();
-    const result = await this.finish(up.root, fromFolders, installed);
-    if ('error' in result) return result;
-    if (this.staged) this.staged.token = token;
-    return { ...result, token };
+    return this.finish(token, up.root, fromFolders, installed);
   }
 
   private async materialize(root: string, files: ImportFile[]): Promise<string | null> {
@@ -396,7 +418,7 @@ export class PackImporter {
   }
 
   /** 扫描临时目录，登记成待装清单。 */
-  private async finish(root: string, fromFolders: boolean, installed: Map<string, string>,sources?:Array<{dir:string;full:string;entryFile?:string}>): Promise<StageResult | { error: string }> {
+  private async finish(token: string, root: string, fromFolders: boolean, installed: Map<string, string>,sources?:Array<{dir:string;full:string;entryFile?:string}>): Promise<StageResult | { error: string }> {
     try {
       const packs: StagedPack[] = [];
       const models: StagedModel[] = [];
@@ -470,11 +492,11 @@ export class PackImporter {
         for (const model of models) paths.set(model.dir, sub);
       }
 
+      if (this.currentToken !== token) throw Error('这次导入已经取消，重新选一次');
       if (!packs.length && !models.length) {
         await rm(root, { recursive: true, force: true });
         return { token: '', packs: [], models: [], problems };
       }
-      const token = randomUUID();
       this.staged = { token, root, packs: new Set(packs.map((p) => p.dir)), models: new Set(models.map(m => m.dir)), entries: new Map(models.map(m => [m.dir, m.file])), paths };
       return { token, packs, models, problems };
     } catch (err) {
@@ -520,20 +542,23 @@ export class PackImporter {
     }
     // Keep the staged files on failure so users can retry.
     for(const chosen of dirs)staged.packs.delete(chosen);
-    if(!staged.packs.size&&!staged.models.size)await this.cancel();
+    if(!staged.packs.size&&!staged.models.size)await this.cancel(token);
     return { installed: out };
   }
 
   async cancel(token?: string): Promise<void> {
+    if (!token || this.currentToken === token) this.currentToken = undefined;
+    const roots: string[] = [];
     const staged = this.staged;
     if (staged && (!token || staged.token === token)) {
       this.staged = null;
-      await rm(staged.root, { recursive: true, force: true }).catch(() => {});
+      roots.push(staged.root);
     }
     for (const [id, up] of this.uploads) if (!token || token === id) {
       this.uploads.delete(id);
-      await rm(up.root, { recursive: true, force: true }).catch(() => {});
+      roots.push(up.root);
     }
+    await Promise.all(roots.map(root => rm(root, { recursive: true, force: true }).catch(() => {})));
   }
 
   resolvePack(token: string, dir: string): string | null {

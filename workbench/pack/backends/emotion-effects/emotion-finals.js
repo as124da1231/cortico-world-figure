@@ -1,8 +1,3 @@
-import {createKaomojiPainter} from './emotion-kaomoji.js';
-import {FIGURE_WOLF_KAOMOJI} from './wolf-kaomoji.js';
-import {createOrbPainter} from './emotion-orb.js';
-import {createParticlePainter} from './emotion-particles.js';
-
 // The kit owns expression lifetimes and the original hearts, tears, notes and dust.
 const MOODS = new Map(Object.entries({
   happy:'joy', excited:'joy',
@@ -40,25 +35,25 @@ function canvasLayer(make, root, {left,top,width,height}) {
   };
 }
 
-function makePainter(make, root, back, box, style, tier) {
+function makePainter(make, root, back, box, style, tier, model, createPainter) {
   const {left,top,width,height} = box;
   const right = left + width;
   const doc = root.ownerDocument;
   if (style === 'kaomoji') {
-    return {paint:createKaomojiPainter(make,root,box)};
+    return {paint:createPainter(make,root,model.kaomojiBox,model.kaomojiScale)};
   }
   if (style === 'orb') {
     const radius = clamp(height*.31,23,70);
     const anchor = {x:right+radius*1.18+8,y:top+height*.23,radius};
     const front = canvasLayer(make,root,{left:anchor.x-radius*1.8,top:anchor.y-radius*1.62,
       width:radius*3.6,height:radius*3.32});
-    const draw = createOrbPainter(doc,tier);
+    const draw = createPainter(doc,tier);
     return {
       paint(mood,time,theme) { draw(front.clear(),mood,time,anchor,theme); },
       release:front.release,
     };
   }
-  const particles = createParticlePainter(doc,tier);
+  const particles = createPainter(doc,tier);
   if (style === 'bubbles') {
     const front = canvasLayer(make,root,{left:right-14,top:top-height*.14-14,
       width:height*.28+42,height:height*.45+28});
@@ -76,7 +71,7 @@ function makePainter(make, root, back, box, style, tier) {
   };
 }
 
-export function createFinalEmotionEffects({make,parent,art,model,media}, style) {
+export function createFinalEmotionEffects({make,parent,art,model,media}, style, createPainter, words = {}) {
   if (model.effectsEnabled === false || model.emotionIntensity === 'off') {
     return {draw(){}, trigger(){}, dispose(){}};
   }
@@ -87,7 +82,7 @@ export function createFinalEmotionEffects({make,parent,art,model,media}, style) 
     'pointer-events':'none',display:'none'}, parent);
   const back = style === 'flow' ? make('g', {class:'ifg-final-back','pointer-events':'none',display:'none'}, parent) : null;
   if (back) parent.insertBefore(back,art);
-  const painter = makePainter(make,root,back,box,style,tier);
+  const painter = makePainter(make,root,back,box,style,tier,model,createPainter);
   const layers = back ? [root,back] : [root];
   const set = (key,value) => {
     const text = String(value);
@@ -104,7 +99,7 @@ export function createFinalEmotionEffects({make,parent,art,model,media}, style) 
     let {face} = frame;
     if (style === 'kaomoji') {
       if (pending === 'neutral') action = undefined;
-      else if (Object.hasOwn(FIGURE_WOLF_KAOMOJI, pending)) action = {word:pending, until:t+1.25};
+      else if (Object.hasOwn(words, pending)) action = {word:pending, until:t+1.25};
       if (frame.mode === 'sleep') face = 'sleep';
       else if (action && t < action.until) face = action.word;
       else action = undefined;
@@ -150,8 +145,8 @@ export function createFinalEmotionEffects({make,parent,art,model,media}, style) 
     set('opacity',opacity);
     // The figure clock drives all styles. Canvas draws at up to 30 Hz, without an extra loop.
     const interval = style === 'kaomoji' ? 0 : 1/30;
-    if (lastPaint !== -Infinity && (reduced || t >= lastPaint && t-lastPaint+1e-6 < interval)) return;
-    painter.paint(mood,reduced ? STILL[mood] : age,theme,reduced,face);
+    if (lastPaint !== -Infinity && interval && (reduced || t >= lastPaint && t-lastPaint+1e-6 < interval)) return;
+    painter.paint(mood,reduced ? STILL[mood] : age,theme,reduced,face,nextFacing);
     root.setAttribute('data-reduced',String(reduced));
     lastPaint = t;
   }

@@ -41,7 +41,7 @@ type Word = { id: string; names?: Record<string, string[]> };
 type Target = { id: string; body?: DesktopBodyId; name: string; words: Word[]; dir: string; revision: string; immediate: boolean; limited: boolean; resources: Resource[]; parameters: Map<string, string> };
 type PlannerConnection = NonNullable<ReturnType<PlannerServices['connection']>>;
 type VoicePlayback = (first: Buffer, onStarted: VoiceStarted) => Promise<void>;
-type CoordinatedReply = { text: string; startedAt?: number };
+type CoordinatedReply = { body: DesktopBodyId; text: string; after: number; startedAt?: number };
 type SpeechMark = { at: number; face: string };
 type Order = { ticket: number; expiresAt: number; stop?: boolean; cues?: Cue[]; resources?: unknown[]; beats?: unknown[]; face?: string; marks?: SpeechMark[]; startedAt?: number; speechMs?: number };
 type ReplyPlan = { text: string; target: Target; cues: Cue[]; at: number };
@@ -135,7 +135,7 @@ export class FigurePerformance {
   private readonly observedFigures = new Map<string, { cursor: number; failed: boolean }>();
   private figureCursor = 0;
   private scripts: { body: DesktopBodyId; script: ReturnType<typeof replyScript>; cursor: number; at: number }[] = [];
-  private speechUntil = 0;
+  private speechUntil = new Map<DesktopBodyId, number>();
 
   constructor(opts: PerformanceOptions) {
     this.opts = opts;
@@ -251,7 +251,7 @@ export class FigurePerformance {
         this.scripts.push({body: speechToolBodies[event.item.name as keyof typeof speechToolBodies],
           script: replyScript(value), cursor: this.host?.store.latestCursor() ?? 0, at});
       } catch { /* Invalid tool arguments never supply an animation. */ }
-    }, onAbort: () => { this.scripts = []; this.speechUntil = 0; this.cancel(); this.retire(); } };
+    }, onAbort: () => { this.cancel(); this.retire(); } };
   }
 
   async start(host: WorldHost) {
@@ -294,7 +294,7 @@ export class FigurePerformance {
 
   private cancel() {
     this.pending = [];
-    this.speechUntil = 0;
+    this.speechUntil.clear();
     this.scripts = [];
     this.coordinated = undefined;
     this.current?.abort();
@@ -461,7 +461,8 @@ export class FigurePerformance {
     if (!Number.isFinite(receivedAt) || Date.now() - receivedAt > 2500) return;
     const plain = normalizeText(event.text);
     const coordinated = this.coordinated;
-    if (mode === 'dual' && coordinated?.startedAt !== undefined && receivedAt >= coordinated.startedAt - 150
+    if (mode === 'dual' && coordinated?.startedAt !== undefined && coordinated.body === event.source
+        && event.cursor > coordinated.after && receivedAt >= coordinated.startedAt - 150
         && receivedAt <= coordinated.startedAt + 2500 && plain === coordinated.text) {
       this.coordinated = undefined;
       return;
@@ -483,10 +484,10 @@ export class FigurePerformance {
     const mood = marks[0]?.face;
     const cues = mode === 'direct' && pending?.target.id === target.id && pending.target.revision === target.revision
       ? pending.cues : undefined;
-    const startedAt = Math.max(receivedAt, this.speechUntil);
+    const startedAt = Math.max(receivedAt, this.speechUntil.get(event.source) ?? 0);
     if (startedAt > Date.now() + 20000) return;
     const duration = Math.max(speechMs, ...(cues ?? []).map(cue => (cue.at + cue.duration) * 1000));
-    this.speechUntil = startedAt + duration;
+    this.speechUntil.set(event.source, startedAt + duration);
     await this.publish(target, { ticket: randomInt(1, 2147483647), startedAt, expiresAt: startedAt + duration + 300,
       speechMs, marks, cues, resources: this.clips(target, cues) }, mode, controller.signal);
     if (mode !== 'dual' || event.text.length > MAX_TEXT || !target.parameters.size) return;
@@ -499,7 +500,7 @@ export class FigurePerformance {
         if (!beats.length) return {};
         const now = Date.now();
         if (now >= startedAt + speechMs) return {};
-        await this.publishSpeech(target, beats, marks, startedAt, speechMs, controller.signal);
+        await this.publishSpeech(target, beats, marks, startedAt, speechMs, controller.signal, service);
         return { finished: delay(Math.max(0, startedAt + speechMs - now), undefined, {signal:controller.signal}).catch(() => {}) };
       },
     }).catch(() => {});
@@ -518,14 +519,16 @@ export class FigurePerformance {
   private async coordinateVoice(service: PlannerConnection, text: string, script: string, prepared: Promise<Buffer | undefined>, signal: AbortSignal, play: VoicePlayback, body?: DesktopBodyId) {
     const host = this.host;
     const target = await this.target(body).catch(() => undefined);
-    if (!host || !target?.parameters.size || signal.aborted || this.mode() !== 'dual') return false;
+    if (!host || this.host !== host || !target?.parameters.size || signal.aborted || this.mode() !== 'dual'
+        || this.bodyProblem({body: {id: target.body ?? 'desktop-pet', figure: target.id}, id:target.id, native:false})) return false;
     this.cancel();
     this.retire();
     const controller = this.current = new AbortController();
     this.currentCursor = host.store.latestCursor();
     const combined = AbortSignal.any([signal, controller.signal]);
-    const reply: CoordinatedReply = this.coordinated = { text: normalizeText(text) };
     const parsed = replyScript(script);
+    const source = target.body ?? body ?? 'desktop-pet';
+    const reply: CoordinatedReply = this.coordinated = { body: source, text: parsed.text, after: this.currentCursor };
     const mood = this.speechMarks(target, parsed, null, 1000)[0]?.face;
     const directives = this.actionContext(host, this.currentCursor, Date.now(), target.body);
     let audio: Buffer | undefined;
@@ -548,8 +551,8 @@ export class FigurePerformance {
             const scale = last && actual.durationMs ? speechMs / 1000 / (last.time + last.duration) : 1;
             const timed = scale === 1 ? beats : beats.map(beat => ({...beat,time:beat.time * scale,duration:beat.duration * scale}));
             const marks = this.speechMarks(target, parsed, null, speechMs);
-            this.speechUntil = actual.at + speechMs;
-            await this.publishSpeech(target, timed, marks, actual.at, speechMs, combined).catch(() => {});
+            this.speechUntil.set(source, actual.at + speechMs);
+            await this.publishSpeech(target, timed, marks, actual.at, speechMs, combined, service, true).catch(() => {});
           }
           return { finished: finished.catch(() => {}) };
         },
@@ -608,18 +611,28 @@ export class FigurePerformance {
     };
   }
 
-  private async publishSpeech(target: Target, beats: SpeakingBeat[], marks: SpeechMark[], startedAt: number, speechMs: number, signal: AbortSignal) {
-    await this.publish(target, { ticket: randomInt(1, 2147483647), expiresAt: startedAt + speechMs + 400,
-      startedAt, speechMs, ...(beats.length ? { beats } : {}), marks }, 'dual', signal);
+  private async publishSpeech(target: Target, beats: SpeakingBeat[], marks: SpeechMark[], startedAt: number,
+    speechMs: number, signal: AbortSignal, service: PlannerConnection, keepLocal = false) {
+    const order = { ticket: randomInt(1, 2147483647), expiresAt: startedAt + speechMs + 400, startedAt, speechMs, marks };
+    if (!beats.length) return this.publish(target, order, 'dual', signal);
+    this.planners.connection();
+    try {
+      await this.publish(target, { ...order, beats }, 'dual', AbortSignal.any([signal, service.signal]));
+    } catch (error) {
+      if (!keepLocal || !service.signal.aborted || signal.aborted) throw error;
+      await this.publish(target, order, 'dual', signal);
+    }
   }
 
   private async requestMotion(input: MotionInput, mood: string | undefined, cancelled: AbortSignal, host: WorldHost, service: PlannerConnection): Promise<MotionResult> {
     const { model, endpoint, apiKey } = service;
-    const signal = AbortSignal.any([cancelled, AbortSignal.timeout(5500)]);
+    this.planners.connection();
+    const signal = AbortSignal.any([cancelled, service.signal, AbortSignal.timeout(5500)]);
     signal.throwIfAborted();
     const planner = SoullinkSpeakingMotionPlanner.create({
       openAI: { apiKey: apiKey || 'local', baseURL: endpoint, model, timeoutMs: 5000,
         fetch: async (url: string, init: RequestInit) => {
+          signal.throwIfAborted();
           const response = await plannerFetch(service, url, { ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal });
           const usage = await response.clone().json().then(result => result.usage, () => undefined);
           if (usage && Number.isFinite(usage.prompt_tokens) && Number.isFinite(usage.completion_tokens)) {

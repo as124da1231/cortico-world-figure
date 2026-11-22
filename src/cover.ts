@@ -5,9 +5,9 @@
  * 不依赖 Electron，也不装依赖：Chrome / Edge 用系统里已有的。
  */
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { extname, join, normalize, sep } from 'node:path';
@@ -215,20 +215,42 @@ export async function captureCover(
     if (!options.wardrobe && Array.isArray(manifest.axes) && manifest.axes[0]?.options?.[0]) {
       manifest.axes[0].options[0].thumb = 'thumb/opt-model.png';
     }
-    if(wardrobe.length){
-      if(!Array.isArray(body.wardrobe)||body.wardrobe.length!==wardrobe.length)throw Error('装扮缩略图不完整');
-      for(const [i,item]of body.wardrobe.entries()){
-        const expected=wardrobe[i];if(item.axis!==expected.axis||item.option!==expected.option)throw Error('装扮缩略图标识不一致');
-        const png=pngOf(item.png);if(png.length<24||png.length>131072||png.readUInt32BE(16)!==128||png.readUInt32BE(20)!==128)throw Error('装扮缩略图尺寸无效');
-        const path='thumb/wardrobe-'+i+'.png';await writeFile(join(packDir,path),png);
-        manifest.axes.find((a:any)=>a.id===expected.axis).options.find((o:any)=>o.id===expected.option).thumb=path;
+    const thumbnails = new Map<string, Buffer>();
+    if (wardrobe.length) {
+      if (!Array.isArray(body.wardrobe) || body.wardrobe.length !== wardrobe.length) throw Error('装扮缩略图不完整');
+      for (const [i, expected] of wardrobe.entries()) {
+        const item = body.wardrobe[i];
+        if (item?.axis !== expected.axis || item.option !== expected.option) throw Error('装扮缩略图标识不一致');
+        const png = pngOf(item.png);
+        if (png.length > 131072 || png.readUInt32BE(16) !== 128 || png.readUInt32BE(20) !== 128) throw Error('装扮缩略图尺寸无效');
+        // New captures must not overwrite files the current manifest still uses.
+        const thumb = 'thumb/wardrobe-' + createHash('sha256').update(png).digest('hex') + '.png';
+        thumbnails.set(join(packDir, thumb), png);
+        manifest.axes.find((a:any) => a.id === expected.axis).options.find((o:any) => o.id === expected.option).thumb = thumb;
       }
     }
     const next = file + '.' + token + '.tmp';
+    const created: string[] = [];
     try {
+      for (const [path, png] of thumbnails) {
+        signal?.throwIfAborted();
+        const output = await open(path, 'wx').catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== 'EEXIST') throw error;
+        });
+        if (!output) continue;
+        created.push(path);
+        try {
+          await output.writeFile(png);
+        } finally {
+          await output.close();
+        }
+      }
       await writeFile(next, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
       signal?.throwIfAborted();
       await rename(next, file);
+    } catch (error) {
+      await Promise.all(created.map(path => rm(path, { force: true }).catch(() => {})));
+      throw error;
     } finally {
       await rm(next, { force: true }).catch(() => {});
     }

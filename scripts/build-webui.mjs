@@ -13,11 +13,12 @@ const keep = new Set();
 for (const [extension, field] of [['js', 'webUiClient'], ['css', 'webUiStyle']]) {
   const content=await readFile(join(source, extension === 'js' ? 'client.js' : 'styles.css'),'utf8');
   const shared = extension === 'js' ? (await Promise.all([
-    join(root, 'src', 'gear-appearance.mjs'),
     join(root, 'workbench', 'tools', 'emotion-effect.mjs'),
+    join(root, 'workbench', 'tools', 'theme-palette.mjs'),
     join(root, 'src', 'voice-catalog.mjs'),
     join(root, 'src', 'voice-settings.mjs'),
     join(root, 'src', 'planner-catalog.mjs'),
+    join(root, 'src', 'import-limits.mjs'),
     join(root, 'workbench', 'pack', 'backends', 'wardrobe-slots.js'),
     join(root, 'workbench', 'pack', 'backends', 'crop-config.js'),
     join(root, 'workbench', 'pack', 'backends', 'gaze-config.js'),
@@ -25,10 +26,11 @@ for (const [extension, field] of [['js', 'webUiClient'], ['css', 'webUiStyle']])
     join(source, 'manual.js'),
     join(source, 'voice.js'),
     join(source, 'performance.js'),
-    join(root, 'workbench', 'pack', 'backends', 'emotion-effects', 'wolf-kaomoji.js'),
-    join(source, 'effect-previews.js'),
     join(source, 'effects.js'),
     join(source, 'crop-editor.js'),
+    join(source, 'workbench-import.js'),
+    join(source, 'workbench-library.js'),
+    join(source, 'workbench-popups.js'),
   ].map(file => readFile(file, 'utf8')))).map(code => code.replace(/^export /gm, '')).join('\n') + '\n' : '';
   const version = extension === 'js' ? `const FIGURE_UI_VERSION = ${JSON.stringify(pkg.version)};\n` : '';
   const bytes = Buffer.from((version + shared + content).replace(/\r\n/g, '\n'));

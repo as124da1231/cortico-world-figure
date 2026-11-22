@@ -8,6 +8,18 @@ const JSON_LIMIT = AUDIO_LIMIT * 2 + 65536;
 const runner = fileURLToPath(new URL('./voice-local.py', import.meta.url));
 class VoiceError extends Error {}
 
+/** @typedef {(url: URL | string, body: object, headers?: Record<string, string>) => Promise<unknown>} VoiceJson */
+/** @typedef {(value: unknown, origin: string, allowAliyun?: boolean) => Promise<Buffer>} VoiceDownload */
+
+/** @param {unknown} value @param {...(string | number)} keys */
+function responseField(value, ...keys) {
+  for (const key of keys) {
+    if (!value || typeof value !== 'object' || !Object.hasOwn(value, key)) return undefined;
+    value = /** @type {Record<string | number, unknown>} */ (value)[key];
+  }
+  return value;
+}
+
 export function providerSpec(id) {
   if (typeof id!=='string'||!Object.hasOwn(VOICE_PROVIDERS,id)) throw new VoiceError('语音服务不存在');
   return VOICE_PROVIDERS[id];
@@ -48,7 +60,10 @@ function address(base, suffix) {
   const normalized = base.replace(/\/+$/, '');
   return new URL(normalized.endsWith(suffix)?normalized:normalized+suffix);
 }
-const bearer = key => key ? {Authorization:'Bearer '+key} : {};
+/** @returns {Record<string, string>} */
+function bearer(key) {
+  return key ? {Authorization:'Bearer '+key} : {};
+}
 
 async function readBody(response, limit) {
   if (!response.ok || Number(response.headers.get('content-length')) > limit) {
@@ -109,6 +124,7 @@ function fishPayload(text, voice) {
   return Buffer.concat([Buffer.from([0x80+Object.keys(values).length]),...Object.entries(values).flatMap(([k,v])=>[pack(k),pack(v)])]);
 }
 
+/** @returns {Promise<Buffer>} */
 function runLocal(id, config, key, text, signal, python) {
   return new Promise((resolve,reject)=>{
     const executable = python || (process.platform==='win32'?'python':'python3');
@@ -123,7 +139,7 @@ function runLocal(id, config, key, text, signal, python) {
       else chunks.push(chunk);
     });
     child.stdin.on('error',()=>{});
-    child.once('error',error=>reject(error.code==='ENOENT'?new VoiceError('找不到本机 Python'):error));
+    child.once('error',error=>reject('code' in error && error.code==='ENOENT'?new VoiceError('找不到本机 Python'):error));
     child.once('close',code=>{
       if (code===0) resolve(Buffer.concat(chunks));
       else if (code===10) reject(new VoiceError('本机 Python 缺少 '+({edge:'edge-tts',genie:'genie-tts',dashscope:'dashscope'}[id])));
@@ -148,15 +164,17 @@ function openaiSpeech(config, key, text, { post }) {
 }
 
 const adapters = {
-  async minimax(c,k,text,{json}) {
+  /** @param {{json: VoiceJson}} transport */
+  async minimax(c,k,text,transport) {
+    const {json} = transport;
     const url = new URL(c.endpoint);
     if (c.groupId) url.searchParams.set('GroupId',c.groupId);
     const v = await json(url,{model:c.model,text,stream:false,output_format:'hex',language_boost:'auto',
       voice_setting:{voice_id:c.voice,...(c.speed!==1?{speed:c.speed}:{}),...(c.pitch!==0?{pitch:c.pitch}:{}),...(c.volume!==1?{vol:c.volume}:{})},
       audio_setting:{format:'mp3',sample_rate:24000,bitrate:64000,channel:1}},bearer(k));
-    const code = v?.base_resp?.status_code;
+    const code = responseField(v, 'base_resp', 'status_code');
     if (code !== 0) throw new VoiceError('MiniMax 语音合成失败'+(Number.isInteger(code)?'（'+code+'）':''));
-    const hex = v?.data?.audio;
+    const hex = responseField(v, 'data', 'audio');
     if (typeof hex !== 'string' || !hex || hex.length > AUDIO_LIMIT*2 || hex.length%2 || /[^0-9a-f]/i.test(hex)) throw new VoiceError('MiniMax 未返回有效语音');
     return Buffer.from(hex,'hex');
   },
@@ -164,26 +182,31 @@ const adapters = {
   sovitsLocal(c, _key, text, transport) {
     return openaiSpeech({ endpoint: c.endpoint, model: 'gpt-sovits', voice: c.voice || '', speed: c.speed || 1 }, '', text, transport);
   },
-  async mimo(c,k,text,{json}) {
+  /** @param {{json: VoiceJson}} transport */
+  async mimo(c,k,text,transport) {
+    const {json} = transport;
     const style = [c.style,c.dialect].filter(Boolean).join(' ');
     const content = style ? '<style>'+style+'</style>'+text : text;
     const messages = [...(c.seedText?[{role:'user',content:c.seedText}]:[]),{role:'assistant',content}];
     const audio = {format:'wav',...(!/voicedesign/i.test(c.model)?{voice:c.voice}:{})};
     const v = await json(address(c.endpoint,'/chat/completions'),{model:c.model,messages,audio},bearer(k));
-    return decodeBase64(v?.choices?.[0]?.message?.audio?.data);
+    return decodeBase64(responseField(v, 'choices', 0, 'message', 'audio', 'data'));
   },
   fish(c,k,text,{raw}) {
     return raw(address(c.endpoint,'/tts'),fishPayload(text,c.voice),{...bearer(k),model:c.model,'Content-Type':'application/msgpack'});
   },
-  async dashscope(c,k,text,{json,download,local}) {
+  /** @param {{json: VoiceJson, download: VoiceDownload, local: (kind: string, config: object, key: string, text: string) => Promise<Buffer>}} transport */
+  async dashscope(c,k,text,transport) {
+    const {json,download,local} = transport;
     if (!/^qwen.*tts/i.test(c.model)) return local('dashscope',c,k,text);
     const v = await json(address(c.endpoint,'/services/aigc/multimodal-generation/generation'),{model:c.model,input:{text,voice:c.voice,language_type:'Auto'}},bearer(k));
-    const audio = v?.output?.audio;
-    if (audio?.data) {
-      const bytes = decodeBase64(audio.data);
+    const audio = responseField(v, 'output', 'audio');
+    const encoded = responseField(audio, 'data');
+    if (encoded) {
+      const bytes = decodeBase64(encoded);
       return audioMime(bytes)?bytes:pcmWav(bytes);
     }
-    return download(audio?.url,c.endpoint,true);
+    return download(responseField(audio, 'url'),c.endpoint,true);
   },
   azure(c,k,text,{raw}) {
     const locale = /^([a-z]{2,3}-[A-Z]{2})/.exec(c.voice)?.[1] || 'zh-CN';
@@ -192,16 +215,30 @@ const adapters = {
     const ssml = '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="'+locale+'"><voice name="'+xml(c.voice)+'">'+style+'</voice></speak>';
     return raw('https://'+c.region+'.tts.speech.microsoft.com/cognitiveservices/v1',ssml,{'Ocp-Apim-Subscription-Key':k,'Content-Type':'application/ssml+xml','X-Microsoft-OutputFormat':'audio-24khz-48kbitrate-mono-mp3'});
   },
-  async volcengine(c,k,text,{json}) {
+  /** @param {{json: VoiceJson}} transport */
+  async volcengine(c,k,text,transport) {
+    const {json} = transport;
     const v = await json(c.endpoint,{app:{appid:c.appId,token:k,cluster:c.cluster},user:{uid:'coo-figure'},audio:{voice_type:c.voice,encoding:'mp3',speed_ratio:c.speed},request:{reqid:randomUUID(),text,text_type:'plain',operation:'query'}},{Authorization:'Bearer; '+k});
-    return decodeBase64(v?.data);
+    return decodeBase64(responseField(v, 'data'));
   },
-  async gemini(c,k,text,{json}) {
+  /** @param {{json: VoiceJson}} transport */
+  async gemini(c,k,text,transport) {
+    const {json} = transport;
     const prompt = c.style ? c.style+'\n'+text : text;
     const v = await json(address(c.endpoint,'/models/'+encodeURIComponent(c.model)+':generateContent'),{contents:[{parts:[{text:prompt}]}],generationConfig:{responseModalities:['AUDIO'],speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:c.voice}}}}},{'x-goog-api-key':k});
-    const audio = v?.candidates?.flatMap(x=>x.content?.parts||[]).find(part=>part.inlineData?.mimeType?.startsWith('audio/'))?.inlineData;
-    const bytes = decodeBase64(audio?.data);
-    return audioMime(bytes)?bytes:pcmWav(bytes,Number(/rate=(\d+)/i.exec(audio.mimeType)?.[1]||24000));
+    const candidates = responseField(v, 'candidates');
+    const parts = Array.isArray(candidates) ? candidates.flatMap(candidate => {
+      const values = responseField(candidate, 'content', 'parts');
+      return Array.isArray(values) ? values : [];
+    }) : [];
+    const audioPart = parts.find(value => {
+      const mime = responseField(value, 'inlineData', 'mimeType');
+      return typeof mime === 'string' && mime.startsWith('audio/');
+    });
+    const audio = responseField(audioPart, 'inlineData');
+    const bytes = decodeBase64(responseField(audio, 'data'));
+    const rate = Number(/rate=(\d+)/i.exec(String(responseField(audio, 'mimeType')))?.[1] || 24000);
+    return audioMime(bytes) ? bytes : pcmWav(bytes, rate);
   },
   elevenlabs(c,k,text,{post}) {
     const url = address(c.endpoint,'/text-to-speech/'+encodeURIComponent(c.voice));
@@ -212,9 +249,11 @@ const adapters = {
   gsv(c,_k,text,{post}) {
     return post(address(c.endpoint,'/tts'),{text,text_lang:c.language,ref_audio_path:c.reference,prompt_text:c.prompt,prompt_lang:c.promptLang,media_type:'wav',streaming_mode:false,speed_factor:c.speed});
   },
-  async gsvi(c,k,text,{json,download}) {
+  /** @param {{json: VoiceJson, download: VoiceDownload}} transport */
+  async gsvi(c,k,text,transport) {
+    const {json,download} = transport;
     const v = await json(address(c.endpoint,'/infer_single'),{dl_url:c.endpoint,version:c.version,model_name:c.voice,prompt_text_lang:c.promptLang,emotion:c.emotion,text,text_lang:c.language},bearer(k));
-    return download(v?.audio_url,c.endpoint);
+    return download(responseField(v, 'audio_url'),c.endpoint);
   },
   genie(c,k,text,{local}) {return local('genie',c,k,text);},
 };
@@ -234,7 +273,7 @@ export async function synthesizeVoice(id, config, key, text, options = {}) {
   try {
     const audio = await adapters[id](config,key,text,{
       raw,post,
-      json:async(url,body,headers)=>JSON.parse(await post(url,body,headers,JSON_LIMIT)),
+      json:async(url,body,headers)=>JSON.parse((await post(url,body,headers,JSON_LIMIT)).toString('utf8')),
       download:(value,origin,allowAliyun=false)=>{
         if (typeof value !== 'string' || !value) throw new VoiceError('语音服务未提供音频');
         const url = new URL(value,origin);

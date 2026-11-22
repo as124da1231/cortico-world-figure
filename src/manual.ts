@@ -11,14 +11,16 @@ import {wardrobeConfig,wardrobeTracks,wardrobeChannels} from '../workbench/pack/
 import {fixedWardrobeGroups} from '../workbench/pack/backends/wardrobe-slots.js';
 import {BODY_CROP_AXIS} from '../workbench/pack/backends/crop-config.js';
 import {EMOTION_EFFECT_AXIS} from '../workbench/tools/emotion-effect.mjs';
+import {FIGURE_THEME_AXIS} from '../workbench/tools/theme-palette.mjs';
 
 export const LIBRARY = 'native-library.json';
 export async function writeNativePack(root:string,catalog:any,bindings:any[],preview=false,groups:any[]=[]) {
   const native=nativeConfig(catalog,bindings,{includeAll:preview});
   const manifestFile=join(root,'figure.json'),manifest=parseFigureJson(await readFile(manifestFile,'utf8'));
   const previousLibrary=await readFile(join(root,LIBRARY),'utf8').then(s=>JSON.parse(s)).catch(()=>({}));
-  const previousAxes=new Set((previousLibrary.wardrobe||[]).map((g:any)=>g.id));
-  const reservedAxes=new Set([BODY_CROP_AXIS,EMOTION_EFFECT_AXIS]);
+  const previousGroups:any[]=previousLibrary.wardrobe||[];
+  const previousAxes=new Set(previousGroups.map(g=>g.id));
+  const reservedAxes=new Set([BODY_CROP_AXIS,EMOTION_EFFECT_AXIS,FIGURE_THEME_AXIS]);
   const baseAxes=(manifest.axes||[]).filter((a:any)=>!previousAxes.has(a.id));
   const trailingAxes=baseAxes.filter((a:any)=>reservedAxes.has(a.id));
   const axes=baseAxes.filter((a:any)=>!reservedAxes.has(a.id));
@@ -43,7 +45,21 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
     const removed=new Set(previous.map((b:any)=>b.word).filter((w:string)=>MOTION_WORDS.includes(w)));
     manifest.vocab=(manifest.vocab||[]).filter((v:any)=>!removed.has(v.id));
     appendNativeVocab(manifest.vocab,bindings,catalog.resources);
-    manifest.axes=[...axes,...runtimeGroups.map(g=>({id:g.id,name:{zh:g.name,en:g.en||g.name},options:[{id:'default',name:{zh:'默认',en:'Default'}},...g.options.map((o:any)=>({id:o.id,name:{zh:o.name,en:o.name}}))]})),...trailingAxes];
+    const wardrobeAxes=runtimeGroups.map(group=>{
+      const previous=previousGroups.find(g=>g.id===group.id);
+      const previousAxis=(manifest.axes||[]).find((axis:any)=>axis.id===group.id);
+      const options=[{id:'default',name:{zh:'默认',en:'Default'}},...group.options.map((option:{id:string;name:string;resource:string})=>({
+        id:option.id,name:{zh:option.name,en:option.name},resource:option.resource,
+      }))];
+      return {id:group.id,name:{zh:group.name,en:group.en||group.name},options:options.map(option=>{
+        const {id,name}=option;
+        const previousOption=previous?.options.find((o:any)=>o.id===id);
+        const thumb=previousAxis?.options.find((o:any)=>o.id===id)?.thumb;
+        const sameAppearance=id==='default'||('resource' in option&&previousOption?.resource===option.resource);
+        return {id,name,...(sameAppearance&&typeof thumb==='string'?{thumb}:{})};
+      })};
+    });
+    manifest.axes=[...axes,...wardrobeAxes,...trailingAxes];
     manifest.presets=(manifest.presets||[]).map((p:any)=>({...p,pick:Object.fromEntries(manifest.axes.map((a:any)=>[a.id,a.options.some((o:any)=>o.id===p.pick?.[a.id])?p.pick[a.id]:a.options[0].id]))}));
     // Empty groups are editor drafts only; runtime offsets follow the actual emitted axes.
     await writeFile(manifestFile,JSON.stringify(manifest,null,2)+'\n');
@@ -100,6 +116,9 @@ export class ManualSessions {
   }
   get(token:string){const s=this.sessions.get(token);if(!s||!s.saving&&Date.now()-s.at>2*3600000){if(s)void this.close(token).catch(()=>{});throw Error('编辑已过期，请重新打开');}s.at=Date.now();return s;}
   async prune(){for(const [token,s]of this.sessions)if(!s.saving&&Date.now()-s.at>2*3600000)await this.close(token).catch(()=>{});}
+  activeSources(): string[] {
+    return [...this.sessions.values()].flatMap(session => typeof session.source?.dir === 'string' ? [session.source.dir] : []);
+  }
   saved(token:string){for(const [key,value]of this.receipts)if(Date.now()-value.at>2*3600000)this.receipts.delete(key);return this.receipts.get(token)?.result;}
   complete(token:string,result:any){this.receipts.set(token,{at:Date.now(),result});while(this.receipts.size>64)this.receipts.delete(this.receipts.keys().next().value!);}
   async preview(token:string,input:unknown){

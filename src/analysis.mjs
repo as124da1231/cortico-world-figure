@@ -70,6 +70,7 @@ export function reviewSamples(c,b) {
   ...(release?[{id:release.id,time:release.seconds,word:b.word}]:[])];
 }
 
+/** @param {{visual: string[], review: string[]}} proof */
 export function confirmationReasons(c,bindings,cfg,proof={visual:[],review:[]}) {
  if(!bindings.length)return [];
  const policy=analysisPolicy(cfg),reasons=[];

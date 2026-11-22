@@ -32,23 +32,57 @@ function poseAt(mood, age) {
   }
 }
 
-export function createKaomojiPainter(make, root, {left, top, height}) {
-  const size = .55 * Math.max(30, Math.min(56, height * .26));
-  const x = left - Math.max(10, height * .06);
-  const y = top + Math.max(size * .48, height * .10);
-  const anchor = make('g', {transform:`translate(${x} ${y})`}, root);
-  const text = make('text', {'font-size':size, 'font-weight':'500', 'text-anchor':'end', 'dominant-baseline':'central',
+function fitAnchor(root, left, right, y, radii, side) {
+  const matrix = root.getScreenCTM?.();
+  const stage = root.ownerSVGElement?.getBoundingClientRect();
+  const doc = root.ownerDocument.documentElement;
+  const x = side === 'left' ? left : right;
+  if (!matrix || !stage || !stage.width || !stage.height) return {x,y,zoom:1,side};
+  const {a,b,c,d,e,f} = matrix;
+  const det = a*d-b*c;
+  if (Math.abs(det) < 1e-5) return {x,y,zoom:1,side};
+  const minX = Math.max(0, stage.left) + 5;
+  const minY = Math.max(0, stage.top) + 5;
+  const maxX = Math.min(doc.clientWidth || stage.right, stage.right) - 5;
+  const maxY = Math.min(doc.clientHeight || stage.bottom, stage.bottom) - 5;
+  if (maxX <= minX || maxY <= minY) return {x,y,zoom:1,side};
+  const radiusX = Math.abs(a)*radii.x + Math.abs(c)*radii.y;
+  const radiusY = Math.abs(b)*radii.x + Math.abs(d)*radii.y;
+  const zoom = Math.min(1,(maxX-minX)/(radiusX*2),(maxY-minY)/(radiusY*2));
+  const padX = radiusX*zoom, padY = radiusY*zoom;
+  const project = x => ({x:a*x+c*y+e,y:b*x+d*y+f});
+  const fits = point => point.x >= minX+padX && point.x <= maxX-padX;
+  let point = project(x), spot = x;
+  const other = side === 'left' ? right : left;
+  const alternate = project(other);
+  if (!fits(point) && fits(alternate)) {
+    side = side === 'left' ? 'right' : 'left';
+    point = alternate;
+    spot = other;
+  }
+  const dx = Math.max(minX+padX,Math.min(maxX-padX,point.x))-point.x;
+  const dy = Math.max(minY+padY,Math.min(maxY-padY,point.y))-point.y;
+  return {x:spot+(d*dx-c*dy)/det,y:y+(a*dy-b*dx)/det,zoom,side};
+}
+
+export function createKaomojiPainter(make, root, placement, scale = 1) {
+  const anchor = make('g', {}, root);
+  const text = make('text', {'font-weight':'500', 'text-anchor':'middle', 'dominant-baseline':'central',
     'font-family':'"Segoe UI", "Yu Gothic UI", "Microsoft YaHei UI", "Segoe UI Symbol", sans-serif',
-    'style':'white-space:pre', 'paint-order':'stroke', 'stroke-linejoin':'round', 'stroke-width':size * .052}, anchor);
+    'style':'white-space:pre', 'paint-order':'stroke', 'stroke-linejoin':'round'}, anchor);
   const open = make('tspan',{},text);
   const cheekL = make('tspan',{},text), face = make('tspan',{},text), cheekR = make('tspan',{},text);
   const close = make('tspan',{},text);
   open.textContent = '(';
   close.textContent = ')';
-  let lastMood, lastTheme, lastWord;
-  return (id, age, theme, reduced, word) => {
+  let lastMood, lastTheme, lastWord, lastSize, glyph, side = 'left';
+  return (id, age, theme, reduced, word, facing) => {
     const mood = MOODS[id];
+    let {left,right,top,height} = placement();
+    if (facing < 0) [left,right] = [256-right,256-left];
+    const size = Math.round(.55 * Math.max(30, Math.min(56, height*.26)) * scale * 4) / 4;
     const exact = Object.hasOwn(FIGURE_WOLF_KAOMOJI, word) ? FIGURE_WOLF_KAOMOJI[word] : '';
+    const textChanged = id !== lastMood || word !== lastWord;
     if (id !== lastMood || theme !== lastTheme || word !== lastWord) {
       const dark = theme === 'dark';
       const quiet = dark ? '#d1c5d6' : '#6b6471';
@@ -68,6 +102,23 @@ export function createKaomojiPainter(make, root, {left, top, height}) {
       lastTheme = theme;
       lastWord = word;
     }
+    if (lastSize !== size) {
+      text.setAttribute('font-size',String(size));
+      text.setAttribute('stroke-width',String(size*.052));
+    }
+    if (textChanged || lastSize !== size) {
+      lastSize = size;
+      const box = text.getBBox?.();
+      const x = box?.width ? Math.max(-box.x,box.x+box.width) : size*text.textContent.length*.32;
+      const y = box?.height ? Math.max(-box.y,box.y+box.height) : size*.62;
+      // Include the stroke and the largest offset, rotation and stretch of the poses.
+      glyph = {x:(x+y*.14)*1.12+size*.24,y:(y+x*.14)*1.12+size*.29};
+    }
+    const gap = Math.max(6,height*.04) + glyph.x;
+    const point = fitAnchor(root,left-gap,right+gap,top+Math.max(size*.48,height*.10),glyph,side);
+    side = point.side;
+    const translate = `translate(${point.x.toFixed(2)} ${point.y.toFixed(2)}) scale(${point.zoom.toFixed(4)})`;
+    if (anchor.getAttribute('transform') !== translate) anchor.setAttribute('transform',translate);
     const [dx,dy,rotate,sx,sy] = reduced ? rest : poseAt(mood,age);
     const wordScale = word === 'wink' ? .8 : 1;
     const transform = `translate(${size*dx} ${size*dy}) rotate(${rotate}) scale(${sx*wordScale} ${sy*wordScale})`;

@@ -46,6 +46,27 @@ test('saving locks binding mutations and a committed save survives list refresh 
  assert(e.button('保存中…').disabled);
  finish({buildId:'pack'});await new Promise(r=>setTimeout(r,5));assert(!e.doc.querySelector('dialog'));assert.equal(e.calls.filter(c=>c.method==='manualSave').length,1);assert(e.toasts.some(([s])=>s.includes('绑定已保存，模型包列表刷新失败')));
 });
+test('save progress continues after a temporary status request failure', async t => {
+ const stages = ['pack', Error('temporary disconnect'), 'images'];
+ let finish;
+ const e = await editor(t, false, {
+   save: () => new Promise(resolve => { finish = resolve; }),
+   progress: () => { const stage = stages.shift(); if (stage instanceof Error) throw stage; return { stage }; },
+ });
+ await e.dirty();
+ e.button('保存绑定').click();
+ const progress = e.doc.querySelector('[role=progressbar]');
+ await e.settle();
+ assert.equal(progress.getAttribute('aria-valuenow'), '1');
+ for (let attempt = 0; attempt < 30 && progress.getAttribute('aria-valuenow') !== '2'; attempt++) {
+   await new Promise(resolve => setTimeout(resolve, 50));
+ }
+ assert.equal(progress.getAttribute('aria-valuenow'), '2');
+ finish({buildId:'pack'});
+ await e.settle();
+ assert(!e.doc.querySelector('dialog'));
+});
+
 test('new group is found beside the wardrobe list and the dialog creates a draft in that group',async t=>{
  const e=await editor(t,false,{existing:true});
  const entry=e.doc.querySelector('.l2d-bind-left .l2d-bind-newgroup');
@@ -115,7 +136,7 @@ test('actions and wardrobe share one preview and save together; group defaults k
  e.doc.querySelector('[role=tab]:last-child').click();assert.deepEqual([...e.doc.querySelectorAll('.l2d-wardrobe-group-name')].map(b=>b.textContent),['装扮','部件','配饰']);assert(!e.button('添加分组'));assert(!e.doc.querySelector('[aria-label="装扮组名称"]'));
  [...e.doc.querySelectorAll('.l2d-bind-resource')].find(b=>b.textContent.includes('冬装')).click();await e.settle();e.button('添加选项').click();await e.settle();assert.equal(e.gallery,gallery);assert.match(e.doc.querySelector('.l2d-bind-summary').textContent,/外观 1\/3 栏/);
  e.button('恢复默认外观').click();assert.equal(e.doc.querySelectorAll('.l2d-bind-group').length,3);assert.equal(e.doc.querySelectorAll('[aria-label="装扮：冬装"]').length,1);
- e.doc.querySelector('[role=tab]').click();await e.settle();assert(e.button('开心1 个效果'));e.button('保存绑定').click();await new Promise(r=>setTimeout(r,5));const save=e.calls.find(c=>c.method==='manualSave');assert.equal(save.args[1][0].resource,'smile');assert.equal(save.args[2][0].options[0].resource,'coat');assert.equal(e.calls.filter(c=>c.method==='manualOpenBuild').length,1);
+ e.doc.querySelector('[role=tab]').click();await e.settle();assert(e.button('开心待保存'));e.button('保存绑定').click();await new Promise(r=>setTimeout(r,5));const save=e.calls.find(c=>c.method==='manualSave');assert.equal(save.args[1][0].resource,'smile');assert.equal(save.args[2][0].options[0].resource,'coat');assert.equal(e.calls.filter(c=>c.method==='manualOpenBuild').length,1);
 });
 test('confirmation Escape preserves edits; panel disposal removes a pending confirmation',async t=>{
  const e=await editor(t);await e.dirty();e.button('取消').click();const event=new e.w.Event('cancel',{bubbles:true,cancelable:true});e.doc.querySelector('.l2d-bind-discard').dispatchEvent(event);await Promise.resolve();assert(e.modal.open);assert(!e.doc.querySelector('.l2d-bind-discard'));

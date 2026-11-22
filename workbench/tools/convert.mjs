@@ -18,7 +18,7 @@
  *     models/index.js        注册表（模型 + 动作元数据）
  *     models/<id>/
  *       profile.js           role 表 / 通用表情配方 / 取景 / 自动适配说明
- *       moc3.js              base64 模块
+ *       model.moc3           Cubism 模型
  *       model3.js  physics.js  cdi3.js
  *       motions/*.js         每段动作（含 partOpacity / owns / seconds）
  *       textures/*.png       复制后按 --max-texture 可选降采样
@@ -32,7 +32,9 @@ import { createHash } from 'node:crypto';
 import { closeSync, existsSync, openSync, readSync, realpathSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { resolveModelAsset } from './model-assets.mjs';
-import { EMOTION_EFFECT_THUMBS, emotionStyleModule, normalizeEmotionEffect, setEmotionEffectAxis } from './emotion-effect.mjs';
+import { writePackEffects } from './pack-effects.mjs';
+import { writePackThemes } from './pack-themes.mjs';
+import { packBackends, writePackSoulLink } from './pack-runtime.mjs';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -157,6 +159,7 @@ const cdiPath = (() => {
 const display = cdiPath ? await readJson(cdiPath) : { Parameters: [], ParameterGroups: [] };
 const params = (display.Parameters ?? []).map((p) => p.Id);
 const bongo = await readBongoPackage(modelDir, params, files.Motions, resolveAsset, pngSize);
+const sourceFormat = bongo ? 'bongocat' : 'live2d';
 const groups = new Map((display.ParameterGroups ?? []).map((g) => [g.Id, g.Name ?? g.Id]));
 const paramMeta = new Map((display.Parameters ?? []).map((p) => [
   p.Id,
@@ -430,7 +433,6 @@ for (const e of expressionFiles) {
 }
 
 const overrides = OVERRIDES_PATH ? await readJson(OVERRIDES_PATH) : {};
-const emotionEffect = normalizeEmotionEffect(overrides.emotionEffect);
 const nativeMap = SIMPLE ? {} : { ...nativeExpressions, ...(overrides.expressions ?? {}) };
 const performance = {
   ...(overrides.performance ?? {}),
@@ -571,16 +573,9 @@ const desktopAssets = {};
 const modelRoot = DESKTOP_SOURCE ? realpathSync(modelDir) : modelDir;
 const modelReference = (name, file) => { desktopAssets[`models/${id}/${name}`] = ['model', relative(modelRoot, realpathSync(file))]; };
 
-// 1) moc3 原始文件（供 Coopanion 0.2.14+ 原生 fetch） + base64 模块（旧版本回退）
+// 1) 原始 moc3 由 Coopanion 0.2.14+ 的形象沙箱直接读取
 if (DESKTOP_SOURCE) modelReference('model.moc3', mocPath);
-else {
-  await writeFile(join(OUT, 'models', id, 'model.moc3'), mocBytes);
-  await writeFile(
-  join(OUT, 'models', id, 'moc3.js'),
-  `// ${basename(mocPath)}（base64：旧版本沙箱不能 fetch 二进制时的回退兜底）\nexport default "${mocBytes.toString('base64')}";\n`,
-  'utf8',
-  );
-}
+else await writeFile(join(OUT, 'models', id, 'model.moc3'), mocBytes);
 
 // 2) model3 / physics / cdi3 → JS 模块
 await writeFile(join(OUT, 'models', id, 'model3.js'),
@@ -728,7 +723,6 @@ const registry = {
     id,
     model: 'model3.js',
     moc: 'model.moc3',
-    mocFallback: 'moc3.js',
     ...(physicsPath ? { physics: 'physics.js' } : {}),
     ...(!SIMPLE && posePath ? { pose: 'pose.js' } : {}),
     ...(!SIMPLE && idleMotions.length
@@ -746,7 +740,7 @@ await writeFile(join(OUT, 'models', 'index.js'),
   'utf8');
 
 // 7) 运行时代码（从 --runtime 复制，保持新包自包含）
-for (const rel of ['figure.js', 'figure-voice.json', 'backends/voice-playback.js', 'backends/live2d.js', 'backends/soullink.js', 'backends/performance-plan.js', 'backends/performance-playback.js', 'backends/role-values.js', 'backends/render-config.js', 'backends/render-quality.js', 'backends/native-actions.js', 'backends/native-combination.js', 'backends/wardrobe.js', 'backends/wardrobe-slots.js', 'backends/bongo.js', 'backends/body-crop.js', 'backends/crop-config.js', 'backends/gaze-config.js']) {
+for (const rel of ['figure.js', 'figure-voice.json', ...packBackends(sourceFormat).map(file => 'backends/' + file)]) {
   const src = join(RUNTIME, rel);
   if (!existsSync(src)) {
     console.warn(`跳过（--runtime 里没有）：${rel}`);
@@ -755,8 +749,6 @@ for (const rel of ['figure.js', 'figure-voice.json', 'backends/voice-playback.js
   await mkdir(dirname(join(OUT, rel)), { recursive: true });
   await copyFile(src, join(OUT, rel));
 }
-await cp(join(RUNTIME, 'backends', 'emotion-effects'), join(OUT, 'backends', 'emotion-effects'), { recursive: true });
-await cp(join(RUNTIME, EMOTION_EFFECT_THUMBS), join(OUT, EMOTION_EFFECT_THUMBS), { recursive: true });
 // The extension verifies its shared cache before invoking the converter.
 const sdkTarget = join(OUT, 'sdk');
 const core = CORE_PATH && resolve(CORE_PATH);
@@ -781,12 +773,7 @@ if (DESKTOP_SOURCE) {
 // SoulLink 表演引擎（Apache-2.0，随包分发，含许可证）
 const vendorDir = join(RUNTIME, 'vendor', 'soullink');
 if (existsSync(vendorDir)) {
-  for (const rel of await readdir(vendorDir)) {
-    const src = join(vendorDir, rel);
-    if (!(await stat(src)).isFile()) continue;
-    await mkdir(join(OUT, 'vendor', 'soullink'), { recursive: true });
-    await copyFile(src, join(OUT, 'vendor', 'soullink', rel));
-  }
+  await writePackSoulLink(RUNTIME, OUT);
 } else {
   console.warn('跳过（--runtime 里没有）：vendor/soullink');
 }
@@ -880,8 +867,8 @@ const figureJson = {
   sounds: {},
   can: { walk: motion.kind === 'roam' },
 };
-setEmotionEffectAxis(figureJson, emotionEffect);
-await writeFile(join(OUT, 'backends', 'emotion-style.js'), emotionStyleModule(emotionEffect, overrides.emotionEffectSize, figureJson), 'utf8');
+await writePackThemes(OUT, figureJson, overrides.themePalettes);
+await writePackEffects(RUNTIME, OUT, figureJson, overrides.emotionEffects ?? overrides.emotionEffect, overrides.emotionEffectSize);
 appendNativeVocab(figureJson.vocab, overrides.native?.bindings ?? [], overrides.native?.resources ?? []);
 await writeFile(join(OUT, 'figure.json'), JSON.stringify(figureJson, null, 2) + '\n', 'utf8');
 await writeFile(join(OUT, 'build.json'), JSON.stringify({
@@ -897,7 +884,7 @@ await writeFile(join(OUT, 'build.json'), JSON.stringify({
   resourceRoles: Object.fromEntries(resources.filter((r) => r.custom).map((r) => [r.file, r.cls])),
   unmapped,
   renderPolicy: 'adaptive',
-  ...(bongo ? { sourceFormat: 'bongocat' } : {}),
+  sourceFormat,
 }, null, 2) + '\n', 'utf8');
 
 // ---------------------------------------------------------------- 报告

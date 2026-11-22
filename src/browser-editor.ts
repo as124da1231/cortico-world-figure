@@ -15,6 +15,29 @@ const TYPES: Record<string, string> = {
 const MAX_REQUEST = 256 * 1024;
 const RECONNECT_MS = 12000;
 
+const STUDIO_THEME_COLORS = [
+  'paper', 'paper-2', 'sheet', 'sheet-2', 'ink', 'ink-soft', 'ink-dim',
+  'line', 'line-2', 'accent', 'on-accent', 'ok', 'warn', 'danger',
+] as const;
+
+type StudioTheme = {
+  mode?: 'light' | 'dark';
+  colors: Partial<Record<typeof STUDIO_THEME_COLORS[number], string>>;
+};
+
+function normalizeStudioTheme(value: unknown): StudioTheme | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const {mode, colors} = value as Record<string, unknown>;
+  if (!colors || typeof colors !== 'object' || Array.isArray(colors)) return;
+  const result: StudioTheme = {colors:{}};
+  if (mode === 'light' || mode === 'dark') result.mode = mode;
+  for (const key of STUDIO_THEME_COLORS) {
+    const color = (colors as Record<string, unknown>)[key];
+    if (typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color)) result.colors[key] = color;
+  }
+  return result;
+}
+
 export interface BrowserDraft {
   bindings: unknown[];
   wardrobe: unknown[];
@@ -31,6 +54,7 @@ interface EditorOwner {
 interface EditorOptions {
   data: { token: string };
   language: string;
+  theme?: unknown;
   pack: string;
   workbench: string;
   draft?: BrowserDraft;
@@ -89,6 +113,7 @@ export async function serveBrowserEditor(opts: EditorOptions): Promise<BrowserEd
 <title>${title}</title><link rel="icon" href="data:,">
 <link rel="stylesheet" href="editor.css"><main class="figure-studio" aria-label="${title}"></main>
 <div class="figure-studio-toast" role="status"></div><script type="module" src="editor.js"></script></html>`;
+  const theme = normalizeStudioTheme(opts.theme);
   const prefix = `/${opts.data.token}/`;
   let origin = '';
   let timer: ReturnType<typeof setTimeout>;
@@ -161,7 +186,7 @@ export async function serveBrowserEditor(opts: EditorOptions): Promise<BrowserEd
     if (!path) {
       res.setHeader('content-security-policy', `sandbox allow-scripts; default-src 'none'; script-src ${scene} 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src ${scene} data: blob:; connect-src ${scene}; frame-ancestors ${origin}; base-uri 'none'; form-action 'none'`);
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(
-        '<!doctype html><meta charset="utf-8"><style>html,body,#root{position:absolute;inset:0;margin:0;overflow:hidden}</style><div id="root"></div><script type="module" src="figure-frame.js"></script>',
+        `<!doctype html><meta charset="utf-8"><style>html{color-scheme:${theme?.mode ?? 'light dark'}}html,body,#root{position:absolute;inset:0;margin:0;overflow:hidden;background:transparent}</style><div id="root"></div><script type="module" src="figure-frame.js"></script>`,
       );
       return;
     }
@@ -258,7 +283,7 @@ export async function serveBrowserEditor(opts: EditorOptions): Promise<BrowserEd
       if (!receipt && !saving) opts.keepAlive();
       owner = { id: randomUUID(), resume: resuming ? resume : randomUUID(), reconnectable: false, draftRevision: -1 };
       expireAfter(RECONNECT_MS);
-      json(res, { owner: owner.id, resume: owner.resume, data: { ...opts.data, draft }, saved: receipt?.result });
+      json(res, { owner: owner.id, resume: owner.resume, data: { ...opts.data, draft, theme }, saved: receipt?.result });
       return;
     }
 

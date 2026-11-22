@@ -106,6 +106,30 @@ test('image evidence balances named expressions and motions and supports exact t
  f.cfg.assistGear='text';await assert.rejects(f.auto.actions(f.model.id,0,undefined,{resources:[pose.id],samples:[{resource:pose.id,time:0}]}),/标准或深入/);
 });
 
+test('changing adaptation settings while a request waits prevents old images or a proposal from being committed',async t=>{
+ const rendered=Promise.withResolvers(),resume=Promise.withResolvers();
+ const f=await automation(t,{evidence:async(...args)=>{rendered.resolve();await resume.promise;return evidenceFrames(...args);}});
+ f.cfg.assistGear='image';
+ f.host.modelFacts.accepts=()=>true;
+ const actions=f.auto.actions(f.model.id);
+ await rendered.promise;
+ f.cfg.assistGear='text';
+ resume.resolve();
+ const result=await actions;
+ assert.equal(result.blobs,undefined);
+ assert.deepEqual(JSON.parse(result.text).evidence,[]);
+
+ const selected=Promise.withResolvers(),finish=Promise.withResolvers();
+ const catalog=f.auto.catalog.bind(f.auto);
+ f.auto.catalog=async(...args)=>{const current=await catalog(...args);selected.resolve();await finish.promise;return current;};
+ const plan=f.auto.prepare(f.model.id,f.bindings);
+ await selected.promise;
+ f.cfg.adaptationMode='none';
+ finish.resolve();
+ await assert.rejects(plan,/开启 AI 自动适配/);
+ assert.deepEqual(f.auto.pending(),[]);
+});
+
 test('deep mode requires mapping comparisons even after general inspection and confidence .99',async t=>{
  const f=await automation(t,{evidence:evidenceFrames});Object.assign(f.cfg,{assistGear:'image',assistDepth:'deep',assistAuto:true});f.host.modelFacts.accepts=()=>true;
  await f.auto.actions(f.model.id);

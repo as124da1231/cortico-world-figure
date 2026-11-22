@@ -6,6 +6,7 @@ const idPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 type PlannerProvider = keyof typeof PLANNER_PROVIDERS;
 type PlannerService = { id: string; provider: PlannerProvider; name: string; endpoint: string; model: string };
 type Connection = PlannerService & { apiKey: string };
+type ActiveConnection = Connection & { signal: AbortSignal };
 type PlannerDraft = Partial<PlannerService> & { key?: unknown; nonce?: unknown; select?: boolean };
 export interface PlannerConfig {
   performanceServices?: PlannerService[];
@@ -76,6 +77,7 @@ export async function plannerFetch(service: Connection, url: string, init: Reque
 
 export class PlannerServices {
   private readonly options: PlannerOptions;
+  private active?: { connection: ActiveConnection; controller: AbortController };
 
   constructor(options: PlannerOptions) { this.options = options; }
 
@@ -116,12 +118,24 @@ export class PlannerServices {
     };
   }
 
-  connection(): Connection | undefined {
+  connection(): ActiveConnection | undefined {
     const cfg = this.options.config();
     const service = this.selected(cfg, this.list(cfg));
-    if (!service) return;
-    const apiKey = this.key(service);
-    if (this.ready(service, apiKey)) return { ...service, apiKey, endpoint: plannerEndpoint(service.endpoint), model: service.model.trim() };
+    const apiKey = service ? this.key(service) : '';
+    const next = service && this.ready(service, apiKey)
+      ? { ...service, apiKey, endpoint: plannerEndpoint(service.endpoint), model: service.model.trim() } : undefined;
+    const previous = this.active?.connection;
+    if (next && previous && previous.id === next.id && previous.provider === next.provider
+        && previous.endpoint === next.endpoint && previous.model === next.model && previous.apiKey === next.apiKey) {
+      return { ...next, signal: previous.signal };
+    }
+    this.active?.controller.abort();
+    this.active = undefined;
+    if (!next) return undefined;
+    const controller = new AbortController();
+    const connection = { ...next, signal: controller.signal };
+    this.active = { connection, controller };
+    return connection;
   }
 
   private draft(input: unknown, needsModel: boolean) {
@@ -166,6 +180,7 @@ export class PlannerServices {
       performanceService: draft.select === true || (existing && selected === existing.id) ? id : selected ?? cfg.performanceService ?? '',
       ...(existing?.id === 'legacy' ? {performanceEndpoint: '', performanceModel: ''} : {}),
     });
+    this.connection();
     return this.state();
   }
 
@@ -174,6 +189,7 @@ export class PlannerServices {
     const service = this.list().find(item => item.id === id);
     if (!service || !this.ready(service, this.key(service))) throw Error('请先补全该服务的地址、模型和鉴权');
     this.options.persist({ performanceService: service.id });
+    this.connection();
     return this.state();
   }
 
@@ -187,6 +203,7 @@ export class PlannerServices {
       performanceService: this.selected(cfg, services)?.id === id ? 'none' : cfg.performanceService ?? '',
       ...(id === 'legacy' ? {performanceEndpoint: '', performanceModel: ''} : {}),
     });
+    this.connection();
     return this.state();
   }
 

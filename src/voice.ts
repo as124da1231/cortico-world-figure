@@ -85,7 +85,8 @@ type PreparedSpeech = {
   controller: AbortController;
   audio: Promise<Buffer | undefined>;
 };
-type SpeechPair = { ready: Promise<{script: string; body: DesktopBodyId} | undefined>; at: number };
+type BubbleMatch = { body: DesktopBodyId; text: string; after: number };
+type SpeechPair = { ready: Promise<{script: string; body: DesktopBodyId} | undefined>; at: number; bubble?: BubbleMatch };
 type CoordinatePerformance = (prepared: Promise<Buffer | undefined>, signal: AbortSignal,
   play: (first: Buffer, onStarted: VoiceStarted) => Promise<void>) => Promise<boolean>;
 type StreamJob = {
@@ -119,11 +120,12 @@ export class FigureVoice {
   private auditionEpoch = 0;
   private stream?: StreamJob;
   private speechEpoch = 0;
+  private pairingEpoch = 0;
   private readonly systemPlayer: SystemVoicePlayer | null;
   private preparedSpeech = new Map<string, PreparedSpeech>();
   private speechPairs = new Map<string, SpeechPair>();
   private acceptedSpeech = new Set<string>();
-  private pairedBubbles: Array<{ body: DesktopBodyId; text: string; after: number; expires: number }> = [];
+  private pairedBubbles: Array<BubbleMatch & { expires: number }> = [];
   private systemVoiceStartedAt?: number;
   private speechRound?: number;
   private testing?: { controller: AbortController; task: Promise<unknown> };
@@ -138,7 +140,10 @@ export class FigureVoice {
   }
 
   private services(cfg = this.options.config()): VoiceService[] {
-    if (Array.isArray(cfg.voiceServices)) return cfg.voiceServices;
+    if (Array.isArray(cfg.voiceServices)) {
+      return cfg.voiceServices.filter(service => service && typeof service.id === 'string' && known(service.provider))
+        .map(service => typeof service.name === 'string' ? service : { ...service, name: '' });
+    }
     const profiles = cfg.voiceProfiles ?? {};
     return Object.keys(VOICE_PROVIDERS)
       .filter(provider => Object.hasOwn(profiles, provider) || cfg.voiceProvider === provider)
@@ -313,7 +318,7 @@ export class FigureVoice {
     const target = await this.availability();
     if (audition !== this.auditionEpoch) return { ok: false };
     if ((!target.dir && !target.system) || this.paused) throw new Error(target.issue || '形象正在安装，请稍后再试');
-    await this.hush(false, true, audition);
+    await this.hush({ audition });
     if (audition !== this.auditionEpoch || this.paused) return { ok: false };
     await this.play(target, DEMO, voice, true);
     return { ok: audition === this.auditionEpoch };
@@ -321,11 +326,13 @@ export class FigureVoice {
 
   async stopAudition() {
     this.auditionEpoch++;
-    if (this.job?.audition) {
-      this.job.controller.abort();
+    const job = this.job?.audition ? this.job : undefined;
+    if (job) {
+      job.controller.abort();
       this.systemPlayer?.interrupt();
     }
-    await this.publish(this.active, clips => clips.filter(clip => !clip.audition));
+    try { await this.publish(this.active, clips => clips.filter(clip => !clip.audition)); }
+    finally { await job?.task.catch(() => {}); }
     return { ok: true };
   }
 
@@ -373,11 +380,10 @@ export class FigureVoice {
 
   async stop() {
     this.host = null;
-    this.speechPairs.clear();
     this.pairedBubbles = [];
     clearTimeout(this.timer);
     this.testing?.controller.abort();
-    const hush = this.hush(true).catch(() => {});
+    const hush = this.hush({ reset: true }).catch(() => {});
     await this.tick;
     await hush;
     await this.testing?.task.catch(() => {});
@@ -389,7 +395,7 @@ export class FigureVoice {
   /** Clear the transient audio before the installer can back up an existing pack. */
   async suspend() {
     this.paused = true;
-    try { await this.hush(true); }
+    try { await this.hush({ reset: true }); }
     catch (error) { this.paused = false; throw error; }
     return () => { this.paused = false; };
   }
@@ -448,7 +454,7 @@ export class FigureVoice {
     const usePrepared = prepared?.text === sentences[0] && prepared.voice.id === voice.id
       && prepared.voice.key === voice.key && JSON.stringify(prepared.voice.profile) === JSON.stringify(voice.profile);
     if (!usePrepared) prepared?.controller.abort();
-    const stopPrevious = this.hush();
+    const stopPrevious = this.hush({ keepPairs: true });
     this.message = '';
     const controller = new AbortController();
     const signal = context.signal ? AbortSignal.any([controller.signal, context.signal]) : controller.signal;
@@ -468,9 +474,7 @@ export class FigureVoice {
       if (!paired || typeof paired !== 'object') return;
       const {script, body} = paired;
       const after = this.host?.store.latestCursor() ?? 0;
-      const pairedAt = Date.now();
-      this.pairedBubbles = this.pairedBubbles.filter(bubble => bubble.expires > pairedAt).slice(1 - MAX_STREAM_CLIPS);
-      this.pairedBubbles.push({ body, text: comparableSpeech(script), after, expires: pairedAt + PREFETCH_MS });
+      this.rememberBubble({ body, text: comparableSpeech(script), after });
       const coordinate = this.options.coordinatePerformance?.(text, script, body);
       clearTimeout(timer);
       timer = setTimeout(() => {
@@ -586,12 +590,19 @@ export class FigureVoice {
       } catch { return ''; }
     };
     type PairedCall = Awaited<SpeechPair['ready']>;
-    let pending: { id: string; text: string; settle: (call?: PairedCall) => void } | undefined;
+    let pairingEpoch = this.pairingEpoch;
+    let pending: { id: string; text: string; settle?: (call?: PairedCall) => void } | undefined;
     const closePair = (call?: PairedCall) => {
       if (!pending) return;
       const match = call ? comparableSpeech(call.script) : '';
       const matched = Boolean(match) && match === pending.text;
-      pending.settle(matched ? call : undefined);
+      pending.settle?.(matched ? call : undefined);
+      if (matched && call && this.host) {
+        const bubble = { body: call.body, text: match, after: this.host.store.latestCursor() };
+        const pair = this.speechPairs.get(pending.id);
+        if (pair) pair.bubble = bubble;
+        else if (pairingEpoch !== this.pairingEpoch) this.rememberBubble(bubble);
+      }
       if (!matched) {
         this.preparedSpeech.get(pending.id)?.controller.abort();
         this.preparedSpeech.delete(pending.id);
@@ -607,25 +618,40 @@ export class FigureVoice {
     return {
       ...tap,
       onEvent: event => {
-        if (event.type === 'response.created') closePair();
+        if (event.type === 'response.created') {
+          closePair();
+          pairingEpoch = this.pairingEpoch;
+        }
+        const stale = pairingEpoch !== this.pairingEpoch;
         if (event.type === 'response.output_item.done' && event.item?.type === 'function_call') {
           const item = event.item;
           const body = item.name === 'pet_say' ? 'desktop-pet' : item.name === 'live2d_pet_say' ? 'desktop-live2d-pet' : undefined;
           closePair(body && item.status === 'completed' && item.call_id ? {body, script:argument(item.arguments, 'script')} : undefined);
           if (item.name === 'figure_speak' && item.call_id && item.status === 'completed') {
+            const text = comparableSpeech(argument(item.arguments, 'text'));
+            if (stale) {
+              pending = { id: item.call_id, text };
+              return;
+            }
             const at = Date.now();
             for (const [id, pair] of this.speechPairs) if (at - pair.at > PREFETCH_MS) this.speechPairs.delete(id);
             if (this.speechPairs.size >= MAX_STREAM_CLIPS) this.speechPairs.delete(this.speechPairs.keys().next().value!);
             let settle!: (call?: PairedCall) => void;
             const ready = new Promise<PairedCall>(resolve => { settle = resolve; });
             this.speechPairs.set(item.call_id, { ready, at });
-            pending = { id: item.call_id, text: comparableSpeech(argument(item.arguments, 'text')), settle };
+            pending = { id: item.call_id, text, settle };
           }
         }
-        tap.onEvent(event);
+        if (!stale) tap.onEvent(event);
       },
       onRoundEnd: () => { closePair(); tap.onRoundEnd?.(); },
     };
+  }
+
+  private rememberBubble(bubble: BubbleMatch) {
+    const now = Date.now();
+    this.pairedBubbles = this.pairedBubbles.filter(match => match.expires > now).slice(1 - MAX_STREAM_CLIPS);
+    this.pairedBubbles.push({ ...bubble, expires: now + PREFETCH_MS });
   }
 
   onRunPhase(phase: RunPhase) {
@@ -633,10 +659,21 @@ export class FigureVoice {
     if (phase.state === 'model' && !this.paused && (this.syncTiming() || !supportsQueue(this.active?.protocol))) this.systemPlayer?.warm();
   }
 
-  private async hush(reset = false, advanceCursor = true, keepAudition?: number) {
+  private async hush({ reset = false, advanceCursor = true, audition, keepPairs = false }: {
+    reset?: boolean; advanceCursor?: boolean; audition?: number; keepPairs?: boolean;
+  } = {}) {
     // A sample can be preparing even before it owns the playback job.
-    if (keepAudition === undefined) this.auditionEpoch++;
-    else if (keepAudition !== this.auditionEpoch) return;
+    if (audition === undefined) this.auditionEpoch++;
+    else if (audition !== this.auditionEpoch) return;
+    if (!keepPairs) {
+      this.pairingEpoch++;
+      if (this.host) {
+        for (const pair of this.speechPairs.values()) {
+          if (pair.bubble && Date.now() - pair.at <= PREFETCH_MS) this.rememberBubble(pair.bubble);
+        }
+      }
+      this.speechPairs.clear();
+    }
     const stream = this.stream;
     const job = this.job;
     this.speechEpoch++;
@@ -747,7 +784,7 @@ export class FigureVoice {
     const lastReply = replies.at(-1);
     const interruption = !this.job?.audition && events.filter(event => isDesktopBody(event.source)
       && [event.source + '.message', event.source + '.speech', event.source + '.answer'].includes(event.type)).at(-1);
-    if (interruption) await this.hush(false, false);
+    if (interruption) await this.hush({ advanceCursor: false, keepPairs: true });
     const target = await this.availability(lastReply?.source ?? this.stream?.body ?? this.job?.target?.body);
     const { dir, body, protocol, system } = target;
     if (!this.host || this.paused) return;

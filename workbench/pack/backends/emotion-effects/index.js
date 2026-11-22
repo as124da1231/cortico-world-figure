@@ -24,8 +24,9 @@ function scaleLayers(make, layers, [left, top, right, bottom], style, scale) {
   }
 }
 
-export function createPetEmotionEffects({doc, parent, art, bounds, style, size, theme}) {
+export function createPetEmotionEffects({doc, parent, art, bounds, kaomojiBox, style, size, theme}) {
   const scale = Object.hasOwn(SIZE_SCALES, size) ? SIZE_SCALES[size] : SIZE_SCALES.medium;
+  const wrapLayers = scale !== 1 && style !== 'kaomoji';
   const make = (tag, attrs, container) => {
     const node = doc.createElementNS(SVG_NS, tag);
     for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
@@ -45,17 +46,19 @@ export function createPetEmotionEffects({doc, parent, art, bounds, style, size, 
       if (!Number.isFinite(frame.t) || !Array.isArray(visible) || visible.length !== 4
         || !visible.every(Number.isFinite) || visible[2] <= visible[0] || visible[3] <= visible[1]) return;
 
-      if (!geometry || visible.some((value, index) => value !== geometry[index])) {
+      const changed = !geometry || visible.some((value, index) => value !== geometry[index]);
+      if (changed) geometry = [...visible];
+      if (!effects || changed && style !== 'kaomoji') {
         effects?.dispose();
-        geometry = [...visible];
         const layers = [];
         const makeEffectNode = (tag, attrs, container) => {
           const node = make(tag, attrs, container);
           if (container === parent) layers.push(node);
           return node;
         };
-        effects = createEmotionEffects({make: scale === 1 ? make : makeEffectNode, parent, art: marker, media,
-          model: {visible: geometry, effectStyle: style, emotionIntensity: 'natural'}});
+        effects = createEmotionEffects({make: wrapLayers ? makeEffectNode : make, parent, art: marker, media,
+          model: {visible: geometry, effectStyle: style, emotionIntensity: 'natural', kaomojiScale:scale,
+            kaomojiBox: () => kaomojiBox?.(geometry) ?? {left:geometry[0],top:geometry[1],right:geometry[2],height:geometry[3]-geometry[1]}}});
         scaleLayers(make, layers, geometry, style, scale);
         effects.setTheme?.(scheme);
       }

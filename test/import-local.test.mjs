@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {clipboardPaths} from '../src/clipboard.ts';
 import {PackImporter} from '../src/import.ts';
+import {FIGURE_IMPORT} from '../src/import-limits.mjs';
 import {LIVE2D} from '../src/index.ts';
 import {makeCtx,prepareWorld,fixtureManifest} from './_ctx.mjs';
 
@@ -86,6 +87,82 @@ test('chunked files must be contiguous and complete before an import can be reco
   await importer.appendChunk(token,{path:'figure.json',bytes:bytes.subarray(5)},5,bytes.length);
   await importer.appendUpload(token,[{path:'figure.js',bytes:Buffer.from('export function createFigureBody(){}')}]);
   const result=await importer.finishUpload(token,false,new Map());assert.equal(result.packs[0].id,'chunked');
+});
+
+test('panel upload rejects oversized requests and keeps a valid upload available for retry', async t => {
+  const world = LIVE2D.create(makeCtx(await fixture(t), {enabled:true}));
+  await world.start({});
+  t.after(() => world.stop());
+  const invoke = (method, args = []) => world.webUi().invoke('workbench', method, args);
+  const {token} = await invoke('importBegin');
+  const chunk = {path:'texture.bin', offset:0, total:FIGURE_IMPORT.chunk};
+  await assert.rejects(invoke('importAppendChunk', [token, {
+    ...chunk, b64:'A'.repeat(4 * Math.ceil(FIGURE_IMPORT.chunk / 3) + 4),
+  }]), /分块过大/);
+  const b64 = Buffer.alloc(FIGURE_IMPORT.file).toString('base64');
+  await assert.rejects(invoke('importAppend', [token, [1, 2, 3].map(index => ({path:`file-${index}`, b64}))]), /批次过大/);
+  await assert.rejects(invoke('importStage', ['A'.repeat(4 * Math.ceil(FIGURE_IMPORT.zip / 3) + 4), 'zip']), /ZIP 超过/);
+  assert.equal((await invoke('importAppendChunk', [token, {...chunk, b64:Buffer.alloc(chunk.total).toString('base64')}])).written, chunk.total);
+  await invoke('importAppend', [token, [
+    {path:'figure.json', b64:Buffer.from(JSON.stringify(fixtureManifest())).toString('base64')},
+    {path:'figure.js', b64:Buffer.from('export function createFigureBody(){}').toString('base64')},
+  ]]);
+  assert.equal((await invoke('importFinish', [token, true])).packs[0].id, 'sample');
+});
+
+test('a committed install or deletion is reported separately from a failed record write', async t => {
+  const root = await fixture(t);
+  const source = await sourcePack(join(root, 'source'));
+  const world = LIVE2D.create(makeCtx(root, {enabled:true, figuresDir:join(root, 'figures')}));
+  await world.start({});
+  t.after(() => world.stop());
+  const invoke = (method, args = []) => world.webUi().invoke('workbench', method, args);
+  await invoke('noticeAccept', [1]);
+  const staged = await invoke('importPaths', [[source]]);
+  const {buildId} = await invoke('importKeep', [staged.token, staged.packs[0].dir]);
+  const save = world.save.bind(world);
+  world.save = async () => { throw Error('write failed'); };
+  try {
+    const installed = await invoke('install', ['', buildId]);
+    assert.equal(installed.figureId, 'sample');
+    assert.match(installed.warn, /安装记录保存失败/);
+    assert.equal(await readFile(join(installed.state.install.target, 'keep.txt'), 'utf8'), 'original');
+    const deleted = await invoke('remove', [buildId]);
+    assert.match(deleted.warn, /删除记录保存失败/);
+    assert.equal(deleted.builds.length, 0);
+    assert.equal(await readFile(join(source, 'keep.txt'), 'utf8'), 'original');
+  } finally { world.save = save; }
+});
+
+test('cancelling a folder scan retires its token before a new source is staged', async t => {
+  const root = await fixture(t), source = await sourcePack(join(root, 'source'));
+  const importer = new PackImporter();
+  t.after(() => importer.cancel());
+  const token = await importer.beginUpload();
+  await importer.appendUpload(token, [
+    { path: 'figure.json', bytes: Buffer.from(JSON.stringify(fixtureManifest({ id: 'cancelled' }))) },
+    { path: 'figure.js', bytes: Buffer.from('export function createFigureBody(){}') },
+  ]);
+  const finishing = importer.finishUpload(token, true, new Map());
+  await importer.cancel(token);
+  const next = await importer.stageLocal([source], new Map());
+  assert.match((await finishing).error, /过期|取消/);
+  await importer.cancel(token);
+  assert.equal(importer.resolvePack(token, ''), null);
+  assert.equal(importer.resolvePack(next.token, next.packs[0].dir), source);
+});
+
+test('an earlier stage cannot overwrite the latest source when both are scanning', async t => {
+  const root = await fixture(t), source = await sourcePack(join(root, 'source'));
+  const importer = new PackImporter();
+  t.after(() => importer.cancel());
+  const earlier = importer.stage([
+    { path: 'figure.json', bytes: Buffer.from(JSON.stringify(fixtureManifest({ id: 'earlier' }))) },
+    { path: 'figure.js', bytes: Buffer.from('export function createFigureBody(){}') },
+  ], false, new Map());
+  const latest = await importer.stageLocal([source], new Map());
+  assert.match((await earlier).error, /过期|取消/);
+  assert.equal(importer.resolvePack(latest.token, latest.packs[0].dir), source);
 });
 
 test('out-of-order file chunks are rejected and an old cancellation cannot remove a new source',async t=>{

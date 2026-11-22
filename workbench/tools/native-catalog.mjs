@@ -168,7 +168,7 @@ export async function inspectNative(model,{signal}={}){
    const hit=hints.find(([,rx])=>rx.test(`${title} ${basename(rel)}`));
    const candidate=hit&&!appearance?{word:hit[0],confidence:.82,reason:'文件名或作者热键含明确动作／表情含义'}:null;
    const sourceRel=relative(root,canonical).replaceAll('\\','/');
-   resources.push({id:(kind==='motion'?'motion-':'expr-')+digest(sourceRel).slice(0,16),kind,file:sourceRel,title,classification,seconds:kind==='motion'?Math.max(.05,Math.min(60,Number(json.Meta?.Duration)||1)):1.5,loop:json.Meta?.Loop===true,hash:digest(raw),parameters:values.map(v=>({...v,label:metadata.get(v.id)?.name||v.id})),suggestion:candidate,raw:json,release:undefined});
+   resources.push({id:(kind==='motion'?'motion-':'expr-')+digest(sourceRel).slice(0,16),kind,file:sourceRel,title,classification,seconds:kind==='motion'?Math.max(.05,Math.min(60,Number(json.Meta?.Duration)||1)):1.5,loop:json.Meta?.Loop===true,hash:digest(raw),parameters:values.map(v=>({...v,label:metadata.get(v.id)?.name||v.id})),suggestion:candidate,raw:json,release:/** @type {string | undefined} */(undefined)});
   }catch(e){warnings.push(`${rel}: ${e.message}`);}
  }
  // A friendly filename cannot hide channels already identified as appearance controls.

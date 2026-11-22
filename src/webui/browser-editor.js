@@ -10,7 +10,7 @@ function studioElement(tag, cls, text) {
 }
 
 function createStudioPreview() {
-  let gallery, status, pause, zoomControl, zoomValue, observer, onFailure;
+  let gallery, status, statusText, pause, zoomControl, zoomValue, observer, onFailure;
   let frame, frameSize, boot, finishBoot, failBoot, bootTimer, animation;
   let initialized = false, rendered = false, paused = false, waiting = false;
   let previousTime = 0, revision = 0;
@@ -21,7 +21,8 @@ function createStudioPreview() {
   const send = message => frame?.contentWindow?.postMessage(message, '*');
   const setStatus = (name, text) => {
     status.dataset.state = name;
-    status.textContent = text;
+    statusText.textContent = text;
+    pause.disabled = name !== 'live';
   };
   const updatePause = () => {
     pause.textContent = paused ? studioText('继续', 'Resume') : studioText('暂停', 'Pause');
@@ -144,7 +145,7 @@ function createStudioPreview() {
     const message = event.data;
     if (message?.t === 'loaded') {
       send({
-        t: 'init', bounds, previewSize: frameSize, theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+        t: 'init', bounds, previewSize: frameSize, theme: document.documentElement.dataset.studioMode || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
         start: { x: bounds.W / 2, y: bounds.floorY, facing: 1 },
         language: document.documentElement.lang, scheme: '',
         entry: new URL('pack/figure.js', scene).href,
@@ -190,12 +191,19 @@ function createStudioPreview() {
       gallery = elements.gallery;
       onFailure = elements.onFailure;
       const bar = studioElement('div', 'figure-preview-heading');
-      status = studioElement('span', 'figure-live-status', studioText('准备预览', 'Preparing'));
+      status = studioElement('span', 'figure-live-status');
+      status.setAttribute('role', 'status');
+      const marker = studioElement('span', 'figure-preview-indicator');
+      marker.setAttribute('aria-hidden', 'true');
+      marker.append(studioElement('span', 'l2d-spinner'));
+      statusText = studioElement('span', '', studioText('准备预览', 'Preparing'));
+      status.append(marker, statusText);
       const guide = studioElement('span', 'figure-view-guide', studioText('拖动平移 · 滚轮缩放', 'Drag to pan · Scroll to zoom'));
       bar.append(studioElement('h2', '', studioText('形象预览', 'Figure preview')), guide, status, elements.resolutionLabel);
       elements.stage.prepend(bar);
       pause = studioElement('button', 'l2d-btn sm figure-pause', studioText('暂停', 'Pause'));
       pause.type = 'button';
+      pause.disabled = true;
       pause.onclick = () => {
         if (!rendered) return;
         if (paused) resume();
@@ -364,6 +372,11 @@ async function startStudio() {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) reconnect(); });
   const first = await ensureLease();
   const data = first.data;
+  if (data.theme) {
+    const root = document.documentElement;
+    if (data.theme.mode === 'light' || data.theme.mode === 'dark') root.dataset.studioMode = data.theme.mode;
+    for (const [key, value] of Object.entries(data.theme.colors)) root.style.setProperty('--' + key, value);
+  }
   document.title = data.title + ' · Figure';
   const showSaved = result => showStudioResult(studioText('已保存', 'Saved'), studioText('回到 Coo，从原模型卡安装即可应用。', 'Return to Coo and install from the original figure card.'), result?.warn);
   if (first.saved) {

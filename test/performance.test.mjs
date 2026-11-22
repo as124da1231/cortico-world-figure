@@ -16,7 +16,6 @@ async function fixture(t, mode, activeBody) {
   const figures = join(root, 'figures');
   const dir = join(figures, 'demo');
   await mkdir(dir, { recursive: true });
-  t.after(() => rm(root, { recursive: true, force: true }));
   const json = (name, value) => writeFile(join(dir, name), JSON.stringify(value));
   await writeFile(join(root, 'config.json'), JSON.stringify({ worlds: { 'desktop-pet': { skin: { figure: 'demo' } } } }));
   await json('figure.json', { id: 'demo', moves: mode === 'direct' ? [PERFORMANCE_TARGET] : [],
@@ -32,7 +31,7 @@ async function fixture(t, mode, activeBody) {
       parameters: [{ id: 'Toggle01' }], raw: { Parameters: [] } },
   ] } });
   const cfg = { performanceMode: mode, performanceEndpoint: 'https://planner.invalid/v1', performanceModel: 'test-planner' };
-  const service = new FigurePerformance({ config: () => cfg, figures, secret: () => 'fixture-key',
+  const service = new FigurePerformance({ config: () => cfg, persist:patch=>Object.assign(cfg,patch), figures, secret: () => 'fixture-key',
     desktopBody: (id = activeBody ?? 'desktop-pet') => ({ id, figure: 'demo', dir }) });
   const events = [], usage = [];
   const host = { store: { latestCursor: () => events.length,
@@ -40,10 +39,13 @@ async function fixture(t, mode, activeBody) {
     reportUsage(value) { usage.push(value); } };
   service.host = host;
   service.lastMode = mode;
-  t.after(() => service.stop());
+  t.after(async () => {
+    await service.stop();
+    await rm(root, { recursive: true, force: true });
+  });
   const orders = async (name = PERFORMANCE_ASSET) => JSON.parse(await readFile(join(dir, name), 'utf8')).orders;
   const source = activeBody ?? 'desktop-pet';
-  const say = (text, at = Date.now()) => events.push({cursor:events.length+1, ts:new Date(at).toISOString(), source, type:source+'.self', text, meta:{kind:'say',beats:[{text,mood:{id:'happy'}}]} });
+  const say = (text, at = Date.now(), body = source) => events.push({cursor:events.length+1, ts:new Date(at).toISOString(), source:body, type:body+'.self', text, meta:{kind:'say',beats:[{text,mood:{id:'happy'}}]} });
   const sayUser = text => events.push({cursor:events.length+1, ts:new Date().toISOString(),source,type:source+'.message',meta:{text}});
   return { service, root, cfg, usage, orders, say, sayUser, manifest: async () => JSON.parse(await readFile(join(dir, 'figure.json'), 'utf8')) };
 }
@@ -215,6 +217,62 @@ test('a late plan uses the original reply time while that reply is still current
   await service.tick();
   await service.writes;
   assert.equal((await orders()).length,0);
+});
+
+test('a synchronized reply only consumes the matching desktop body receipt', async t => {
+  const { service, orders, say } = await fixture(t, 'dual');
+  t.mock.method(globalThis, 'fetch', async () => { throw Error('planner unavailable'); });
+  const started = Promise.withResolvers();
+  const ended = Promise.withResolvers();
+  const signal = new AbortController();
+  t.after(() => { signal.abort(); ended.resolve(); });
+  const text = '同文气泡。';
+  const speak = service.voiceCoordinator(text, text, 'desktop-pet');
+  const result = speak(Promise.resolve(Buffer.from([1])), signal.signal, async (_audio, onStarted) => {
+    const at = Date.now();
+    onStarted(at, 900);
+    started.resolve(at);
+    await ended.promise;
+  });
+  const at = await started.promise;
+  say(text, at + 10, 'desktop-live2d-pet');
+  say(text, at + 20, 'desktop-pet');
+  await service.tick();
+  await service.writes;
+  const stock = await orders();
+  const live2d = await orders('figure-performance.desktop-live2d-pet.json');
+  assert.equal(stock.length, 1);
+  assert.equal(stock[0].speechMs, 900);
+  assert.equal(live2d.length, 1);
+  assert.equal(live2d[0].startedAt, at + 10);
+  ended.resolve();
+  assert.equal(await result, true);
+});
+
+test('removing the active planner cancels its request and ignores a late response', async t => {
+  const { service, orders, say } = await fixture(t, 'dual');
+  const requested = Promise.withResolvers();
+  const response = Promise.withResolvers();
+  const settled = Promise.withResolvers();
+  const requestMotion = service.requestMotion.bind(service);
+  service.requestMotion = (...args) => requestMotion(...args).finally(settled.resolve);
+  const fetch = t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    requested.resolve(init.signal);
+    return response.promise;
+  });
+  t.after(() => response.resolve(Response.json({})));
+  say('编排服务切换前的台词。');
+  await service.tick();
+  const signal = await requested.promise;
+  assert.equal(signal.aborted, false);
+  service.planners.remove('legacy');
+  assert.equal(signal.aborted, true);
+  response.resolve(Response.json({choices:[{message:{content:'{"motionPlan":[{"frameIndex":0,"action":"nod"}]}'}}]}));
+  await settled.promise;
+  await service.writes;
+  assert.equal(fetch.mock.callCount(), 1);
+  assert.equal((await orders()).length, 1);
+  assert.equal((await orders())[0].beats, undefined);
 });
 
 test('dual mode keeps the local speech plan when configuration is absent or the provider fails', async t => {

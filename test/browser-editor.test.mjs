@@ -19,6 +19,7 @@ test('a browser editor can save its own draft, while its isolated preview and ot
   let staged, complete;
   const editor = await serveBrowserEditor({
     data, pack, language: 'en',
+    theme: { mode:'dark', colors:{accent:'#aabbee', sheet:'url(https://example.com)', extra:'#fff000'} },
     workbench: fileURLToPath(new URL('../workbench/', import.meta.url)),
     setDraft(value) { staged = value; },
     keepAlive() {},
@@ -46,7 +47,7 @@ test('a browser editor can save its own draft, while its isolated preview and ot
     return controller;
   };
   const first = await (await claim()).json();
-  assert.deepEqual(first.data, data);
+  assert.deepEqual(first.data, {...data, theme:{mode:'dark', colors:{accent:'#aabbee'}}});
   assert.equal((await claim(first.resume)).status, 409);
   const connection = await stream(first.owner);
   assert.equal((await claim()).status, 409);
