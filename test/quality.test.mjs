@@ -34,7 +34,10 @@ test('workbench settings expose only declared editable values and the notice has
   const world = LIVE2D.create(makeCtx(root, cfg)); await world.start({});
   t.after(() => world.stop());
   const page = world.webUi('zh');
-  assert.deepEqual(page.panels.map(p => p.id), ['workbench','settings','effects','voice']);
+  assert.deepEqual(page.panels.map(p => p.id), ['workbench','workshop','settings','effects','voice']);
+  assert.equal(page.panels[1].title, '素材工坊');
+  assert.deepEqual(await page.invoke('workshop', 'core', []), await page.invoke('workbench', 'core', []));
+  await assert.rejects(() => page.invoke('workshop','install',[]), /未知面板/);
   assert.equal(page.panels.find(p => p.id === 'effects').title, '个性化');
   assert.equal(world.webUi('en').panels.find(p => p.id === 'effects').title, 'Personalization');
   assert.equal(page.promptDocs[0].title, '提示词模板');

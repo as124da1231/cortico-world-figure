@@ -370,7 +370,8 @@ export class Live2dWorld implements World {
         id: 'workbench',
         title: zh ? '工作台' : 'Workbench',
         description: zh ? '拖入、粘贴或选择文件夹 / ZIP，一键打包' : 'Drop, paste or choose a folder / ZIP, then pack',
-      }, {id:'settings',title:zh?'模型设置':'Model settings',description:zh?'画质、适配与安装':'Quality, adaptation and installation'},
+      }, {id:'workshop',title:zh?'素材工坊':'Workshop',description:zh?'浏览、下载或投稿原始模型素材':'Browse, download or submit source models'},
+       {id:'settings',title:zh?'模型设置':'Model settings',description:zh?'画质、适配与安装':'Quality, adaptation and installation'},
        {id:'effects',title:zh?'个性化':'Personalization',description:zh?'选择随形象包安装的主题配色与特效':'Choose theme colours and effects to include in figure packs'},
       {id:'voice',title:zh?'文字转语音':'Text to speech',description:zh?'配置语音提供商、模型和音色':'Configure speech providers, models and voices'}],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
@@ -450,7 +451,8 @@ export class Live2dWorld implements World {
   }
 
   private async dispatch(panel: string, method: string, args: unknown[]): Promise<unknown> {
-    const sharedRead = ['settings', 'effects', 'voice'].includes(panel) && ['settings', 'state', 'core'].includes(method);
+    const sharedRead = (panel === 'workshop' && method === 'core')
+      || (['settings', 'effects', 'voice'].includes(panel) && ['settings', 'state', 'core'].includes(method));
     const desktopImport = panel === 'settings' && method === 'importDesktopSource';
     if (panel !== 'workbench' && !sharedRead && !desktopImport) throw new Error(`未知面板：${panel}`);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();

@@ -59,7 +59,7 @@ async function mount(t, opts = {}) {
       return { builds: opts.builds ?? [] };
     },
   };
-  const handle = await (opts.voice ? panel.panels.voice : opts.effects ? panel.panels.effects : opts.configuration ? panel.panels.settings : panel.panels.workbench).mount(ctx);
+  const handle = await (opts.workshop ? panel.panels.workshop : opts.voice ? panel.panels.voice : opts.effects ? panel.panels.effects : opts.configuration ? panel.panels.settings : panel.panels.workbench).mount(ctx);
   t.after(() => { handle.dispose(); dom.window.close(); });
   await tick();
   const button = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent === label || b.getAttribute('aria-label') === label);
@@ -88,17 +88,24 @@ test('Figure panels and version headers wait for their stylesheet inside the ass
   }
 });
 
-test('the external FFA Hub workshop opens separately and the local import controls stay available offline', async t => {
-  const {root,dom,button} = await mount(t, {providerHeader:true, fetch:() => { throw new Error('offline'); }});
-  const link = root.querySelector('.l2d-panel-version a.l2d-workshop-link');
-  assert.equal(link.textContent, 'FFA Hub 素材工坊');
+test('the FFA Hub link belongs to its own Figure panel and local import stays separate', async t => {
+  const {root,dom,calls,handle} = await mount(t, {workshop:true, providerHeader:true, fetch:() => { throw new Error('offline'); }});
+  const link = root.querySelector('.l2d-workshop-page a.l2d-workshop-link');
+  assert.equal(link.textContent, '在浏览器打开工坊');
   assert.equal(link.href, 'https://8.148.13.225:8443/?page=figure');
   assert.equal(link.target, '_blank');
   assert.ok(link.relList.contains('noopener'));
   assert.ok(link.relList.contains('noreferrer'));
+  assert.ok(root.querySelector('.l2d-panel-version .l2d-version-corner'));
   assert.equal(dom.window.document.querySelector('.providerchrome a'), null);
-  assert.ok(button('导入文件夹'));
-  assert.ok(button('导入 ZIP'));
+  assert.deepEqual(calls.map(call => call.method), ['core']);
+  handle.dispose();
+  assert.equal(root.children.length, 0);
+
+  const local = await mount(t, {providerHeader:true, fetch:() => { throw new Error('offline'); }});
+  assert.equal(local.root.querySelector('.l2d-workshop-link'), null);
+  assert.ok(local.button('导入文件夹'));
+  assert.ok(local.button('导入 ZIP'));
 });
 
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {

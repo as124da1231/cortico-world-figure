@@ -424,8 +424,42 @@ const configuration = {
   },
 };
 
+const workshop = {
+  mount(ctx) {
+    const doc = ctx.root.ownerDocument;
+    const zh = String(ctx.language || 'zh').toLowerCase().startsWith('zh');
+    const t = (a, b) => zh ? a : b;
+    const page = doc.createElement('section');
+    page.className = 'l2d-config-page l2d-workshop-page';
+    page.setAttribute('aria-label', t('素材工坊', 'Workshop'));
+    holdFigurePanelPaint(page);
+
+    const card = ctx.ui.sheet({
+      title: t('FFA Hub 素材工坊', 'FFA Hub Workshop'),
+      desc: t('浏览、下载或投稿 Live2D 和 BongoCat 原始模型素材。', 'Browse, download or submit source models for Live2D and BongoCat.'),
+    });
+    const actions = doc.createElement('div');
+    actions.className = 'l2d-workshop-actions';
+    const launch = doc.createElement('a');
+    launch.className = 'btn primary l2d-workshop-link';
+    launch.textContent = t('在浏览器打开工坊', 'Open workshop in browser');
+    launch.href = 'https://8.148.13.225:8443/?page=figure';
+    launch.target = '_blank';
+    launch.rel = 'noopener noreferrer';
+    const note = doc.createElement('p');
+    note.className = 'sh-desc';
+    note.textContent = t('使用 FFA Hub 账号登录。下载后可回到工作台导入。', 'Sign in with FFA Hub. Import downloaded models from the Workbench.');
+    actions.append(launch, note);
+    card.body.append(actions);
+    page.append(card.el);
+    ctx.root.append(page);
+    return {dispose() { page.remove(); }};
+  },
+};
+
 export default {
   panels: {
+    workshop: withFigureHeader(workshop),
     settings: withFigureHeader(configuration),
     effects: withFigureHeader(effectsGallery),
     voice: withFigureHeader(speechProviders),
@@ -550,12 +584,7 @@ export default {
         const versionCorner = createVersionButton(doc, t);
         versionCorner.disabled = true;
         versionCorner.addEventListener('click', () => openNotice());
-        const workshopLink = el('a', 'l2d-btn sm l2d-workshop-link', t('FFA Hub 素材工坊', 'FFA Hub Workshop'));
-        workshopLink.href = 'https://8.148.13.225:8443/?page=figure';
-        workshopLink.target = '_blank';
-        workshopLink.rel = 'noopener noreferrer';
-        workshopLink.title = t('在浏览器打开 FFA Hub 素材工坊', 'Open the FFA Hub Workshop in your browser');
-        header.append(workshopLink, versionCorner);
+        header.append(versionCorner);
         function paintNotice() {
           if (disposed) return;
           const ack = notice?.acknowledged;
