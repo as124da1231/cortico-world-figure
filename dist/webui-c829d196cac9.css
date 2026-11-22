@@ -687,7 +687,8 @@
   display:flex;align-items:center;justify-content:flex-end;min-block-size:26px;
   --l2d-accent:var(--accent,#4059f5);
 }
-.l2d-panel-version .l2d-version-corner:focus-visible{
+.l2d-panel-version .l2d-workshop-link{height:26px;text-decoration:none}
+.l2d-panel-version :is(.l2d-version-corner,.l2d-workshop-link):focus-visible{
   outline:2px solid var(--l2d-accent);outline-offset:2px;
 }
 

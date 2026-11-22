@@ -3764,7 +3764,12 @@ export default {
         const versionCorner = createVersionButton(doc, t);
         versionCorner.disabled = true;
         versionCorner.addEventListener('click', () => openNotice());
-        header.append(versionCorner);
+        const workshopLink = el('a', 'l2d-btn sm l2d-workshop-link', t('FFA Hub 素材工坊', 'FFA Hub Workshop'));
+        workshopLink.href = 'https://8.148.13.225:8443/?page=figure';
+        workshopLink.target = '_blank';
+        workshopLink.rel = 'noopener noreferrer';
+        workshopLink.title = t('在浏览器打开 FFA Hub 素材工坊', 'Open the FFA Hub Workshop in your browser');
+        header.append(workshopLink, versionCorner);
         function paintNotice() {
           if (disposed) return;
           const ack = notice?.acknowledged;

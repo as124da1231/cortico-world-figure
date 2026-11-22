@@ -88,6 +88,19 @@ test('Figure panels and version headers wait for their stylesheet inside the ass
   }
 });
 
+test('the external FFA Hub workshop opens separately and the local import controls stay available offline', async t => {
+  const {root,dom,button} = await mount(t, {providerHeader:true, fetch:() => { throw new Error('offline'); }});
+  const link = root.querySelector('.l2d-panel-version a.l2d-workshop-link');
+  assert.equal(link.textContent, 'FFA Hub 素材工坊');
+  assert.equal(link.href, 'https://8.148.13.225:8443/?page=figure');
+  assert.equal(link.target, '_blank');
+  assert.ok(link.relList.contains('noopener'));
+  assert.ok(link.relList.contains('noreferrer'));
+  assert.equal(dom.window.document.querySelector('.providerchrome a'), null);
+  assert.ok(button('导入文件夹'));
+  assert.ok(button('导入 ZIP'));
+});
+
 test('primary configuration uses the shared gear form and auto-saves only changed fields', async t => {
   const {root,dom,configCalls,guards} = await mount(t,{configuration:true});
   assert.equal(root.querySelector('.l2d-voice-controls'),null);
