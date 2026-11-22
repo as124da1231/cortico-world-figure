@@ -1,6 +1,6 @@
 import type { WorldDefinition } from 'cortico/world.ts';
 import type { EventDescribe } from 'cortico/core/types.ts';
-import { Live2dWorld, type Live2dSection } from './world.ts';
+import { Live2dWorld, type FigureHostServices, type Live2dSection } from './world.ts';
 import { FIGURE_TOOL_DECLS, FIGURE_EVENTS, FIGURE_SUMMARIES } from './automation.mjs';
 import { VOICE_CONTROLS } from './voice-settings.mjs';
 import { FIGURE_SPEAK } from './voice.ts';
@@ -52,6 +52,7 @@ export const LIVE2D: WorldDefinition<Live2dSection> = {
       getConfig: () => ctx.cfg,
       persist: (patch) => ctx.persist(patch as never),
       dataDir: ctx.dataDir,
+      hostServices: (ctx as typeof ctx & { hostServices?: FigureHostServices }).hostServices,
       secret: name => ctx.secret(name),
       storeSecret: (name, value) => ctx.storeSecret(name, value),
     }),

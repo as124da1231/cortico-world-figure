@@ -4002,12 +4002,102 @@ export default {
           const option = el('option', null, label); option.value = value; sort.append(option);
         }
         const clearAll = el('button', 'l2d-btn sm quiet', t('清空旧打包', 'Clear old packs'));
+        const workshopLink = el('a', 'l2d-btn sm quiet', t('形象包创意工坊', 'Figure workshop'));
+        workshopLink.href = 'https://8.148.13.225:8443/?page=figure';
+        workshopLink.target = '_blank';
+        workshopLink.rel = 'noopener noreferrer';
+        workshopLink.title = t('在浏览器登录 FFA Hub，浏览、投稿和下载素材；下载后可在这里导入', 'Sign in to FFA Hub to browse, submit and download packs; import downloads here');
         const libraryTools = el('div', 'l2d-library-tools');
-        libraryTools.append(search, sort, clearAll, settingsButton);
+        libraryTools.append(search, sort, clearAll, workshopLink, settingsButton);
         head.append(libraryTitle, libraryTools);
         const dashboard = el('div', 'l2d-workbench-tools');
         dashboard.append(operation, head);
         sheet.body.append(dashboard);
+        const market = el('details', 'l2d-market');
+        market.append(el('summary', null, t('浏览形象工坊', 'Browse figure workshop')));
+        const marketSearch = el('input', 'l2d-input');
+        marketSearch.type = 'search'; marketSearch.placeholder = t('搜索作品', 'Search works');
+        marketSearch.setAttribute('aria-label', marketSearch.placeholder);
+        const marketBrowse = el('button', 'l2d-btn sm', t('搜索', 'Search'));
+        const marketMine = el('button', 'l2d-btn sm quiet', t('我的投稿', 'My submissions'));
+        const marketResults = el('div', 'l2d-market-results');
+        marketResults.setAttribute('aria-live', 'polite');
+        async function loadMarket(operation) {
+          marketResults.textContent = t('正在连接工坊…', 'Connecting to workshop…');
+          marketBrowse.disabled = marketMine.disabled = true;
+          try {
+            const data = await ctx.invoke('figureCatalog', [{operation, query:marketSearch.value}]);
+            marketResults.replaceChildren();
+            if (data.status !== 'ready') {
+              marketResults.textContent = data.status === 'host_unavailable'
+                ? t('当前宿主未提供 FFA 登录。请打开网页工坊登录并浏览；下载后在这里选择 ZIP 或解压后的文件夹导入。', 'FFA login is unavailable in this host. Sign in and browse in the browser workshop; import the downloaded ZIP or extracted folder here.')
+                : t('请打开网页工坊登录，点击“允许 Coo 内访问”，并在宿主完成 FFA 登录后返回刷新。', 'Sign in to the browser workshop, select “Allow access in Coo”, complete host login, then refresh.');
+              if (data.interactive && data.status === 'login_required') {
+                const begin = el('button', 'l2d-btn sm', t('登录或注册 FFA', 'Sign in or register'));
+                begin.type = 'button';
+                begin.onclick = async () => {
+                  begin.disabled = true;
+                  try {
+                    const flow = await ctx.invoke('figureHostLogin', ['begin']);
+                    const link = el('a', 'l2d-btn sm', t('打开 FFA 确认', 'Confirm in FFA Hub'));
+                    link.href = flow.authorizationUrl;link.target = '_blank';link.rel = 'noopener noreferrer';
+                    const complete = el('button', 'l2d-btn sm', t('我已确认', 'I have confirmed'));
+                    complete.type = 'button';
+                    const status = el('span', null, t('短码 ', 'Code ') + flow.shortCode);
+                    complete.onclick = async () => {
+                      complete.disabled = true;
+                      try {
+                        const result = await ctx.invoke('figureHostLogin', ['complete']);
+                        if (result.status === 'ready') await loadMarket(operation);
+                        else status.textContent = t('等待确认 · ', 'Waiting for confirmation · ') + flow.shortCode;
+                      } catch (error) { ui.toast(String(error?.message || error), 'bad'); }
+                      finally { complete.disabled = false; }
+                    };
+                    begin.replaceWith(link, status, complete);
+                  } catch (error) { ui.toast(String(error?.message || error), 'bad'); }
+                  finally { begin.disabled = false; }
+                };
+                marketResults.append(begin);
+              }
+              return;
+            }
+            if (!data.items.length) marketResults.textContent = t('没有找到作品。', 'No works found.');
+            for (const item of data.items) {
+              const card = el('article', 'l2d-market-card');
+              if (typeof item.cover === 'string' && item.cover && /^[A-Za-z0-9+/=]+$/.test(item.cover)) {
+                const img = el('img'); img.src = 'data:image/jpeg;base64,' + item.cover; img.alt = ''; img.loading = 'lazy'; card.append(img);
+              }
+              const text = el('div');
+              text.append(el('strong', null, String(item.title || '')), el('p', null, String(item.nickname || '')));
+              if (operation === 'mine') text.append(el('p', null, String(item.status || '') + (item.reason ? ' · ' + String(item.reason) : '')));
+              if (item.status === 'published' && /^[a-f0-9]{32}$/.test(item.id ?? '')) {
+                const direct = Number(item.size) <= 32 * 1024 * 1024;
+                const action = el('button', 'l2d-btn sm', direct ? t('下载并导入', 'Download and import') : t('打开网页下载大包', 'Download large pack on web'));
+                action.type = 'button';
+                action.onclick = async () => {
+                  if (!direct) { workshopLink.click(); return; }
+                  if (disposed || state.busy) return;
+                  action.disabled = true;setBusy(true);
+                  try {
+                    const imported = await ctx.invoke('figureImport', [item.id]);
+                    if (!disposed) importView.result(imported);
+                    else if (imported?.token) await importTransfer.cancelOwnedImport(imported.token);
+                  } catch (error) { if (!disposed) ui.toast(String(error?.message || error), 'bad'); }
+                  finally { if (!disposed) setBusy(false);action.disabled = false; }
+                };
+                text.append(action);
+              }
+              card.append(text); marketResults.append(card);
+            }
+            if (data.more) marketResults.append(el('p', null, t('还有更多作品，请在网页工坊浏览。', 'More works are available in the browser workshop.')));
+            marketResults.append(el('p', null, t('网页登录后可投稿。大包需从网页下载，解压后选择文件夹导入。', 'Sign in on the web to submit. Download large packs on the web, extract them, then import the folder.')));
+          } catch (error) { marketResults.textContent = t('工坊暂不可用：', 'Workshop unavailable: ') + String(error?.message || error); }
+          finally { marketBrowse.disabled = marketMine.disabled = false; }
+        }
+        marketBrowse.addEventListener('click', () => loadMarket('list'));
+        marketMine.addEventListener('click', () => loadMarket('mine'));
+        market.append(marketSearch, marketBrowse, marketMine, marketResults);
+        sheet.body.append(market);
         const workspace = el('div', 'l2d-workspace');
         const assistDock = el('div', 'l2d-assist-dock');
         resultBody.append(assistDock);

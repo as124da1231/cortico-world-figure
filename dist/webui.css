@@ -757,3 +757,11 @@
   .l2d-voice-services{padding-inline:10px}
   .l2d-voice-audition{gap:6px}
 }
+.l2d-market{margin:12px 0;padding:14px;border:1px solid var(--border, #c5c8cc);border-radius:12px}
+.l2d-market summary{cursor:pointer;font-weight:600;margin-bottom:10px}
+.l2d-market > input{max-width:240px;margin:4px}
+.l2d-market > button{margin:4px}
+.l2d-market-results{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-top:12px}
+.l2d-market-card{display:flex;gap:10px;padding:10px;border:1px solid var(--border, #c5c8cc);border-radius:9px;min-width:0;overflow-wrap:anywhere}
+.l2d-market-card img{width:64px;height:64px;object-fit:cover;border-radius:6px}
+.l2d-market-card p{margin:4px 0;font-size:12px;opacity:.75}

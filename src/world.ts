@@ -10,6 +10,7 @@
  */
 import { existsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { downloadFigureSource, figureCatalog, figureHostAction } from './figure-workshop.mjs';
 import {
   cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile,
 } from 'node:fs/promises';
@@ -149,6 +150,8 @@ async function workbenchCover(dir: string, declared: unknown): Promise<string | 
     ?? await thumbOf(dir, 'thumb/opt-model.png');
 }
 
+export type FigureHostServices = { get(name: string): unknown };
+
 export class Live2dWorld implements World {
   readonly id = 'figure';
   private desktopBody?: DesktopBodyLookup;
@@ -157,6 +160,7 @@ export class Live2dWorld implements World {
     getConfig: () => Live2dSection;
     persist: (patch: Record<string, unknown>) => void;
     dataDir: string;
+    hostServices?: FigureHostServices;
     secret?: (name: string) => string;
     storeSecret?: (name: string, value: string) => void;
   };
@@ -428,7 +432,7 @@ export class Live2dWorld implements World {
       if (method === 'voiceStop') return this.voice.stopAudition();
       if (method === 'voiceHush') return this.voice.stopNarration();
     }
-    if (readOnly) return this.dispatch(panel, method, args);
+    if (readOnly || (panel === 'workbench' && ['figureCatalog', 'figureHostLogin'].includes(method))) return this.dispatch(panel, method, args);
     if (panel === 'workbench' && method === 'assistApprove') {
       await this.automation.approve(String(args[0] || ''));
       const result = await this.automation.install(String(args[0] || ''));
@@ -453,6 +457,11 @@ export class Live2dWorld implements World {
     const sharedRead = ['settings', 'effects', 'voice'].includes(panel) && ['settings', 'state', 'core'].includes(method);
     const desktopImport = panel === 'settings' && method === 'importDesktopSource';
     if (panel !== 'workbench' && !sharedRead && !desktopImport) throw new Error(`未知面板：${panel}`);
+    if (method === 'figureCatalog') {
+      const filters = args[0];
+      return figureCatalog(this.opts, typeof filters === 'object' && filters !== null ? filters : undefined);
+    }
+    if (method === 'figureHostLogin') return figureHostAction(this.opts, args[0]);
     const dir = String(args[0] ?? this.state.modelDir ?? '').trim();
 
     if (method === 'state') {
@@ -637,6 +646,14 @@ export class Live2dWorld implements World {
       }
       await this.prepareCubismRuntime();
       return this.corePayload();
+    }
+    if (method === 'figureImport') {
+      const bytes = await downloadFigureSource(this.opts, args[0]);
+      const files = filesFromZip(bytes);
+      if (typeof files === 'string') throw new Error(files);
+      const result = await this.importer.stage(files, false, await this.installedVersions());
+      if ('error' in result) throw new Error(result.error);
+      return this.withImportSubmission(result);
     }
     if (method === 'importStage') {
       const b64 = args[0];
