@@ -2,7 +2,7 @@ import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { canonicalPath, childPath, containsPath, packId } from './paths.ts';
 
-type Manifest = Record<string, unknown> & { id: string };
+type Manifest = Record<string, unknown> & { id: string; entry: string; export: string };
 const idPattern = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const optionPattern = /^[a-z0-9]{1,24}$/;
 const wordBreak = /[,，、\s【】<>＜＞]/;
@@ -110,5 +110,5 @@ export async function readPackManifest(root: string): Promise<Manifest> {
       }
     }
   }
-  return {...m, id};
+  return {...m, id, entry: m.entry, export: m.export};
 }

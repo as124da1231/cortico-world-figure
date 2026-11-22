@@ -68,6 +68,8 @@
     "NOTICE"
   ],
   "dependencies": {
+    "acorn": "8.19.0",
+    "acorn-walk": "8.3.5",
     "esbuild": "0.28.2",
     "fflate": "0.8.3",
     "pngjs": "7.0.0"

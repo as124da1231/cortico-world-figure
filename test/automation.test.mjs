@@ -219,15 +219,17 @@ test('a stalled submission can retry after cooldown and concurrent retries still
 
 test('ready-pack approval rejects changed runtime files and copied contents before replacing an installation',async t=>{
  const f=await automation(t),source=join(f.root,'ready');await mkdir(source);
- await json(join(source,'figure.json'),fixtureManifest({id:'ready'}));await writeFile(join(source,'figure.js'),'old');
+ const original = 'export function createFigureBody() { return 1; }';
+ const changed = 'export function createFigureBody() { return 2; }';
+ await json(join(source,'figure.json'),fixtureManifest({id:'ready'}));await writeFile(join(source,'figure.js'),original);
  const model=(await f.auto.find(source)).models[0],plan=await f.auto.prepare(model.id,[]);await f.auto.approve(plan.id);
  const expected=await packFingerprint(source),target=await installPack(source,join(f.root,'installed'));
- await writeFile(join(source,'figure.js'),'new');
+ await writeFile(join(source,'figure.js'),changed);
  await assert.rejects(f.auto.install(plan.id),/已改变/);assert.equal(f.executions.length,0);
  await assert.rejects(installPack(source,join(f.root,'installed'),{expectedFingerprint:expected}),/已改变/);
- assert.equal(await readFile(join(target,'figure.js'),'utf8'),'old');
+ assert.equal(await readFile(join(target,'figure.js'),'utf8'),original);
  const current=await packFingerprint(source);await installPack(source,join(f.root,'installed'),{expectedFingerprint:current});
- assert.equal(await readFile(join(target,'figure.js'),'utf8'),'new');
+ assert.equal(await readFile(join(target,'figure.js'),'utf8'),changed);
  await mkdir(join(source,'models'));await writeFile(join(source,'models','texture.png'),'texture');
  assert.notEqual(await packFingerprint(source),current);
 });

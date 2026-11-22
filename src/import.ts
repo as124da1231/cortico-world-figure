@@ -1,5 +1,6 @@
 import { childPath, containsPath, isInsideRoot } from './paths.ts';
-import { findInstalledTargets, installPack } from './pipeline.ts';
+import { findInstalledTargets, installPack, scanModel } from './pipeline.ts';
+import { checkPackRuntime } from './pack-runtime-check.ts';
 import { readPackManifest } from './pack-manifest.ts';
 /**
  * 导入现成的形象包：一个 zip，或者一个（拖入 / 选中的）文件夹。
@@ -191,17 +192,17 @@ async function findPacks(root: string, depth: number, rel = ''): Promise<string[
   return found;
 }
 
-/** root 下最多 depth 层里的模型目录，不往打好的包里钻。 */
-async function findModels(root: string, depth: number, rel = ''): Promise<string[]> {
+/** 完整的现成包优先，缺少运行文件的包可继续查找原始模型。 */
+async function findModels(root: string, depth: number, rejected: ReadonlyMap<string, unknown>, rel = ''): Promise<string[]> {
   const here = join(root, ...rel.split('/').filter(Boolean));
   const entries = await readdir(here, { withFileTypes: true });
   const files = entries.filter((e) => e.isFile()).map((e) => e.name.toLowerCase());
-  if (files.includes('figure.json')) return [];
+  if (files.includes('figure.json') && !rejected.has(pathKey(here))) return [];
   if (files.some(n => n.endsWith('.model3.json'))) return [rel];
   if (depth === 0) return [];
   const found: string[] = [];
   for (const e of entries) {
-    if (e.isDirectory()) found.push(...await findModels(root, depth - 1, rel ? `${rel}/${e.name}` : e.name));
+    if (e.isDirectory()) found.push(...await findModels(root, depth - 1, rejected, rel ? `${rel}/${e.name}` : e.name));
   }
   return found;
 }
@@ -237,6 +238,8 @@ export async function thumbOf(dir: string, file: unknown): Promise<string | null
  * 一次只留一个待装清单：新的导入会把上一个丢掉。安装时只往 figures/ 里写，
  * 同名先备份（与打包产物安装走同一套 backups 目录）。
  */
+const workbenchDir = join(import.meta.dirname, '..', 'workbench');
+
 export class PackImporter {
   private currentToken: string | undefined;
   private staged: { token: string; root: string; packs: Set<string>; models: Set<string>; entries: Map<string, string>; paths: Map<string, string> } | null = null;
@@ -424,14 +427,18 @@ export class PackImporter {
       const models: StagedModel[] = [];
       const problems: StageResult['problems'] = [];
       const paths = new Map<string, string>();
+      const rejected = new Map<string, { full: string; dir: string; reason: string; fallback: boolean }>();
       const candidates=async(kind:'pack'|'model')=>{
         const out:Array<{dir:string;full:string;entryFile?:string}>=[];
         for(const source of sources??[{dir:'',full:root}]) {
-          if(source.entryFile && (kind==='pack') !== (source.entryFile.toLowerCase()==='figure.json'))continue;
-          const dirs=source.entryFile?['']:await (kind==='pack'?findPacks:findModels)(source.full,PACK_DEPTH+(fromFolders?1:0));
+          const selectedPack = source.entryFile?.toLowerCase() === 'figure.json';
+          const entryFile = kind === 'model' && selectedPack && rejected.has(pathKey(source.full)) ? undefined : source.entryFile;
+          if (entryFile && (kind === 'pack') !== selectedPack) continue;
+          const depth = PACK_DEPTH + (fromFolders ? 1 : 0);
+          const dirs = entryFile ? [''] : kind === 'pack' ? await findPacks(source.full, depth) : await findModels(source.full, depth, rejected);
           for(const rel of dirs) {
           const dir=[source.dir,rel].filter(Boolean).join('/'),full=join(source.full,...rel.split('/').filter(Boolean));
-          out.push({dir,full,entryFile:source.entryFile});
+              out.push({ dir, full, entryFile });
           }
         }
         return out;
@@ -443,6 +450,12 @@ export class PackImporter {
           manifest = await readPackManifest(full);
         } catch (err) {
           problems.push({ dir, reason: `figure.json 读不了：${(err as Error).message}` });
+          continue;
+        }
+        try {
+          await checkPackRuntime(full, manifest.entry, manifest.export);
+        } catch (error) {
+          rejected.set(pathKey(full), {full, dir, reason:(error as Error).message, fallback:false});
           continue;
         }
         const { id } = manifest;
@@ -469,12 +482,26 @@ export class PackImporter {
         const variants = entries.filter(entry => entry.isFile() && /\.model3\.json$/i.test(entry.name)
           && (!entryFile || entry.name === entryFile));
         if (!variants.length) continue;
+        const recovery = [...rejected.values()].find(pack => containsPath(pack.full, full));
         const info=await dirInfo(full).catch(()=>({bytes:0,files:0}));
         for (const [index, entry] of variants.entries()) {
+          if (recovery) {
+            try { await scanModel(workbenchDir, full, entry.name); }
+            catch (error) {
+              problems.push({dir, reason: entry.name + '：' + (error as Error).message});
+              continue;
+            }
+            recovery.fallback = true;
+          }
           const key = index === 0 ? dir : `${dir}:${entry.name}`;
           paths.set(key, full);
           models.push({ dir: key, file: entry.name, title: entry.name.replace(/\.model3\.json$/i, ''), ...info, installed: null });
         }
+      }
+
+      for (const {dir, reason, fallback} of rejected.values()) {
+        const recovery = '。已识别原始模型，安装时将重新打包。原包的自定义效果可能有差异。';
+        problems.push({dir, reason: fallback ? reason + recovery : reason});
       }
 
       if (!sources && !packs.length && models[0]?.dir === '') {

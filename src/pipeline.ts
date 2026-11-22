@@ -10,6 +10,7 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalPath, childPath, containsPath } from './paths.ts';
 import { parseFigureJson, readPackManifest } from './pack-manifest.ts';
+import { checkPackRuntime } from './pack-runtime-check.ts';
 import { packFingerprint } from './pack-fingerprint.ts';
 import { writePackEffects } from '../workbench/tools/pack-effects.mjs';
 import { EMOTION_EFFECT_AXIS, EMOTION_EFFECTS } from '../workbench/tools/emotion-effect.mjs';
@@ -200,8 +201,10 @@ export function adaptationSummary(plan: { mappingDiagnostics?: unknown; mappingW
 }
 
 /** `convert.mjs --json`：只读模型，不产出包。 */
-export async function scanModel(workbenchDir: string, modelDir: string): Promise<ScanSummary> {
-  const r = await runNode([join(workbenchDir, 'tools', 'convert.mjs'), '--model', modelDir, '--json'], workbenchDir);
+export async function scanModel(workbenchDir: string, modelDir: string, modelFile?: string): Promise<ScanSummary> {
+  const args = [join(workbenchDir, 'tools', 'convert.mjs'), '--model', modelDir, '--json'];
+  if (modelFile) args.push('--model-file', modelFile);
+  const r = await runNode(args, workbenchDir);
   if (r.code !== 0) throw new Error((r.err || r.out || '扫描失败').trim().slice(0, 400));
   const start = r.out.indexOf('{');
   if (start < 0) throw new Error('扫描没有返回 JSON');
@@ -312,6 +315,7 @@ export async function installPack(
     await opts.prepare?.(pending);
     const copied = await readPackManifest(pending);
     if (copied.id !== id) throw new Error('复制后的形象包校验失败');
+    await checkPackRuntime(pending, copied.entry, copied.export);
     opts.signal?.throwIfAborted();
     const occupied = await findInstalledTargets(figuresDir, id, pending);
     for (const path of occupied) {

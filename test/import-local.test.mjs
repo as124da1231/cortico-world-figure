@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {clipboardPaths} from '../src/clipboard.ts';
 import {PackImporter} from '../src/import.ts';
+import {installPack} from '../src/pipeline.ts';
 import {FIGURE_IMPORT} from '../src/import-limits.mjs';
 import {LIVE2D} from '../src/index.ts';
 import {makeCtx,prepareWorld,fixtureManifest} from './_ctx.mjs';
@@ -29,6 +30,54 @@ test('local entry-file imports whitelist candidate paths and cancellation preser
   await importer.cancel();
   assert.equal(await readFile(join(source,'keep.txt'),'utf8'),'original');
   assert.equal(JSON.parse(await readFile(join(source,'figure.json'),'utf8')).id,'sample');
+});
+
+test('an incomplete packaged runtime falls back only to a validated raw model', async t => {
+  const root = await fixture(t);
+  const source = await sourcePack(join(root, 'source'));
+  const importer = new PackImporter();
+  t.after(() => importer.cancel());
+  await writeFile(join(source, 'figure.js'), [
+    'export async function createFigureBody(base) {',
+    "  loadScript(new URL('sdk/live2dcubismcore.min.js', base));",
+    "  await import('./backends/live2d.js');",
+    '}',
+  ].join('\n'));
+  const broken = await importer.stageLocal([source], new Map());
+  assert.equal(broken.token, '');
+  assert.match(broken.problems[0].reason, /live2dcubismcore\.min\.js.*backends\/live2d\.js/);
+  const raw = join(source, 'models', 'role');
+  await mkdir(raw, {recursive:true});
+  const moc = Buffer.alloc(64);
+  moc.write('MOC3');
+  await writeFile(join(raw, 'role.moc3'), moc);
+  await writeFile(join(raw, 'role.model3.json'), JSON.stringify({FileReferences:{Moc:'role.moc3',Textures:['texture.png']}}));
+  const incomplete = await importer.stageLocal([source], new Map());
+  assert.equal(incomplete.models.length, 0);
+  assert.match(incomplete.problems[0].reason, /缺少贴图/);
+  await writeFile(join(raw, 'texture.png'), 'texture data');
+  const recovered = await importer.stageLocal([join(source, 'figure.json')], new Map());
+  assert.equal(recovered.packs.length, 0);
+  assert.equal(recovered.models[0].file, 'role.model3.json');
+  assert.match(recovered.problems[0].reason, /已识别原始模型/);
+  assert.equal(importer.resolve(recovered.token, recovered.models[0].dir), raw);
+});
+
+test('installation checks transitive imports before replacing a working pack', async t => {
+  const root = await fixture(t);
+  const source = await sourcePack(join(root, 'source'));
+  await writeFile(join(source, 'figure.js'), [
+    "import './body.js';",
+    'export async function createFigureBody(base, opts) {',
+    "  if (opts.optional) await import('./optional.js');",
+    '}',
+  ].join('\n'));
+  await writeFile(join(source, 'body.js'), 'export const body = true;');
+  const figures = join(root, 'figures');
+  const target = await installPack(source, figures);
+  await writeFile(join(source, 'body.js'), "export { body } from './missing.js';");
+  await assert.rejects(installPack(source, figures), /运行文件.*missing\.js/);
+  assert.equal(await readFile(join(target, 'body.js'), 'utf8'), 'export const body = true;');
 });
 
 test('an explicitly selected model entry survives panel import, packing and AI discovery',async t=>{
