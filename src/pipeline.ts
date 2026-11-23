@@ -111,13 +111,13 @@ function setCropAxis(manifest: any, mode: string) {
   }
 }
 
-function readProfileSetting(profile: string, key: 'crop' | 'gaze') {
-  const line = new RegExp(`^  ${key}: (\\{[^\\r\\n]*\\}),\\r?$`, 'm').exec(profile);
+function readProfileSetting(profile: string, key: 'crop' | 'gaze' | 'idleBreath') {
+  const line = new RegExp(`^  ${key}: (\\{[^\\r\\n]*\\}|true|false),\\r?$`, 'm').exec(profile);
   try { return line ? parseFigureJson(line[1]) : undefined; }
   catch { return undefined; }
 }
 
-function writeProfileSetting(profile: string, key: 'crop' | 'gaze', value: object) {
+function writeProfileSetting(profile: string, key: 'crop' | 'gaze' | 'idleBreath', value: object | boolean) {
   return profile.replace(new RegExp(`^  ${key}: [^\\r\\n]*\\r?\\n`, 'gm'), '')
     .replace(/\r?\n};\s*$/, () => `\n  ${key}: ${JSON.stringify(value)},\n};\n`);
 }
@@ -140,6 +140,7 @@ export async function packDetail(root: string) {
   const presentation = profile ? {
     crop: normalizeBodyCrop(readProfileSetting(profile.text, 'crop')),
     gaze: normalizeGazeConfig(readProfileSetting(profile.text, 'gaze')),
+    idleBreath: readProfileSetting(profile.text, 'idleBreath') !== false,
   } : {};
   return {nameZh:string(manifest.name?.zh),nameEn:string(manifest.name?.en),aboutZh:about(manifest.about?.zh),aboutEn:about(manifest.about?.en),bodyGain,style,tunable,...presentation};
 }
@@ -389,6 +390,7 @@ export interface PackEdit {
   aboutZh?: string;
   aboutEn?: string;
   bodyGain?: number;
+  idleBreath?: boolean;
   style?: string;
   crop?: Omit<BodyCrop, 'curve'> & { curve?: number };
   gaze?: ReturnType<typeof normalizeGazeConfig>;
@@ -408,6 +410,8 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
   }
   if (patch.bodyGain !== undefined && (!Number.isFinite(patch.bodyGain) || patch.bodyGain < 0.5 || patch.bodyGain > 3)) throw new Error('身体幅度应为 0.5–3');
   if (patch.style !== undefined && !['natural', 'lively', 'calm', 'shy'].includes(patch.style)) throw new Error('动作风格无效');
+  const idleBreath = patch.idleBreath;
+  if (idleBreath !== undefined && typeof idleBreath !== 'boolean') throw Error('待机呼吸设置无效');
   const cropPatch = patch.crop;
   const crop = cropPatch === undefined ? undefined : normalizeBodyCrop(cropPatch);
   if (crop && (!cropPatch || Object.entries(crop).some(([key,value]) =>
@@ -442,11 +446,12 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
     if (patch.nameZh) opt.name.zh = patch.nameZh;
     if (patch.nameEn) opt.name.en = patch.nameEn;
   }
-  if (Number.isFinite(patch.bodyGain) || patch.style || crop || gaze) {
+  if (Number.isFinite(patch.bodyGain) || patch.style || crop || gaze || idleBreath !== undefined) {
     const profiles = await profileFiles(packDir);
-    const live2dProfile = (crop || gaze) && await editableLive2dProfile(packDir, profiles);
+    const live2dProfile = (crop || gaze || idleBreath !== undefined) && await editableLive2dProfile(packDir, profiles);
     if (crop && !live2dProfile) throw Error('这份形象包不支持上半身取景');
     if (gaze && !live2dProfile) throw Error('这份形象包不支持视线跟随设置');
+    if (idleBreath !== undefined && !live2dProfile) throw Error('这份形象包不支持待机呼吸设置');
     if ((patch.bodyGain !== undefined && !profiles.some(p => /"bodyGain":\s*[-\d.]+/.test(p.text)))
       || (patch.style !== undefined && !profiles.some(p => /"style":\s*"[^"]*"/.test(p.text)))) throw new Error('这个形象包不支持通用表演配置');
     for (const {file:prof,text:before} of profiles) {
@@ -464,6 +469,7 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
           s = writeProfileSetting(s, 'crop', nextCrop);
         }
         if (gaze) s = writeProfileSetting(s, 'gaze', gaze);
+        if (idleBreath !== undefined) s = writeProfileSetting(s, 'idleBreath', idleBreath);
       }
       if (s !== before) writes.push({ file: prof, before, after: s });
     }

@@ -497,7 +497,11 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   await rm(join(packDir, 'backends', 'gaze-config.js'));
   const crop = {mode:'upper',edge:'round',line:.52,curve:.5,feather:.04,transition:.36};
   const gaze = {enabled:false,speed:1.6};
-  await inv('edit', [list.builds[0].id, { aboutZh: '', style: 'shy', crop, gaze }]);
+  const buildId = list.builds[0].id;
+  assert.equal((await inv('detail', [buildId])).idleBreath,true);
+  await assert.rejects(inv('edit', [buildId, {idleBreath:'false'}]), /待机呼吸设置无效/);
+  await inv('edit', [buildId, { idleBreath: false, aboutZh: '', style: 'shy', crop, gaze }]);
+  assert.equal((await inv('detail', [buildId])).idleBreath,false);
   assert.deepEqual((await inv('detail', [list.builds[0].id])).crop, crop);
   assert.deepEqual((await inv('detail', [list.builds[0].id])).gaze, gaze);
   assert.match((await inv('cropPreview', [list.builds[0].id])).image, /^data:image\/png;base64,/);
@@ -520,7 +524,13 @@ test('real model: scan, Core verification, packing, cover and installation', { s
   const installedModels = await readdir(join(installed.state.install.target, 'models'), {withFileTypes:true});
   const installedModel = installedModels.find(entry => entry.isDirectory());
   assert.ok(installedModel);
-  assert.match(await readFile(join(installed.state.install.target, 'models', installedModel.name, 'profile.js'), 'utf8'), /gaze: \{"enabled":false,"speed":1\.6\}/);
+  const profilePath = join(installed.state.install.target, 'models', installedModel.name, 'profile.js');
+  assert.match(await readFile(profilePath, 'utf8'), /gaze: \{"enabled":false,"speed":1\.6\}/);
+  assert.match(await readFile(profilePath, 'utf8'), /idleBreath: false,/);
   assert.match(await readFile(join(installed.state.install.target, 'backends', 'emotion-style.js'), 'utf8'), /"native"/);
   assert.equal((await readdir(join(root, 'figure-backups'))).length, 1);
+  await inv('edit', [buildId, {idleBreath:true}]);
+  assert.equal((await inv('detail', [buildId])).idleBreath,true);
+  await inv('install', ['', buildId, true]);
+  assert.match(await readFile(profilePath, 'utf8'), /idleBreath: true,/);
 });

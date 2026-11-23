@@ -45,7 +45,8 @@ export function compileCurve(curve){
  };
 }
 
-export function createNativeActions(config,{warn=console.warn}={}){
+/** @param {{bindings?: any[], resources?: any[]}} config @param {{warn?: typeof console.warn, suppressedIdleParameters?: ReadonlySet<string>}} [options] */
+export function createNativeActions(config,{warn=console.warn, suppressedIdleParameters}={}){
  const resources=new Map(),bindings=new Map((config?.bindings||[]).map(b=>[b.word,b]));const failures=[];
  for(const resource of config?.resources||[]){
   try{
@@ -92,9 +93,10 @@ export function createNativeActions(config,{warn=console.warn}={}){
   setExpression(next);
   return true;
  }
- function sample(resource,time,weight,out,nativeOnly=false){
+ function sample(resource,time,weight,out,nativeOnly=false,omitParameters){
   if(weight<=0)return;
   for(const track of resource.tracks){
+   if (track.target === 'Parameter' && omitParameters?.has(track.id)) continue;
    const value=track.sample?track.sample(time):track.value;
    if(!Number.isFinite(value)||typeof track.id!=='string')continue;
    out.push({id:track.id,target:track.target,value,weight,blend:track.blend||'Overwrite',
@@ -125,7 +127,7 @@ export function createNativeActions(config,{warn=console.warn}={}){
     const target = (!frame.mode || frame.mode === 'idle') ? maxWeight : 0;
     const step = dt * maxWeight / MOTION_IN;
     idleWeight += clamp(target - idleWeight, -step, step);
-    sample(idle.resource, elapsed % idle.resource.seconds, idleWeight, values, nativeOnly);
+    sample(idle.resource, elapsed % idle.resource.seconds, idleWeight, values, nativeOnly, suppressedIdleParameters);
    }
   }
   if (!outgoing) return values;

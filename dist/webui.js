@@ -1,4 +1,4 @@
-const FIGURE_UI_VERSION = "4.2.0";
+const FIGURE_UI_VERSION = "4.2.1";
 const EMOTION_EFFECTS = Object.freeze(['native', 'kaomoji', 'orb', 'flow', 'bubbles', 'softglow']);
 const EMOTION_EFFECT_SIZES = Object.freeze(['small', 'medium', 'large']);
 
@@ -4616,6 +4616,15 @@ export default {
           gainWrap.hidden = d.tunable === false;
           info.appendChild(gainWrap);
 
+          const breathLabel = el('label', 'l2d-label-row');
+          const breath = el('input', 'l2d-switch');
+          breath.type = 'checkbox';
+          breath.id = 'l2d-edit-idle-breath';
+          breath.setAttribute('role', 'switch');
+          breath.checked = d.idleBreath !== false;
+          breathLabel.append(el('span', 'l2d-label', t('待机呼吸', 'Idle breathing')), breath);
+          if (typeof d.idleBreath === 'boolean') info.appendChild(breathLabel);
+
           const styleWrap = el('div', 'l2d-field');
           styleWrap.appendChild(el('div', 'l2d-label', t('动作风格', 'Motion style')));
           const style = doc.createElement('select');
@@ -4672,12 +4681,12 @@ export default {
             gazeValue = () => normalizeGazeConfig({ enabled: follow.checked, speed: Number(speed.value) });
           }
 
-          const initialEdit = () => JSON.stringify([fields.name.value, fields.about.value, gain.value, style.value, framing?.value(), gazeValue?.()]);
+          const initialEdit = () => JSON.stringify([fields.name.value, fields.about.value, gain.value, breath.checked, style.value, framing?.value(), gazeValue?.()]);
           const initialValues = initialEdit();
           const initialGaze = gazeValue?.();
           const initialName = fields.name.value;
           const initialAbout = fields.about.value;
-          const initialGain = gain.value, initialStyle = style.value;
+          const initialGain = gain.value, initialBreath = breath.checked, initialStyle = style.value;
           editDirty = () => initialEdit() !== initialValues;
 
           const hint = el('div', 'l2d-hint', t(
@@ -4769,6 +4778,7 @@ export default {
                 ...(fields.name.value !== initialName ? { [zh ? 'nameZh' : 'nameEn']: name } : {}),
                 ...(fields.about.value !== initialAbout ? { [zh ? 'aboutZh' : 'aboutEn']: about } : {}),
                 ...(d.tunable !== false && gain.value !== initialGain ? {bodyGain:Number(gain.value)} : {}),
+                ...(typeof d.idleBreath === 'boolean' && breath.checked !== initialBreath ? {idleBreath:breath.checked} : {}),
                 ...(d.tunable !== false && style.value !== initialStyle ? {style:style.value} : {}),
                 ...(framing?.changed() ? {crop:framing.value()} : {}),
                 ...(updatedGaze && (updatedGaze.enabled !== initialGaze.enabled || updatedGaze.speed !== initialGaze.speed)

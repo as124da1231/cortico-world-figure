@@ -443,6 +443,17 @@ export async function createLive2DBody(base, opts, entry, kit) {
     }
     if (items.length) roles.set('mouthOpen', { space: [0, 1], def: 0, items });
   }
+  const idleBreath = profile.idleBreath !== false;
+  const breathChannels = roles.get('breath')?.items ?? [];
+  const nativeIdleOptions = idleBreath || !breathChannels.length ? undefined
+    : {suppressedIdleParameters: new Set(breathChannels.map(channel => channel.handle.getString()))};
+  function resetBreath() {
+    for (const {index, def} of breathChannels) model._model.setParameterValueByIndex(index, def);
+  }
+  function authoredBreath(frame, layer) {
+    return Number.isFinite(layer?.emotion?.facs?.breath)
+      || Number.isFinite(profile.expression?.[frame.face ?? 'neutral']?.breath);
+  }
   let voicePlayback, performancePlayback;
   const voiceMouth = createVoiceMouthEnvelope();
 
@@ -493,7 +504,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   for (let i = 0; i < model._model.getPartCount(); i++) {
     partIndex.set(model._model.getPartId(i).getString(), i);
   }
-  let native = [1,2].includes(profile.native?.version) ? createNativeActions(profile.native) : null;
+  let native = [1,2].includes(profile.native?.version) ? createNativeActions(profile.native, nativeIdleOptions) : null;
   const wardrobe=createWardrobe(model._model,paramIndex,partIndex,{parts:{...profile.parts?.base,...profile.clean?.parts},params:profile.clean?.params});
   wardrobe.configure(profile.wardrobe);wardrobe.scheme(initialScheme);
   let previewState = null;
@@ -683,7 +694,6 @@ export async function createLive2DBody(base, opts, entry, kit) {
       for (const k of ['eyeSmile', 'mouthForm', 'browY', 'browAngle', 'cheek']) {
         if (Number.isFinite(engine[k])) writeRole(k, engine[k]);
       }
-      writeRole('breath', Number.isFinite(engine.breath) ? engine.breath : 0.5 + 0.5 * Math.sin(t * 1.6));
     } else {
       writeRole('eyeBallX', clamp(eyeLook[0] ?? 0, -1, 1));
       writeRole('eyeBallY', clamp(-(eyeLook[1] ?? 0), -1, 1));
@@ -691,7 +701,14 @@ export async function createLive2DBody(base, opts, entry, kit) {
       writeRole('angleY', clamp(-(look[1] ?? 0) * 0.6, -1, 1));
       writeRole('angleZ', clamp(tilt * 0.67, -1, 1));
       writeRole('bodyX', clamp(lean * 0.6, -1, 1));
-      writeRole('breath', neutralPose ? 0.5 : 0.5 + 0.5 * Math.sin(t * 1.6));
+    }
+    if (idleBreath) {
+      const breath = Number.isFinite(engine?.breath) ? engine.breath : neutralPose ? 0.5 : 0.5 + 0.5 * Math.sin(t * 1.6);
+      writeRole('breath', breath);
+    } else if (neutralPose || !authoredBreath(frame, layer)) {
+      resetBreath();
+    } else if (Number.isFinite(engine?.breath)) {
+      writeRole('breath', engine.breath);
     }
 
     // 6) 外部直接驱动（工作台滑杆 / 参数面板）；放在最后，压过表情和待机
@@ -1354,8 +1371,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
       const speech = neutralPose ? null : voicePlayback?.level();
       const spokenMouth = voicePlayback && voiceMouth.update(speech, voicePlayback.gain, dt);
       const mouth = applyFrame(face, layer?.face ? {...frame,face:layer.face} : frame, dt, neutralPose, speech, layer);
-      if (!animationOnly) stepMotion(frame, dt);
-      else if (currentId) {
+      if (!animationOnly) {
+        stepMotion(frame, dt);
+        if (!idleBreath && idlePlaying && !Number.isFinite(roleOverrides.breath) && !authoredBreath(frame, layer)) {
+          resetBreath();
+        }
+      } else if (currentId) {
         model._motionManager.stopAllMotions();
         currentId = lastGesture = null;
         idlePlaying = false;

@@ -1040,6 +1040,29 @@ test('framing edits share the bounded model dialog and save with the existing ca
   }]);
 });
 
+test('the model editor shows and saves the idle breathing switch next to body gain', async t => {
+  let idleBreath = true;
+  const {root,button,calls}=await mount(t,{
+    ack:true, builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1}],
+    invoke:(method,args)=>{
+      if(method==='detail') return {nameZh:'Alpha',tunable:true,idleBreath};
+      if(method==='edit') idleBreath = args[1].idleBreath;
+    },
+  });
+  for (const next of [false,true]) {
+    button('编辑').click();
+    await tick();
+    const input=root.querySelector('#l2d-edit-idle-breath');
+    assert.equal(input.checked,!next);
+    assert(input.closest('label').previousElementSibling.querySelector('input[aria-label="身体幅度"]'));
+    input.click();
+    button('保存').click();
+    await tick();
+  }
+  assert.deepEqual(calls.filter(call=>call.method==='edit').map(call=>call.args),
+    [['a',{idleBreath:false}],['a',{idleBreath:true}]]);
+});
+
 test('the model gaze tab saves only changed settings and remembers speed while disabled', async t => {
   let gaze = {enabled:true,speed:1};
   const {root,button,calls,dom}=await mount(t,{
