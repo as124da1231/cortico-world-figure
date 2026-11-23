@@ -1169,7 +1169,7 @@ export default {
               }
               paintSource();
             }
-            popups.reportResult(kind === 'install' ? t('安装完成','Installation complete') : `${label} ✓`, r.warn ? [r.warn] : [], false, r.figureId);
+            popups.reportResult(kind === 'install' ? t('安装完成','Installation complete') : `${label} ✓`, r.warn ? [r.warn] : [], false, r.figureId, r.reinstalled);
             for (const line of r.log ?? []) log.append(line, 'dim');
             log.append(`✓ ${label} · ${((performance.now() - startedAt) / 1000).toFixed(1)}s`, 'plain');
             ui.toast(`${label} ✓`, 'ok');
@@ -1349,14 +1349,14 @@ export default {
           modal?.close(); modal?.remove();
 
           editingId = b.id;
-          modal = el('dialog', 'l2d-modal' + (framing || gaze ? ' l2d-crop-modal' : ''));
+          modal = el('dialog', 'l2d-modal');
           for (const card of grid.querySelectorAll('.l2d-card')) card.classList.toggle('selected', card.dataset.id === editingId);
-          accessibleModal(modal, t('编辑形象信息', 'Edit figure'));
+          accessibleModal(modal, t('编辑形象', 'Edit figure'));
           const card = el('div', 'l2d-modal-card');
           const head2 = el('div', 'l2d-modal-head');
           const heading = el('div', 'l2d-modal-heading');
-          heading.appendChild(el('div', 'l2d-modal-title', t('编辑形象信息', 'Edit figure')));
-          heading.appendChild(el('div', 'l2d-modal-sub', b.id.replace(/(-\d{6,})+$/, '')));
+          heading.appendChild(el('div', 'l2d-modal-title', t('编辑形象', 'Edit figure')));
+          heading.appendChild(el('div', 'l2d-modal-sub', b.nameZh || b.nameEn || b.id.replace(/(-\d{6,})+$/, '')));
           const close = el('button', 'l2d-btn quiet l2d-modal-close', '×');
           close.setAttribute('aria-label', t('关闭编辑', 'Close editor'));
           close.addEventListener('click', closeEdit);
@@ -1364,6 +1364,15 @@ export default {
           card.appendChild(head2);
 
           const info = el('div', 'l2d-edit-info');
+          const identity = el('div', 'l2d-profile-identity');
+          const motionPane = el('div', 'l2d-edit-info');
+          const motionSection = el('section', 'l2d-profile-section');
+          const motionControls = el('div', 'l2d-profile-motion');
+          const appearancePane = el('div', 'l2d-edit-info');
+          const appearanceControls = el('div', 'l2d-profile-switches');
+          motionSection.append(el('h4', 'l2d-profile-heading', t('动作表现', 'Motion')), motionControls);
+          if (d.tunable !== false) motionPane.append(motionSection);
+          info.append(identity);
           const fields = {};
           const addField = (key, label, multiline, value) => {
             const wrap = el('div', 'l2d-field');
@@ -1378,7 +1387,7 @@ export default {
             input.value = value ?? '';
             fields[key] = input;
             wrap.appendChild(input);
-            info.appendChild(wrap);
+            identity.appendChild(wrap);
           };
           addField('name', t('名字', 'Name'), false, (zh ? d.nameZh || d.nameEn : d.nameEn || d.nameZh) || '');
           addField('about', t('一句话', 'About'), true, (zh ? d.aboutZh ?? d.aboutEn : d.aboutEn ?? d.aboutZh) || '');
@@ -1400,7 +1409,35 @@ export default {
           gain.addEventListener('input', () => { gainOut.textContent = Number(gain.value).toFixed(2); });
           gainWrap.appendChild(gain);
           gainWrap.hidden = d.tunable === false;
-          info.appendChild(gainWrap);
+          motionControls.appendChild(gainWrap);
+
+          const drag = el('input', 'l2d-range');
+          drag.id = 'l2d-edit-drag-feedback';
+          drag.type = 'range';
+          drag.min = '0';
+          drag.max = '150';
+          drag.step = '5';
+          drag.value = String(Math.round((d.dragFeedback ?? 1) * 100));
+          if (typeof d.dragFeedback === 'number') {
+            const dragField = el('div', 'l2d-field l2d-profile-drag');
+            const row = el('div', 'l2d-label-row');
+            const label = el('label', 'l2d-label', t('拖动反馈', 'Drag feedback'));
+            label.htmlFor = drag.id;
+            const reading = el('output', 'l2d-out');
+            reading.setAttribute('for', drag.id);
+            const description = el('p', 'l2d-hint', t('调整拖起、移动和松手时的晃动与形变。100% 为默认。', 'Adjusts sway and deformation when picking up, dragging and releasing. The default is 100%.'));
+            description.id = 'l2d-drag-feedback-hint';
+            drag.setAttribute('aria-describedby', description.id);
+            const readDrag = () => {
+              reading.value = drag.value + '%';
+              drag.setAttribute('aria-valuetext', reading.value);
+            };
+            drag.addEventListener('input', readDrag);
+            readDrag();
+            row.append(label, reading);
+            dragField.append(row, drag, description);
+            motionPane.prepend(dragField);
+          }
 
           const breathLabel = el('label', 'l2d-label-row');
           const breath = el('input', 'l2d-switch');
@@ -1408,8 +1445,72 @@ export default {
           breath.id = 'l2d-edit-idle-breath';
           breath.setAttribute('role', 'switch');
           breath.checked = d.idleBreath !== false;
-          breathLabel.append(el('span', 'l2d-label', t('待机呼吸', 'Idle breathing')), breath);
-          if (typeof d.idleBreath === 'boolean') info.appendChild(breathLabel);
+          breathLabel.append(el('span', 'l2d-label', t('模型呼吸', 'Model breathing')), breath);
+          if (typeof d.idleBreath === 'boolean') {
+            const breathHint = el('p', 'l2d-hint', t('控制模型本身的呼吸起伏。', 'Controls breathing within the model.'));
+            breathHint.id = 'l2d-idle-breath-hint';
+            breath.setAttribute('aria-describedby', breathHint.id);
+            const breathField = el('div', 'l2d-field');
+            breathField.append(breathLabel, breathHint);
+            appearanceControls.appendChild(breathField);
+          }
+
+          const scaleBreath = el('input', 'l2d-switch');
+          scaleBreath.type = 'checkbox';
+          scaleBreath.setAttribute('role', 'switch');
+          scaleBreath.checked = d.breathingScale !== false;
+          if (typeof d.breathingScale === 'boolean') {
+            const scaleField = el('div', 'l2d-field');
+            const scaleLabel = el('label', 'l2d-label-row');
+            const scaleHint = el('p', 'l2d-hint', t('让整张立绘按呼吸节奏轻微缩放。', 'Gently scales the entire figure as it breathes.'));
+            scaleHint.id = 'l2d-breathing-scale-hint';
+            scaleBreath.setAttribute('aria-describedby', scaleHint.id);
+            scaleLabel.append(el('span', 'l2d-label', t('立绘呼吸缩放', 'Figure breathing scale')), scaleBreath);
+            scaleField.append(scaleLabel, scaleHint);
+            appearanceControls.appendChild(scaleField);
+          }
+
+          const flipLabel = el('label', 'l2d-label-row');
+          const flip = el('input', 'l2d-switch');
+          flip.type = 'checkbox';
+          flip.setAttribute('role', 'switch');
+          flip.checked = d.allowFlip !== false;
+          flipLabel.append(el('span', 'l2d-label', t('允许左右翻面', 'Allow horizontal flipping')), flip);
+          if (typeof d.allowFlip === 'boolean') appearanceControls.appendChild(flipLabel);
+          if (appearanceControls.childElementCount) appearancePane.append(appearanceControls);
+
+          let clickReaction = d.clickReaction;
+          if (clickReaction) {
+            const field = el('fieldset', 'l2d-effect-sizes l2d-click-reaction');
+            const choices = el('div', 'l2d-effect-size-choices');
+            const help = el('p', 'l2d-hint');
+            help.id = 'l2d-click-reaction-help';
+            field.setAttribute('aria-describedby', help.id);
+            for (const [value, label, detail] of [
+              ['native', t('原生反应', 'Original'), t('随机表情，待机时偶尔跳一下。', 'A random face, with occasional hops.')],
+              ['expression', t('仅表情', 'Expression only'), t('轻点有表情反馈，身体不会跳。', 'Shows an expression without hopping.')],
+              ['none', t('无动作', 'No reaction'), t('轻点不触发额外的表情或动作。', 'A tap triggers no extra expression or motion.')],
+            ]) {
+              const option = el('label', 'l2d-effect-size-choice');
+              const radio = el('input', 'l2d-effect-radio');
+              radio.type = 'radio';
+              radio.name = 'l2d-click-reaction';
+              radio.value = value;
+              radio.checked = clickReaction === value;
+              if (radio.checked) help.textContent = detail;
+              radio.onchange = () => {
+                if (radio.checked) {
+                  clickReaction = value;
+                  help.textContent = detail;
+                }
+              };
+              option.append(radio, el('span', '', label));
+              choices.append(option);
+            }
+            field.classList.add('l2d-profile-click');
+            field.append(el('legend', '', t('单击反应', 'Click reaction')), choices, help);
+            motionPane.appendChild(field);
+          }
 
           const styleWrap = el('div', 'l2d-field');
           styleWrap.appendChild(el('div', 'l2d-label', t('动作风格', 'Motion style')));
@@ -1425,11 +1526,12 @@ export default {
           style.value = d.style ?? 'natural';
           styleWrap.appendChild(style);
           styleWrap.hidden = d.tunable === false;
-          info.appendChild(styleWrap);
+          motionControls.appendChild(styleWrap);
 
-          const gazePane = gaze ? el('div', 'l2d-edit-info') : null;
+
           let gazeValue;
-          if (gazePane) {
+          if (gaze) {
+            const gazeSection = el('section', 'l2d-profile-section l2d-profile-gaze');
             const followLabel = el('label', 'l2d-label-row');
             const follow = el('input', 'l2d-switch');
             follow.type = 'checkbox';
@@ -1460,35 +1562,40 @@ export default {
             const speedTop = el('div', 'l2d-label-row');
             speedTop.append(speedLabel, speedOut);
             speedField.append(speedTop, speed);
-            gazePane.append(followLabel, speedField, el('p', 'l2d-hint l2d-gaze-note', t(
+            gazeSection.append(el('h4', 'l2d-profile-heading', t('视线', 'Gaze')), followLabel, speedField, el('p', 'l2d-hint l2d-gaze-note', t(
               '只调整眼球追上鼠标的快慢。需要模型有可转动的眼球参数。',
               'Changes how quickly the eyes follow the cursor. Requires movable eye parameters.',
             )));
+            appearancePane.append(gazeSection);
             gazeValue = () => normalizeGazeConfig({ enabled: follow.checked, speed: Number(speed.value) });
           }
 
-          const initialEdit = () => JSON.stringify([fields.name.value, fields.about.value, gain.value, breath.checked, style.value, framing?.value(), gazeValue?.()]);
+          const initialEdit = () => JSON.stringify([fields.name.value, fields.about.value, gain.value, drag.value, breath.checked, scaleBreath.checked, flip.checked, clickReaction, style.value, framing?.value(), gazeValue?.()]);
           const initialValues = initialEdit();
           const initialGaze = gazeValue?.();
           const initialName = fields.name.value;
           const initialAbout = fields.about.value;
-          const initialGain = gain.value, initialBreath = breath.checked, initialStyle = style.value;
+          const initialGain = gain.value, initialDrag = drag.value;
+          const initialBreath = breath.checked, initialScaleBreath = scaleBreath.checked;
+          const initialFlip = flip.checked, initialStyle = style.value;
           editDirty = () => initialEdit() !== initialValues;
 
           const hint = el('div', 'l2d-hint', t(
-            '直接保存到该份打包产物。若这份已安装，需再点一次「安装」同步到 Coo。',
-            'Saves without repacking. Re-install to sync if already installed.',
+            '保存到模型包。重新安装后，若桌面正在穿戴这只形象，先换另一只再换回来。',
+            'Save to the pack and reinstall. If already worn, switch to another figure and back.',
           ));
+          const sections = [[t('资料', 'Details'), info]];
+          if (motionPane.childElementCount) sections.push([t('动作与交互', 'Motion & interaction'), motionPane]);
+          if (appearancePane.childElementCount) sections.push([t('立绘', 'Figure behavior'), appearancePane]);
+          if (framing) sections.push([t('取景', 'Framing'), framing.el]);
           let editScroll, editTabs;
           let showEditInfo = () => {};
-          if (framing || gazePane) {
+          if (sections.length > 1) {
+            modal.classList.add('l2d-profile-modal');
             editTabs = el('div', 'l2d-edit-tabs');
             editTabs.setAttribute('role', 'tablist');
             editTabs.setAttribute('aria-label', t('编辑选项', 'Editor sections'));
             editScroll = el('div', 'l2d-edit-scroll');
-            const sections = [[t('信息', 'Details'), info]];
-            if (framing) sections.push([t('取景', 'Framing'), framing.el]);
-            if (gazePane) sections.push([t('视线', 'Gaze'), gazePane]);
             const panes = sections.map(([, pane]) => pane);
             const tabs = sections.map(([label, pane], index) => {
               const button = el('button', 'l2d-btn quiet sm', label);
@@ -1564,7 +1671,11 @@ export default {
                 ...(fields.name.value !== initialName ? { [zh ? 'nameZh' : 'nameEn']: name } : {}),
                 ...(fields.about.value !== initialAbout ? { [zh ? 'aboutZh' : 'aboutEn']: about } : {}),
                 ...(d.tunable !== false && gain.value !== initialGain ? {bodyGain:Number(gain.value)} : {}),
+                ...(typeof d.dragFeedback === 'number' && drag.value !== initialDrag ? {dragFeedback:Number(drag.value)/100} : {}),
                 ...(typeof d.idleBreath === 'boolean' && breath.checked !== initialBreath ? {idleBreath:breath.checked} : {}),
+                ...(typeof d.breathingScale === 'boolean' && scaleBreath.checked !== initialScaleBreath ? {breathingScale:scaleBreath.checked} : {}),
+                ...(clickReaction !== d.clickReaction ? {clickReaction} : {}),
+                ...(typeof d.allowFlip === 'boolean' && flip.checked !== initialFlip ? {allowFlip:flip.checked} : {}),
                 ...(d.tunable !== false && style.value !== initialStyle ? {style:style.value} : {}),
                 ...(framing?.changed() ? {crop:framing.value()} : {}),
                 ...(updatedGaze && (updatedGaze.enabled !== initialGaze.enabled || updatedGaze.speed !== initialGaze.speed)
@@ -1581,7 +1692,7 @@ export default {
               if (disposed) return;
               setBusy(false);
               closeEdit();
-              ui.toast(t('已保存', 'Saved'), 'ok');
+              ui.toast(t('已保存到模型包', 'Saved to the figure pack'), 'ok');
               log.append(t('编辑 · ', 'Edited · ') + b.id, 'dim');
             } catch (e) {
               if (!disposed) error.textContent = t('保存失败，可以重试。', 'Could not save. Try again. ') + text(e);

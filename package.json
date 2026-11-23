@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-figure",
-  "version": "4.2.1",
+  "version": "4.3.0",
   "type": "module",
   "description": "把本地 Live2D 和 BongoCat 模型变成 Coo 桌宠。\n\n## 一、导入与安装\n1. 拖入模型文件夹、ZIP 或现成形象包。\n2. 生成封面，一键打包和安装，也可保留卡片稍后编辑。\n\n## 二、动作与装扮\n1. 用通用配方自动适配 Live2D 参数和常用表情。\n2. 在浏览器试播原生资源、组合表情和编辑装扮，或让 AI 提出适配方案。\n\n## 三、桌宠表现\n1. 调整全身或半身取景，默认使用 Coo 原生特效，可为 Live2D 形象勾选多种随包安装的额外特效。\n2. 配置多套语音服务，试听并调整朗读和随音频变化的口型。\n3. 从默认、主模型编排、独立编排三档选择对话表演方式。",
   "license": "AGPL-3.0-or-later",
@@ -48,8 +48,8 @@
         "displayName": "Live2D One-Click Install"
       }
     },
-    "webUiClient": "dist/webui-52578c5a05a2.js",
-    "webUiStyle": "dist/webui-be5167b5329a.css",
+    "webUiClient": "dist/webui-8f53562f49b7.js",
+    "webUiStyle": "dist/webui-1ed6388164bc.css",
     "describe": "describe.json"
   },
   "files": [

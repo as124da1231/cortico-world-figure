@@ -172,9 +172,12 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   let closed=false,saving=false,saveSequence=0,skippingImages=false,dirty=false,data,bindings=[],word='happy',resource=null,rawMode=!!studio,serial=0,previewTimer,sampleSet=0,discardPrompt=null,leaseTimer,sessionValid=true,previewDialog=null;
   let saveStage=-1,saveProgressTimer;
   let connected=true;
+  let disabledWords = new Set(), clickPool = new Set();
+  let grabReaction = {mode:'native',pool:[]};
+  let interactionType = 'click', interactionWord = null;
   let combinationError='',pendingCombination=null,auditionNativeOnly=false;
   let page='actions',groups=[],picks={},groupId=null,optionId='default',optionNameDraft=null,closeGroupDialog;
-  const pageState={actions:{resource:null,filter:'all',search:'',scroll:0},wardrobe:{resource:null,filter:'all',search:'',scroll:0}};
+  const pageState={actions:{resource:null,filter:'all',search:'',scroll:0,targetScroll:0,nativeOnly:false},wardrobe:{resource:null,filter:'all',search:'',scroll:0,targetScroll:0,nativeOnly:false},interaction:{resource:null,filter:'all',search:'',scroll:0,targetScroll:0,nativeOnly:false}};
   const uid=prefix=>prefix+(win.crypto?.randomUUID?.().replaceAll('-','')||Math.random().toString(16).slice(2)).slice(0,12);
   const signature=items=>JSON.stringify(items.map(({word,resource,overlays=[],release,nativeOnly})=>({word,resource,overlays:[...overlays].sort(),...(release?{release}:{}),...(nativeOnly?{nativeOnly:true}:{})})).sort((a,b)=>a.word.localeCompare(b.word)));
   const canEdit=()=>!!data&&sessionValid&&connected&&!saving;
@@ -189,8 +192,8 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     const current=bindings.find(item=>item.word===word);
     const preview=page==='actions'?(resource??data?.resources.find(item=>item.id===current?.resource)):null;
     previewModes.hidden=!preview;
-    replay.hidden=preview?.kind!=='motion';
-    returnPreview.hidden=page!=='actions'||!resource;
+    replay.hidden=page==='interaction'?!interactionWord:preview?.kind!=='motion';
+    returnPreview.hidden=page==='interaction'?!interactionWord:page!=='actions'||!resource;
   }
   function paintSaveProgress(){
     saveProgress.hidden=saveStatus.hidden=!saving;
@@ -230,9 +233,21 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     save.setAttribute('aria-busy',String(saving));
     paintSaveProgress();
     skipImages.hidden=!saving;skipImages.disabled=skippingImages;
-    restoreAll.disabled=!canEdit()||(page==='actions'?!bindings.length:!groups.length);
-    restoreAll.textContent=page==='actions'?t('全部恢复通用','Reset all to generic'):t('恢复默认外观','Default appearance');
-    groupTools.hidden=page!=='wardrobe';syncPreviewControls();
+    const interaction = page==='interaction';
+    const fixed = interactionType==='grab' && grabReaction.mode==='fixed';
+    restoreAll.hidden=interaction && (interactionType==='click' ? !clickPool.size
+      : grabReaction.mode==='native' || (fixed ? !grabReaction.word : !grabReaction.pool.length));
+    restoreAll.disabled=!canEdit()||(page==='actions'?!bindings.length:page==='wardrobe'&&!groups.length);
+    restoreAll.textContent=interaction ? (fixed?t('清除指定表情','Clear expression'):t('清空播放池','Clear pool'))
+      : page==='actions'?t('全部恢复通用','Reset all to generic'):t('恢复默认外观','Default appearance');
+    tabs.hidden=interaction;
+    search.placeholder=interaction?t('搜索可播词条','Search playable words'):t('搜索原生资源','Search native resources');
+    search.setAttribute('aria-label',search.placeholder);
+    if(editorNavigation){
+      editorNavigation.querySelector('[data-pane="targets"]').textContent=interaction?t('互动类型','Interaction type'):t('绑定目标','Binding targets');
+      editorNavigation.querySelector('[data-pane="resources"]').textContent=interaction?t('词条选择','Choose words'):t('原生资源','Native resources');
+    }
+    groupTools.hidden=page!=='wardrobe';syncPreviewControls();syncWordSwitch();
     reset.textContent=page==='wardrobe'?t('复位预览','Reset preview'):t('查看组合','View combination');
     newGroup.disabled=resolution.disabled=raw.disabled=replay.disabled=reset.disabled=retry.disabled=!canEdit();
     if(full)full.disabled=!canEdit();
@@ -244,9 +259,29 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   const expireSession=message=>{
     sessionValid=false;stopPreviewUpdates();retry.hidden=true;hint.textContent=message;syncControls();paintSelection();
   };
+  function playableWords(forGrab=false){
+    const generic = new Set(data.genericWords || []);
+    const byWord = new Map(bindings.map(binding=>[binding.word,binding]));
+    const byResource = new Map(data.resources.map(item=>[item.id,item]));
+    return [...data.words.expressions,...(forGrab?[]:data.words.motions)].filter(w=>{
+      const item = byResource.get(byWord.get(w)?.resource);
+      return forGrab && item?.kind==='motion' ? false : Boolean(item) || generic.has(w);
+    });
+  }
   const changed=()=>{
-    dirty=signature(bindings)!==signature(data.bindings||[])||JSON.stringify(groups)!==JSON.stringify(data.wardrobe||[]);
-    ctx.stageDraft?.(dirty?structuredClone({bindings,wardrobe:groups}):null);
+    const disabled=[...disabledWords].sort();
+    const playable = new Set(playableWords()), expressions = new Set(playableWords(true));
+    clickPool=new Set([...clickPool].filter(w=>playable.has(w)));
+    grabReaction={mode:grabReaction.mode,
+      ...(expressions.has(grabReaction.word)?{word:grabReaction.word}:{}),
+      pool:grabReaction.pool.filter(w=>expressions.has(w)).sort()};
+    const pool=[...clickPool].sort();
+    const savedGrab=data.grabReaction??{mode:'native',pool:[]};
+    dirty=signature(bindings)!==signature(data.bindings||[])||JSON.stringify(groups)!==JSON.stringify(data.wardrobe||[])
+      ||JSON.stringify(disabled)!==JSON.stringify([...(data.disabledWords||[])].sort())
+      ||JSON.stringify(pool)!==JSON.stringify([...(data.clickPool||[])].sort())
+      ||JSON.stringify(grabReaction)!==JSON.stringify(savedGrab);
+    ctx.stageDraft?.(dirty?structuredClone({bindings,wardrobe:groups,disabledWords:disabled,clickPool:pool,grabReaction}):null);
     syncControls();
   };
   const alive=()=>!closed&&!ctx.signal?.aborted;
@@ -267,10 +302,18 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     if(wardrobeAudition){
       g.options=g.options.slice(0,15);g.options.push({id:'preview',name:resource.title,resource:resource.id});selected[g.id]='preview';
     }
-    const current=bindings.find(b=>b.word===word);
-    const previewBinding=resource?{resource:resource.id,nativeOnly:resource.kind==='motion'&&auditionNativeOnly}:current;
-    const request={page,word,resource:page==='actions'?previewBinding?.resource:null,overlays:page==='actions'?(previewBinding?.overlays||[]):[],nativeOnly:page==='actions'&&previewBinding?.nativeOnly===true,raw:rawMode&&(!studio||!!previewBinding?.resource),bindings:structuredClone(bindings),groups:preview,picks:selected,sampleSet,previewSize:resolution.value==='unlimited'?'unlimited':Number(resolution.value)};
-    const description=page==='actions'
+    const interaction=page==='interaction';
+    const target=interaction?(interactionWord||'neutral'):word;
+    const current=interaction&&!interactionWord?null:bindings.find(b=>b.word===target);
+    const previewBinding=resource&&!interaction?{resource:resource.id,nativeOnly:resource.kind==='motion'&&auditionNativeOnly}:current;
+    const isAction=page!=='wardrobe';
+    const request={page:isAction?'actions':page,word:target,resource:isAction?previewBinding?.resource:null,
+      overlays:isAction?(previewBinding?.overlays||[]):[],nativeOnly:isAction&&previewBinding?.nativeOnly===true,
+      raw:!interaction&&rawMode&&(!studio||!!previewBinding?.resource),interaction:interaction?(interactionWord?interactionType:'click'):undefined,
+      bindings:structuredClone(bindings),groups:preview,picks:selected,sampleSet,previewSize:resolution.value==='unlimited'?'unlimited':Number(resolution.value)};
+    const description=interaction
+      ? (interactionWord?t('试看 · ','Preview · ')+label(interactionWord):t('点词条名称试播','Select a word name to preview'))
+      : page==='actions'
       ? (resource?t('单项试看 · ','Single effect · ')+resource.title:current?label(word)+' · '+[current.resource,...(current.overlays||[])].map(id=>data.resources.find(r=>r.id===id)?.title).join(' ＋ '):t('通用表现','Generic behavior'))
       : g?wardrobeGroupName(g)+' · '+(wardrobeAudition?t('试看 ','Previewing ')+resource.title:t('预览 ','Preview ')+wardrobePickName(g)):t('当前装扮','Current appearance');
     const generation=++serial;win.clearTimeout(previewTimer);retry.hidden=true;setPreviewBusy(true);
@@ -324,12 +367,37 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     if(page==='wardrobe'){picks={};optionId='default';optionNameDraft=null;}
     resource=null;paintTargets();paintResources();loadPreview();
   };
-  if(returnPreview)returnPreview.onclick=()=>{resource=null;paintResources();loadPreview();};
+  if(returnPreview)returnPreview.onclick=()=>{resource=null;interactionWord=null;paintResources();loadPreview();};
   let filter='all';const search=el('input','l2d-input');search.type='search';search.placeholder=t('搜索原生资源','Search native resources');search.setAttribute('aria-label',search.placeholder);
   const tabs=el('div','l2d-bind-tabs'),list=el('div','l2d-bind-list'),binding=el('div','l2d-bind-selection');
+  const grabModes=el('div','figure-grab-modes');
+  grabModes.hidden=true;
+  grabModes.setAttribute('role','group');
+  grabModes.setAttribute('aria-label',t('拎起反应','Grab reaction'));
+  const grabChoices=[
+    ['native',t('原生反应','Original')],
+    ['fixed',t('指定表情','Fixed expression')],
+    ['random',t('随机反应池','Random pool')],
+  ];
   const resourceCount=el('span','figure-resource-count');
   const resourceTitle=el('h2',null,t('原生资源','Native resources'));
   const previousPage=el('button','l2d-btn sm figure-page-arrow','↑'),nextPage=el('button','l2d-btn sm figure-page-arrow','↓');
+  const wordSwitch=el('button','l2d-btn sm figure-word-switch',t('允许 Coo 调用','Allow Coo to use'));
+  wordSwitch.type='button';
+  wordSwitch.setAttribute('role','switch');
+  wordSwitch.title=t('保存并安装后生效，仍可在这里试播和修改绑定。','Applies after saving and installing. Preview and binding remain available here.');
+  wordSwitch.append(el('span','figure-word-switch-track'));
+  function syncWordSwitch(){
+    wordSwitch.hidden=page!=='actions'||!data;
+    wordSwitch.disabled=!canEdit();
+    wordSwitch.setAttribute('aria-checked',String(!disabledWords.has(word)));
+  }
+  wordSwitch.onclick=()=>{
+    if(!canEdit()||discardPrompt||page!=='actions')return;
+    if(disabledWords.has(word))disabledWords.delete(word);
+    else disabledWords.add(word);
+    changed();paintTargets();paintSummary();
+  };
   let listResize;
   function updatePaging(){
     previousPage.disabled=list.scrollTop<=1;
@@ -340,7 +408,8 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     previousPage.title=t('向上滚动一屏','Scroll up one screen');nextPage.title=t('向下滚动一屏','Scroll down one screen');
     previousPage.setAttribute('aria-label',previousPage.title);nextPage.setAttribute('aria-label',nextPage.title);
     const pageBy=direction=>{
-      const row=list.firstElementChild?.offsetHeight||44;
+      const gap=parseFloat(win.getComputedStyle(list).rowGap)||0;
+      const row=(list.firstElementChild?.offsetHeight||44)+gap;
       list.scrollTop+=direction*Math.max(row,list.clientHeight-row);
       updatePaging();
     };
@@ -353,32 +422,87 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     list.addEventListener('scroll',updatePaging,{passive:true});
     if(win.ResizeObserver){listResize=new win.ResizeObserver(updatePaging);listResize.observe(list);}
     const library=el('div','figure-resource-head');
-    library.append(resourceTitle,resourceCount,previousPage,nextPage);right.append(library);
+    library.append(resourceTitle,resourceCount,wordSwitch,previousPage,nextPage);right.append(library);
+  }else right.append(wordSwitch);
+  if(studio){
+    for(const [mode,title] of grabChoices){
+      const button=el('button','l2d-btn quiet sm',title);
+      button.type='button';
+      button.dataset.grabMode=mode;
+      button.onclick=()=>{
+        if(!canEdit()||grabReaction.mode===mode)return;
+        grabReaction.mode=mode;
+        interactionWord=null;
+        changed();paintTargets();paintResources(0);play();
+      };
+      grabModes.append(button);
+    }
+    right.append(grabModes);
   }
   right.append(search,tabs,list,binding);
-  const paintTargets=()=>{
-    const scroll=left.scrollTop;
-    const focus=left.contains(doc.activeElement)?doc.activeElement.dataset.wardrobeFocus:null;
+  const paintTargets=(scroll=left.scrollTop)=>{
+    const focus=left.contains(doc.activeElement)?doc.activeElement:null;
+    const focusKey=page==='wardrobe'?'wardrobeFocus':'targetWord';
     left.classList.toggle('l2d-wardrobe-nav',page==='wardrobe');
     left.replaceChildren();
-    if(page==='wardrobe'){
-      paintWardrobeTargets();
-      left.scrollTop=scroll;
-      if(focus)[...left.querySelectorAll('[data-wardrobe-focus]')].find(node=>node.dataset.wardrobeFocus===focus)?.focus({preventScroll:true});
-      return;
+    if(page==='wardrobe') paintWardrobeTargets();
+    else if(page==='interaction'){
+      left.append(el('h3',null,t('桌宠互动','Desktop interactions')));
+      const grabState=grabReaction.mode==='fixed'&&grabReaction.word ? label(grabReaction.word)
+        : grabReaction.mode==='random'&&grabReaction.pool.length ? t(grabReaction.pool.length+' 项',grabReaction.pool.length+' items')
+        : t('原生反应','Original');
+      for(const [type,title,status] of [
+        ['click',t('单击','Click'),clickPool.size?t(clickPool.size+' 项',clickPool.size+' items'):t('沿用形象设置','Figure setting')],
+        ['grab',t('拎起','Grab'),grabState],
+      ]){
+        const button=el('button','l2d-bind-target'+(interactionType===type?' selected':''));
+        button.type='button';
+        button.dataset.targetWord=type;
+        button.setAttribute('aria-pressed',String(interactionType===type));
+        button.append(el('span','figure-target-name',title),el('small','figure-target-state',status));
+        button.onclick=()=>{
+          if(!canEdit())return;
+          showEditorPane('resources');
+          if(interactionType===type)return;
+          interactionType=type;interactionWord=null;search.value='';
+          syncControls();paintTargets();paintResources(0);play();
+        };
+        left.append(button);
+      }
     }
-    for(const [key,title]of [['expressions',t('表情','Expressions')],['motions',t('动作','Motions')]]){
-    left.append(el('h3',null,title));for(const w of data.words[key]){
-      const b=el('button','l2d-bind-target'+(w===word?' selected':''));b.type='button';b.setAttribute('aria-pressed',String(w===word));
-      const current = bindings.filter(item => item.word === w);
-      const saved = (data.bindings || []).filter(item => item.word === w);
-      const edited = signature(current) !== signature(saved);
-      const status = edited ? t('待保存','Unsaved')
-        : current.length ? t(`已绑定 ${1+(current[0].overlays?.length||0)} 项`,'Bound') : t('通用','Generic');
-      b.append(el('span',null,label(w)),el('small',edited?'figure-draft-state':null,status));
-      b.onclick=()=>{word=w;resource=null;combinationError='';pendingCombination=null;paintTargets();paintResources();play();};left.append(b);
+    else {
+      for(const [key,title] of [['expressions',t('表情','Expressions')],['motions',t('动作','Motions')]]) {
+        if(!data.words[key].length) continue;
+        left.append(el('h3',null,title));
+        for(const w of data.words[key]) {
+          const b=el('button','l2d-bind-target'+(w===word?' selected':''));
+          b.type='button';
+          b.dataset.targetWord=w;
+          b.setAttribute('aria-pressed',String(w===word));
+          const current=bindings.filter(item=>item.word===w);
+          const saved=(data.bindings||[]).filter(item=>item.word===w);
+          const disabled=disabledWords.has(w);
+          const edited=signature(current)!==signature(saved)||disabled!==(data.disabledWords||[]).includes(w);
+          const status=disabled?t('已停用','Disabled'):edited?t('待保存','Unsaved')
+            : current.length?t('已绑定 '+(1+(current[0].overlays?.length||0))+' 项','Bound'):t('通用','Generic');
+          const targetState=el('small','figure-target-state'+(edited?' figure-draft-state':current.length&&!disabled?' is-bound':''),status);
+          b.classList.toggle('is-word-disabled',disabled);
+          if(disabled&&edited)b.setAttribute('aria-label',label(w)+' · '+status+' · '+t('待保存','Unsaved'));
+          b.append(el('span','figure-target-name',label(w)),targetState);
+          b.onclick=()=>{
+            if(!canEdit()||discardPrompt)return;
+            word=w;resource=null;combinationError='';pendingCombination=null;
+            paintTargets();paintResources();play();
+          };
+          left.append(b);
+        }
+      }
     }
-  }};
+    left.scrollTop=scroll;
+    if(focus?.dataset[focusKey]) {
+      [...left.querySelectorAll('button')].find(node=>node.dataset[focusKey]===focus.dataset[focusKey])?.focus({preventScroll:true});
+    }
+  };
   const currentIds=()=>{const b=bindings.find(b=>b.word===word);return b?[b.resource,...(b.overlays||[])]:[];};
   const outfitChannels=()=>new Set(groups.flatMap(g=>g.options.flatMap(o=>data.resources.find(r=>r.id===o.resource)?.channels||[])));
   function commitSelection(ids,release,nativeOnly=false){
@@ -387,6 +511,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     const overlays=primary?validateExpressionOverlays(data,primary.id,ids.slice(1)):[];
     const outfit=outfitChannels();
     if(!nativeOnly&&[...ids,release].some(id=>data.resources.find(r=>r.id===id)?.channels?.some(c=>outfit.has(c))))throw Error(primary?.kind==='motion'&&data.nativeMotionMode?t('与装扮共用参数。可选「完全使用动画」，或调整装扮绑定。','Shares controls with wardrobe. Choose Animation only or adjust the outfit.'):t('与已配置装扮共用参数，请先调整装扮绑定。','Shares controls with wardrobe. Adjust that binding first.'));
+    if(primary?.kind==='motion')rawMode=false;
     bindings=bindings.filter(b=>b.word!==word);
     if(primary)bindings.push({word,resource:primary.id,...(overlays.length?{overlays}:{}),...(release?{release}:{}),...(nativeOnly?{nativeOnly:true}:{}),confidence:1,reason:'用户在动作编辑器中选择'});
     resource=null;combinationError='';pendingCombination=null;changed();paintTargets();paintResources();play();
@@ -394,7 +519,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   function toggleEffect(item){
     if(!canEdit()||discardPrompt)return;
     const ids=currentIds(),current=data.resources.find(r=>r.id===ids[0]);
-    try{if(current?.kind==='motion')throw Error(t('当前绑定为动作，请先恢复通用，再选择表情组合。','Clear the motion binding before selecting expressions.'));commitSelection(ids.includes(item.id)?ids.filter(id=>id!==item.id):[...ids,item.id]);}
+    try{if(current?.kind==='motion')throw Error(t('这个词条已绑定动作，可以改用该表情。','This target has a motion binding. You can replace it with this expression.'));commitSelection(ids.includes(item.id)?ids.filter(id=>id!==item.id):[...ids,item.id]);}
     catch(error){combinationError=error.message;pendingCombination=item;paintSelection();}
   }
   const paintSelection=()=>{
@@ -403,11 +528,25 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     binding.classList.toggle('figure-wardrobe-selection',page==='wardrobe'&&!!studio);
     binding.classList.remove('has-motion-mode');
     if(page==='wardrobe'){paintWardrobeSelection();return;}
+    if(page==='interaction'){
+      const grab=interactionType==='grab';
+      const fixed=grab&&grabReaction.mode==='fixed';
+      const count=grab?grabReaction.pool.length:clickPool.size;
+      const title=fixed ? (grabReaction.word?label(grabReaction.word):t('未指定表情','No expression selected'))
+        : grab&&grabReaction.mode==='native'?t('原生反应','Original reaction')
+        : t('播放池 · '+count+' 项','Pool · '+count+' items');
+      const detail=grab
+        ? grabReaction.mode==='native'?t('拎起时沿用 Coo 原有表现。','Use the original Coo reaction when grabbed.')
+          : t('拎起时选一次，松手后淡出。未选择时沿用原生反应。','Choose once per grab and fade out on release. Uses the original reaction when empty.')
+        : t('单击时随机播放一项。池为空时沿用形象的单击设置。','Play one random word per click. An empty pool uses the figure’s click setting.');
+      binding.replaceChildren(el('p','figure-interaction-summary',title),el('p','l2d-bind-note',detail));
+      paintSummary();return;
+    }
     binding.replaceChildren();const current=bindings.find(b=>b.word===word),ids=currentIds();
     const selectedResource=resource??data.resources.find(r=>r.id===current?.resource);
     const motion=selectedResource?.kind==='motion'&&selectedResource.classification!=='appearance'?selectedResource:null;
     const boundMotion=motion&&current?.resource===motion.id;
-    const canUseMotion=resource&&motion&&(!boundMotion||motion.classification==='pose');
+    const canUseMotion=resource&&motion&&!boundMotion;
     const caption=el('p','l2d-combination-title',label(word)+' · ');
     if(motion){
       const state=el('span','l2d-motion-state'+(boundMotion?' is-bound':''),boundMotion?t('已绑定','Bound'):t('待绑定','Unbound'));
@@ -415,66 +554,147 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     }else caption.append(ids.length?t(`已选 ${ids.length} 个效果`,`${ids.length} effects`):t('通用表现','Generic behavior'));
     caption.title=caption.textContent;
     const chips=el('div','l2d-combination-chips');chips.setAttribute('aria-label',t('当前组合','Current combination'));
-    const warning=el('div','l2d-combination-warning',combinationError);warning.setAttribute('role','status');
+    const guidance=canUseMotion&&motion.classification==='pose'
+      ? (motion.release?t('播完使用原生复位动作。','Plays the matching reset motion afterward.'):t('播完自动回到通用表现。','Returns to generic behavior automatically.'))
+      : '';
+    const warning=el('div','l2d-combination-warning',combinationError||guidance);warning.setAttribute('role','status');
     if(motion&&data.nativeMotionMode){
       binding.classList.add('has-motion-mode');
-      const label=el('label','l2d-motion-mode',t('安装后播放','Installed playback'));
-      const mode=el('select','l2d-input');
-      for(const [value,title] of [['mixed',t('叠加通用表现','Blend generic behavior')],['native',t('完全使用动画','Animation only')]]){
-        const option=el('option',null,title);option.value=value;mode.append(option);
+      const settings=el('div','l2d-motion-mode');
+      const options=el('div','l2d-motion-options');
+      const playbackLabel=t('安装后播放','Installed playback');
+      options.setAttribute('role','group');
+      options.setAttribute('aria-label',playbackLabel);
+      const nativeOnly=(boundMotion?current.nativeOnly:auditionNativeOnly)===true;
+      for(const [value,title] of [[false,t('叠加通用表现','Blend generic behavior')],[true,t('完全使用动画','Animation only')]]) {
+        const button=el('button','l2d-btn sm',title);
+        button.type='button';
+        button.dataset.nativeOnly=String(value);
+        button.setAttribute('aria-pressed',String(value===nativeOnly));
+        button.disabled=!canEdit();
+        button.onclick=()=>{
+          if(!canEdit()||discardPrompt||value===nativeOnly)return;
+          rawMode=false;
+          if(canUseMotion){
+            auditionNativeOnly=value;
+            combinationError='';
+            paintSelection();
+            play();
+          }else{
+            try{commitSelection([motion.id],current.release,value);}
+            catch(error){combinationError=error.message;paintSelection();}
+          }
+          binding.querySelector('[data-native-only="'+value+'"]')?.focus({preventScroll:true});
+        };
+        options.append(button);
       }
-      mode.value=(resource?auditionNativeOnly:current?.nativeOnly)?'native':'mixed';
-      mode.disabled=!canEdit();
-      mode.title=t('完全使用动画时，由原生动作接管模型参数，播完恢复其他表现。','Animation only gives the native motion control of model parameters during playback.');
-      mode.onchange=()=>{
-        if(!canEdit()||discardPrompt)return;
-        const nativeOnly=mode.value==='native';
-        rawMode=false;syncPreviewMode();
-        if(resource&&!boundMotion){
-          auditionNativeOnly=nativeOnly;
-          combinationError=warning.textContent='';
-          play();
-        }else{
-          try{commitSelection([motion.id],current.release,nativeOnly);}
-          catch(error){combinationError=error.message;paintSelection();}
-        }
-      };
-      label.append(mode);chips.append(label);
+      settings.append(el('span','l2d-motion-mode-label',playbackLabel),options);
+      chips.append(settings);
     }else{
       for(const id of ids){const item=data.resources.find(r=>r.id===id);const chip=el('button','l2d-btn quiet sm',`${item?.title||id} ×`);chip.type='button';chip.setAttribute('aria-label',t('移除 ','Remove ')+(item?.title||id));chip.disabled=!canEdit();chip.onclick=()=>{try{commitSelection(ids.filter(x=>x!==id),id===current.resource?undefined:current.release);}catch(e){combinationError=e.message;paintSelection();}};chips.append(chip);}
       if(!ids.length){
         const canCombine=data.words.expressions.includes(word)&&data.resources.some(r=>r.kind==='expression'&&r.classification!=='appearance');
-        chips.append(el('span','l2d-bind-note',canCombine?t('点名称试看，勾选加入组合','Click a name to preview. Check it to combine.'):t('点动作名称试看，再选择「使用此动作」','Preview an animation, then choose Use this motion.')));
+        chips.append(el('span','l2d-bind-note',canCombine?t('点名称试播，勾选表情加入当前绑定。','Click a name to preview. Check an expression to add it.'):t('点动作名称试播，下方会显示绑定按钮。','Click a motion to preview it and show the bind button.')));
       }
     }
     const actions=el('div','l2d-combination-actions');
-    if(pendingCombination&&combinationError.includes('冲突')){
-      const replace=el('button','l2d-btn sm',t('替换冲突项','Replace conflicting effects'));
-      replace.onclick=()=>{const item=pendingCombination;const keep=ids.filter(id=>{try{validateExpressionOverlays(data,id,[item.id]);return true;}catch{return false;}});try{commitSelection([...keep,item.id]);}catch(e){combinationError=e.message;paintSelection();}};actions.append(replace);
+    const replacingMotion=pendingCombination&&data.resources.find(item=>item.id===current?.resource)?.kind==='motion';
+    if(pendingCombination&&(replacingMotion||combinationError.includes('冲突'))){
+      const replace=el('button','l2d-btn sm',replacingMotion?t('改用此表情','Use this expression'):t('替换冲突项','Replace conflicting effects'));
+      replace.onclick=()=>{
+        const item=pendingCombination;
+        const keep=replacingMotion?[]:ids.filter(id=>{try{validateExpressionOverlays(data,id,[item.id]);return true;}catch{return false;}});
+        try{commitSelection([...keep,item.id]);}catch(error){combinationError=error.message;paintSelection();}
+      };
+      actions.append(replace);
     }else if(canUseMotion){
-      const use=el('button','l2d-btn primary l2d-use-motion',t('使用此动作','Use this motion'));use.type='button';let select;
-      if(resource.classification==='pose'){
-        select=el('select','l2d-input');select.setAttribute('aria-label',t('复位动作','Reset motion'));select.append(el('option',null,t('请选择复位动作','Choose reset motion')));select.firstChild.value='';
-        for(const r of data.resources.filter(r=>r.kind==='motion'&&r.classification!=='appearance'&&r.id!==resource.id)){const o=el('option',null,r.title);o.value=r.id;select.append(o);}select.value=(current?.resource===resource.id&&current.release)||resource.release||'';actions.append(select);
-      }
-      use.disabled=!canEdit()||!!select&&!select.value;if(select)select.onchange=()=>use.disabled=!canEdit()||!select.value;
+      const use=el('button','l2d-btn primary l2d-use-motion',t('绑定到「'+label(word)+'」','Bind to “'+label(word)+'”'));
+      use.type='button';
+      use.disabled=!canEdit();
       use.onclick=()=>{
         if(!canEdit()||discardPrompt)return;
         try{
-          commitSelection([resource.id],select?.value,auditionNativeOnly);
+          commitSelection([motion.id],motion.release,auditionNativeOnly);
           const result=binding.querySelector('.l2d-combination-title');
           if(result){result.tabIndex=-1;result.focus({preventScroll:true});}
-        }catch(e){combinationError=e.message;paintSelection();}
-      };actions.append(use);
+        }catch(error){combinationError=error.message;paintSelection();}
+      };
+      actions.append(use);
     }else if(resource&&!studio){
       const view=el('button','l2d-btn sm',t('结束单项试看','End audition'));view.disabled=!canEdit();view.onclick=()=>{resource=null;paintResources();play();};actions.append(view);
     }
-    if(current||!canUseMotion){
+    if(current){
       const restore=el('button','l2d-btn quiet sm',t('恢复通用','Use generic'));restore.disabled=!canEdit()||!current;restore.onclick=()=>{if(!discardPrompt)commitSelection([]);};actions.append(restore);
     }
     binding.append(caption,chips,warning,actions);paintSummary();
   };
-  const paintResources=(scroll=list.scrollTop)=>{list.replaceChildren();const q=search.value.trim().toLocaleLowerCase(),ids=currentIds();
+  function paintInteractionResources(scroll){
+    const grab=interactionType==='grab';
+    const fixed=grab&&grabReaction.mode==='fixed';
+    const available=!grab||grabReaction.mode!=='native';
+    const q=search.value.trim().toLocaleLowerCase();
+    const words=available?playableWords(grab).filter(w=>label(w).toLocaleLowerCase().includes(q)||w.includes(q)):[];
+    grabModes.hidden=!grab;
+    for(const button of grabModes.children)button.setAttribute('aria-pressed',String(button.dataset.grabMode===grabReaction.mode));
+    resourceTitle.textContent=grab?t('拎起反应','Grab reaction'):t('单击播放池','Click pool');
+    resourceTitle.title=resourceTitle.textContent;
+    resourceCount.textContent=available?t(words.length+' 项',words.length+' items'):'';
+    search.hidden=!available;
+    list.setAttribute('aria-label',t('可播词条','Playable words'));
+    for(const w of words){
+      const current=bindings.find(b=>b.word===w);
+      const item=data.resources.find(r=>r.id===current?.resource);
+      const audition=interactionWord===w;
+      const selected=grab?(fixed?grabReaction.word===w:grabReaction.pool.includes(w)):clickPool.has(w);
+      const meta=item?.kind==='motion'?t('已绑动作','Bound motion')
+        : item&&current.overlays?.length?t((current.overlays.length+1)+' 项组合',(current.overlays.length+1)+' effects')
+        : item?t('已绑表情','Bound expression')
+        : data.words.expressions.includes(w)?t('通用表情','Generic expression'):t('通用动作','Generic motion');
+      const row=el('div','l2d-bind-resource-row'+(selected?' is-selected':'')+(audition?' is-audition':''));
+      const name=el('button','l2d-bind-resource');
+      name.type='button';
+      name.dataset.interactionPreview=w;
+      name.setAttribute('aria-label',t('试播 ','Preview ')+label(w));
+      if(audition)name.setAttribute('aria-current','true');
+      name.append(el('span','figure-resource-name',label(w)));
+      if(audition)name.append(el('small','figure-resource-meta',t('试看中','Previewing')));
+      name.append(el('span','figure-resource-detail',meta));
+      name.onclick=()=>{
+        if(!canEdit())return;
+        const refocus=doc.activeElement===name;
+        interactionWord=w;paintResources();play();
+        if(refocus)list.querySelector('[data-interaction-preview="'+w+'"]')?.focus({preventScroll:true});
+      };
+      const check=el('input','l2d-bind-effect-check');
+      check.type=fixed?'radio':'checkbox';
+      if(fixed)check.name='figure-grab-expression';
+      check.checked=selected;check.disabled=!canEdit();
+      check.dataset.interactionPick=w;
+      check.setAttribute('aria-label',(fixed?t('指定 ','Set '):t('加入播放池 ','Add to pool '))+label(w));
+      check.onchange=()=>{
+        if(!canEdit())return;
+        if(fixed)grabReaction.word=w;
+        else if(grab)grabReaction.pool=check.checked?[...grabReaction.pool,w]:grabReaction.pool.filter(word=>word!==w);
+        else if(check.checked)clickPool.add(w);
+        else clickPool.delete(w);
+        changed();paintTargets();paintResources();
+        list.querySelector('[data-interaction-pick="'+w+'"]')?.focus({preventScroll:true});
+      };
+      const hit=el('label','figure-check-hit');hit.append(check);
+      row.append(name,hit);list.append(row);
+    }
+    if(!words.length)list.append(el('p','l2d-bind-empty',available
+      ? t('没有匹配的可播词条','No matching playable words')
+      : t('选「指定表情」或「随机反应池」即可使用动作页的表情。','Choose Fixed expression or Random pool to use expressions from Actions.')));
+    list.scrollTop=scroll;
+    paintSelection();updatePaging();
+  }
+  const paintResources=(scroll=list.scrollTop)=>{
+    list.replaceChildren();
+    if(page==='interaction'){paintInteractionResources(scroll);return;}
+    grabModes.hidden=true;search.hidden=false;
+    list.setAttribute('aria-label',t('原生资源列表','Native resource list'));
+    const q=search.value.trim().toLocaleLowerCase(),ids=currentIds();
     const saved = (data.bindings || []).find(item => item.word === word);
     const savedIds = new Set(saved ? [saved.resource, ...(saved.overlays || [])] : []);
     const activeGroup=page==='wardrobe'?groups.find(g=>g.id===groupId):null;
@@ -483,9 +703,12 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     const combiningExpressions=canCombine&&ids.length>0&&data.resources.find(r=>r.id===ids[0])?.kind==='expression';
     const outfit=canCombine?outfitChannels():null;
     const selectedChannels=new Set(combiningExpressions?ids.flatMap(id=>data.resources.find(r=>r.id===id)?.channels||[]):[]);
-    resourceTitle.textContent=activeGroup?t(`为${wardrobeGroupName(activeGroup)}选资源`,`Resources for ${wardrobeGroupName(activeGroup)}`):t('原生资源','Native resources');
+    resourceTitle.textContent=activeGroup?t('为'+wardrobeGroupName(activeGroup)+'选资源','Resources for '+wardrobeGroupName(activeGroup)):page==='actions'?t('为「'+label(word)+'」选资源','Resources for '+label(word)):t('原生资源','Native resources');
     resourceTitle.title=resourceTitle.textContent;
-    const resources=data.resources.filter(r=>(page!=='wardrobe'||!r.wardrobeError)&&(filter==='all'||filter==='other'?filter!=='other'||r.classification==='appearance':r.kind===filter)&&(!q||r.title.toLocaleLowerCase().includes(q)));
+    syncWordSwitch();
+    const resources=data.resources.filter(r=>(page!=='wardrobe'||!r.wardrobeError)&&(filter==='all'||filter==='other'?filter!=='other'||r.classification==='appearance':r.kind===filter)&&(!q||r.title.toLocaleLowerCase().includes(q)||(typeof r.file==='string'&&r.file.toLocaleLowerCase().includes(q))));
+    const titleCounts=new Map();
+    if(studio)for(const item of data.resources)titleCounts.set(item.title,(titleCounts.get(item.title)||0)+1);
     for(const r of resources){
       const assigned=assignedResource===r.id;
       const audition=r.id===resource?.id&&!assigned;
@@ -513,8 +736,10 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
       const row=el('div','l2d-bind-resource-row');
       if(studio){row.classList.toggle('is-selected',selected);row.classList.toggle('is-audition',audition);row.classList.toggle('is-assigned',assigned);}
       const b=el('button','l2d-bind-resource'+(!studio&&(page==='actions'?selected:audition)?' selected':'')+(!studio&&audition?' audition':''));b.type='button';
-      const kind=page==='wardrobe'?(r.kind==='expression'?t('外观状态','Appearance'):t('动作末帧','Final frame')):r.classification==='appearance'?t('仅试看','Preview only'):r.kind==='expression'?t('表情','Expression'):t(`${r.seconds.toFixed(1)} 秒`,`${r.seconds.toFixed(1)} s`);
-      b.title=detail?`${r.title}\n${detail}`:r.title;
+      const duration=Number.isFinite(r.seconds)?t(r.seconds.toFixed(1)+' 秒',r.seconds.toFixed(1)+' s'):'';
+      const kind=page==='wardrobe'?(r.kind==='expression'?t('外观状态','Appearance'):t('动作末帧','Final frame')):r.classification==='appearance'?t('仅试看','Preview only'):r.kind==='expression'?t('表情','Expression'):duration;
+      const source=studio&&titleCounts.get(r.title)>1&&typeof r.file==='string'?r.file:'';
+      b.title=[r.title,source,detail].filter(Boolean).join('\n');
       b.dataset.audition=r.id;
       if(audition)b.setAttribute('aria-current','true');
       const draft = selected && !savedIds.has(r.id);
@@ -523,7 +748,15 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
         : [audition && t('试看中','Previewing'), (selected || assigned) && boundLabel].filter(Boolean).join(' · ');
       const statusClass = constraint ? 'l2d-bind-constraint' : draft ? 'figure-draft-state'
         : overlap ? 'l2d-bind-overlap' : studio && status ? 'figure-audition-label' : null;
-      b.append(el('span',null,r.title),el('small',statusClass,rowHint||(studio&&status)||kind));
+      if(studio){
+        const name=el('span','figure-resource-name',r.title);
+        const meta=el('small','figure-resource-meta',page==='actions'&&r.kind==='motion'?duration:kind);
+        const secondary=el('span','figure-resource-detail');
+        const state=rowHint||status||(page==='actions'&&r.classification==='appearance'?t('仅试看','Preview only'):'');
+        if(source)secondary.append(el('span','figure-resource-source',source));
+        if(state)secondary.append(el('span','figure-resource-state'+(statusClass?' '+statusClass:''),state));
+        b.append(name,meta,secondary);
+      }else b.append(el('span',null,r.title),el('small',statusClass,rowHint||kind));
       b.onclick=()=>{
         const refocus=studio&&doc.activeElement===b;
         if(page==='actions'&&resource?.id!==r.id)auditionNativeOnly=bindings.some(item=>item.word===word&&item.resource===r.id&&item.nativeOnly);
@@ -545,7 +778,12 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     paintSelection();
     updatePaging();
   };
-  function paintSummary(){const used=groups.filter(g=>g.options.length).length;const total=groups.length||3;summary.textContent=t(`${bindings.length} 项绑定 · 外观 ${used}/${total} 栏 · 保存后从卡片安装`,`${bindings.length} bindings · ${used}/${total} appearance slots · save then install`);}
+  function paintSummary(){
+    const used=groups.filter(g=>g.options.length).length,total=groups.length||3;
+    const disabled=disabledWords.size ? t(` · ${disabledWords.size} 项停用`,` · ${disabledWords.size} disabled`) : '';
+    summary.textContent=t(`${bindings.length} 项绑定${disabled} · 外观 ${used}/${total} 栏 · 保存后从卡片安装`,
+      `${bindings.length} bindings${disabled} · ${used}/${total} appearance slots · save then install`);
+  }
   function wardrobeConflict(r,id){
     const ids=[...bindings.filter(b=>!b.nativeOnly).flatMap(bindingResourceIds),...groups.filter(g=>g.id!==id).flatMap(g=>g.options.map(o=>o.resource))];
     const used=new Set(ids.flatMap(id=>data.resources.find(r=>r.id===id)?.channels||[]));return (r?.channels||[]).some(c=>used.has(c));
@@ -699,10 +937,12 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     if(studio)binding.append(actions,el('p','l2d-bind-warning',conflict?t('与动作或其他装扮共用参数。','Shares controls with another binding.'):''));
     else binding.append(el('p','l2d-bind-note',t('每组可选一个选项。保存并安装后可在 Coo 装扮页切换。','Pick one option per group. Save and install to switch them in Coo.')));
   }
-  for(const [id,title]of [['actions',t('动作','Actions')],['wardrobe',t('装扮','Wardrobe')]]){
+  const editorPages=[['actions',t('动作','Actions')],['wardrobe',t('装扮','Wardrobe')]];
+  if(studio)editorPages.push(['interaction',t('互动','Interaction')]);
+  for(const [id,title]of editorPages){
     const b=el('button','l2d-btn quiet sm',title);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(page===id));b.onclick=()=>{
-      if(!data||saving||discardPrompt||page===id)return;pageState[page]={resource,filter,search:search.value,scroll:list.scrollTop};page=id;combinationError='';pendingCombination=null;({resource,filter}=pageState[id]);search.value=pageState[id].search;for(const n of pages.children)n.setAttribute('aria-selected',String(n===b));
-      if(page==='wardrobe'&&!groupId)groupId=groups[0]?.id||null;for(const n of tabs.children)n.classList.toggle('selected',n.dataset.filter===filter);syncControls();paintTargets();paintResources(pageState[id].scroll);play();
+      if(!data||saving||discardPrompt||page===id)return;pageState[page]={resource,filter,search:search.value,scroll:list.scrollTop,targetScroll:left.scrollTop,nativeOnly:auditionNativeOnly};page=id;combinationError='';pendingCombination=null;({resource,filter,nativeOnly:auditionNativeOnly}=pageState[id]);search.value=pageState[id].search;for(const n of pages.children)n.setAttribute('aria-selected',String(n===b));
+      if(page==='wardrobe'&&!groupId)groupId=groups[0]?.id||null;for(const n of tabs.children)n.classList.toggle('selected',n.dataset.filter===filter);syncControls();paintTargets(pageState[id].targetScroll);paintResources(pageState[id].scroll);play();
     };pages.append(b);
   }
   for(const [value,title]of [['all',t('全部','All')],['expression',t('表情','Faces')],['motion',t('动作','Motions')],['other',t('其他','Other')]]){
@@ -711,6 +951,12 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
   restoreAll.onclick=async()=>{
     if(!canEdit()||discardPrompt)return;
     if(page==='wardrobe'){picks={};resource=null;optionId='default';optionNameDraft=null;refreshWardrobe();return;}
+    if(page==='interaction'){
+      if(interactionType==='click')clickPool.clear();
+      else if(grabReaction.mode==='fixed')delete grabReaction.word;
+      else grabReaction.pool=[];
+      changed();paintTargets();paintResources();return;
+    }
     if(!bindings.length)return;
     discardPrompt=bindingDiscardPrompt(modal,zh,{title:t('全部恢复通用？','Reset all bindings?'),body:t('清空当前绑定，保留原生资源。点击保存后生效。','Clear all bindings and keep native resources. Save to apply.'),cancel:t('保留绑定','Keep bindings'),accept:t('全部恢复','Reset all')});
     const accepted=await discardPrompt.result;discardPrompt=null;if(!accepted||!alive()||!canEdit())return;
@@ -781,7 +1027,7 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     if(gallery.getAttribute('aria-busy')==='true')retry.hidden=false;
     stopPreviewUpdates();saveSequence++;saving=true;saveStage=-1;syncControls();paintSelection();hint.textContent=t('保存并打包…','Saving & packing…');skipImages.focus();
     try{
-      const request=ctx.invoke('manualSave',[data.token,structuredClone(bindings),structuredClone(groups)]);
+      const request=ctx.invoke('manualSave',[data.token,structuredClone(bindings),structuredClone(groups),[...disabledWords].sort(),[...clickPool].sort(),grabReaction]);
       void pollSaveProgress(saveSequence);
       const result=await request;dirty=false;release();
       const saved=t('绑定已保存，可从卡片安装','Bindings saved. Install from the pack card.');
@@ -803,6 +1049,9 @@ async function openBindingEditor(ctx,method,args,onSaved,onClosed) {
     data.wardrobe=fixedWardrobeGroups(data.wardrobe||[]).map((g,i)=>({...g,...(i>=3?{custom:true}:{})}));
     bindings=structuredClone(data.draft?.bindings??data.bindings??[]);
     groups=structuredClone(data.draft?.wardrobe??data.wardrobe);
+    disabledWords=new Set(data.draft?.disabledWords??data.disabledWords??[]);
+    clickPool=new Set(data.draft?.clickPool??data.clickPool??[]);
+    grabReaction=structuredClone(data.draft?.grabReaction??data.grabReaction??{mode:'native',pool:[]});
     changed();heading.querySelector('.l2d-modal-sub').textContent=data.title;paintTargets();paintResources();
     if(data.truncated||data.warnings?.length)right.prepend(el('p','l2d-bind-empty',t('部分资源未能读取，列表可能不完整','Some resources could not be read; the list may be incomplete')));
     if(data.truncated)hint.textContent=t('资源扫描不完整，请核对模型内容','Resource scan is incomplete; check the model');

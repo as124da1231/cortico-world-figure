@@ -41,6 +41,9 @@ function normalizeStudioTheme(value: unknown): StudioTheme | undefined {
 export interface BrowserDraft {
   bindings: unknown[];
   wardrobe: unknown[];
+  disabledWords?: string[];
+  clickPool?: string[];
+  grabReaction?: { mode: string; word?: string; pool: string[] };
 }
 
 interface EditorOwner {
@@ -60,7 +63,7 @@ interface EditorOptions {
   draft?: BrowserDraft;
   setDraft?(draft?: BrowserDraft): void;
   keepAlive(): void;
-  save(bindings: unknown[], wardrobe: unknown[]): Promise<unknown>;
+  save(bindings: unknown[], wardrobe: unknown[], disabledWords?: string[], clickPool?: string[], grabReaction?: BrowserDraft['grabReaction']): Promise<unknown>;
   skipImages(): Promise<unknown>;
   progress?(): { stage: string | null };
   close(): Promise<void>;
@@ -149,8 +152,15 @@ export async function serveBrowserEditor(opts: EditorOptions): Promise<BrowserEd
   const expired = (res: ServerResponse) => json(res, { code: 'expired', error: zh ? '编辑连接已失效。' : 'The editing connection expired.' }, 410);
   const belongsTo = (req: IncomingMessage, current?: EditorOwner) =>
     !!current && req.headers.authorization === `Bearer ${current.id}`;
+  const isWordList = (value: unknown) => value === undefined || Array.isArray(value)
+    && value.length <= 40 && value.every(word => typeof word === 'string' && word.length <= 32);
   const isDraft = (value: BrowserDraft | null | undefined): value is BrowserDraft =>
-    Array.isArray(value?.bindings) && Array.isArray(value?.wardrobe);
+    Array.isArray(value?.bindings) && Array.isArray(value?.wardrobe)
+    && isWordList(value.disabledWords) && isWordList(value.clickPool)
+    && (value.grabReaction === undefined || value.grabReaction != null
+      && ['native','fixed','random'].includes(value.grabReaction.mode)
+      && (value.grabReaction.word === undefined || typeof value.grabReaction.word === 'string' && value.grabReaction.word.length <= 32)
+      && Array.isArray(value.grabReaction.pool) && isWordList(value.grabReaction.pool));
 
   function detach(current: EditorOwner) {
     if (closing || owner !== current || current.reconnectable) return;
@@ -314,7 +324,7 @@ export async function serveBrowserEditor(opts: EditorOptions): Promise<BrowserEd
       if (closing || owner !== current || !current.stream) return expired(res);
       const id = body?.id;
       if (!isDraft(body) || typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)) throw Error('编辑内容无效');
-      const value = { bindings: body.bindings, wardrobe: body.wardrobe };
+      const value = { bindings: body.bindings, wardrobe: body.wardrobe, disabledWords: body.disabledWords, clickPool: body.clickPool, grabReaction: body.grabReaction };
       const digest = createHash('sha256').update(JSON.stringify(value)).digest('hex');
       const previous = receipt ?? saving;
       if (previous) {
@@ -325,7 +335,7 @@ export async function serveBrowserEditor(opts: EditorOptions): Promise<BrowserEd
         return;
       }
       stage(value);
-      const promise = Promise.resolve().then(() => opts.save(value.bindings, value.wardrobe));
+      const promise = Promise.resolve().then(() => opts.save(value.bindings, value.wardrobe, value.disabledWords, value.clickPool, value.grabReaction));
       saving = { id, digest, promise };
       try {
         const result = await promise;

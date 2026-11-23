@@ -13,6 +13,7 @@ async function editor(t,fail=false,opts={}){
  if(opts.existing)data.buildId='pack';
  if(opts.upgrade)data.wardrobeNeedsSave=true;
  if(opts.previewSize)data.previewSize=opts.previewSize;
+ if(opts.words)data.words=opts.words;
  if(opts.resources)data.resources=opts.resources;if(opts.wardrobe)data.wardrobe=opts.wardrobe;
  if(opts.nativeMotionMode)data.nativeMotionMode=true;
  const ctx={root:doc.querySelector('main'),language:'zh',signal:ac.signal,notifyOnUnmount:(...args)=>notifications.push(args),guardLeave:()=>({dispose(){}}),frame:()=>({dispose(){}}),ui:{toast:(...args)=>toasts.push(args),confirm:async()=>{hostConfirms++;throw Error('Host confirmation must not be used');}},invoke:async(method,args)=>{calls.push({method,args:structuredClone(args)});if(method==='manualPreview'){if(opts.preview)return opts.preview(args);return {frames:[{kind:'generic',png:'data:image/png;base64,aGVsbG8='}],quality:{textureLimit:256,canvas:[256,256],maskSize:256}};}if(method==='manualSave'&&opts.save)return opts.save(args);if(method==='manualOpenBuild'){if(fail)throw Error('编辑已过期，请重新打开');return data;}return {};}};
@@ -96,26 +97,59 @@ test('animation-only playback is saved per motion and resolves an overlap withou
  const wardrobe=[{id:'lookhat',name:'配饰',options:[{id:'hat',name:'戴帽子',resource:'hat'}]}];
  const e=await editor(t,false,{existing:true,resources,wardrobe,nativeMotionMode:true});
  e.doc.querySelector('[data-audition="move"]').click();
- assert(e.button('使用此动作').classList.contains('primary'));
+ assert(e.button('绑定到「开心」').classList.contains('primary'));
  assert.equal(e.doc.querySelector('.l2d-motion-state').textContent,'待绑定');
- e.button('使用此动作').click();
+ e.button('绑定到「开心」').click();
  assert.match(e.doc.querySelector('.l2d-combination-warning').textContent,/完全使用动画/);
- const select=e.doc.querySelector('.l2d-motion-mode select');
- select.value='native';select.dispatchEvent(new e.w.Event('change'));
+ assert(e.button('叠加通用表现'));
+ e.button('完全使用动画').click();
  await e.settle();
  assert(e.button('保存绑定').disabled);
  assert.equal(e.calls.findLast(c=>c.method==='manualPreview').args[1].nativeOnly,true);
- e.button('使用此动作').click();
+ e.button('绑定到「开心」').click();
  await e.settle();
  assert.equal(e.doc.querySelector('.l2d-motion-state.is-bound').textContent,'已绑定');
  assert.equal(e.doc.activeElement,e.doc.querySelector('.l2d-combination-title'));
- assert.equal(e.doc.querySelector('.l2d-motion-mode select').value,'native');
+ assert.equal(e.button('完全使用动画').getAttribute('aria-pressed'),'true');
  e.button('保存绑定').click();
  await e.settle();
  const save=e.calls.find(c=>c.method==='manualSave');
  assert.equal(save.args[1][0].nativeOnly,true);
  assert.equal(save.args[2].find(g=>g.id==='lookhat').options[0].resource,'hat');
 });
+test('target scroll and focus survive selection and switching tabs',async t=>{
+ const e=await editor(t,false,{words:{expressions:['happy','shy','thinking'],motions:['wave','bow','jump']}});
+ const targets=e.doc.querySelector('.l2d-bind-targets');
+ const replace=targets.replaceChildren.bind(targets);
+ targets.replaceChildren=(...nodes)=>{replace(...nodes);targets.scrollTop=0;};
+ targets.scrollTop=112;
+ const entry=targets.querySelector('[data-target-word="bow"]');
+ entry.focus();
+ entry.click();
+ assert.equal(targets.scrollTop,112);
+ assert.equal(e.doc.activeElement.dataset.targetWord,'bow');
+ e.doc.querySelector('[role=tab]:last-child').click();
+ assert.equal(targets.scrollTop,0);
+ e.doc.querySelector('[role=tab]:first-child').click();
+ assert.equal(targets.scrollTop,112);
+ assert.equal(targets.querySelector('[aria-pressed=true]').dataset.targetWord,'bow');
+});
+
+test('pose binding uses a matching reset when available and stays enabled without one',async t=>{
+ for(const release of [undefined,'lower']){
+  const resources=[{id:'raise',title:'抬手',kind:'motion',classification:'pose',seconds:1,release}];
+  if(release)resources.push({id:release,title:'放手',kind:'motion',classification:'pose',seconds:1});
+  const e=await editor(t,false,{existing:true,resources,nativeMotionMode:true});
+  e.doc.querySelector('[data-audition="raise"]').click();
+  assert(!e.doc.querySelector('select[aria-label="复位动作"]'));
+  const bind=e.button('绑定到「开心」');
+  assert(!bind.disabled);
+  assert.match(e.doc.querySelector('.l2d-combination-warning').textContent,release?/原生复位/:/自动回到通用/);
+  bind.click();e.button('保存绑定').click();await e.settle();
+  assert.equal(e.calls.find(c=>c.method==='manualSave').args[1][0].release,release);
+ }
+});
+
 test('preview failures preserve drafts and retry without an iframe or host modification',async t=>{
  let fail=false;const e=await editor(t,false,{preview:()=>{if(fail)throw Error('renderer lost');return {frames:[{kind:'generic',png:'data:image/png;base64,aGVsbG8='}]};}});await e.dirty();fail=true;e.button('重新取样').click();await e.settle();assert(!e.button('保存绑定').disabled);assert.match(e.doc.querySelector('.l2d-bind-status').textContent,/renderer lost/);
  fail=false;e.button('重试预览').click();await e.settle();assert(!e.button('保存绑定').disabled);assert.match(e.doc.querySelector('.l2d-bind-summary').textContent,/1 项绑定/);
@@ -144,7 +178,7 @@ test('confirmation Escape preserves edits; panel disposal removes a pending conf
 });
 test('wardrobe preview and save need no grounding switch',async t=>{
  const e=await editor(t,false,{resources:[{id:'egg',kind:'expression',classification:'appearance',title:'蛋',channels:['Parameter:Egg']}]});e.doc.querySelector('[role=tab]:last-child').click();e.doc.querySelector('.l2d-bind-resource').click();await e.settle();
- assert.equal(e.doc.querySelector('.l2d-bind-modal [role="switch"]'),null);
+ assert.equal(e.doc.querySelector('.l2d-bind-modal [role="switch"]:not([hidden])'),null);
  assert.deepEqual(e.calls.findLast(c=>c.method==='manualPreview').args[1].groups[0].options[0],{id:'preview',name:'蛋',resource:'egg'});
  e.button('添加选项').click();await e.settle();e.button('保存绑定').click();await new Promise(r=>setTimeout(r,5));const option=e.calls.find(c=>c.method==='manualSave').args[2][0].options[0];
  assert.equal(option.resource,'egg');assert.equal(Object.hasOwn(option,'ground'),false);
@@ -261,4 +295,29 @@ test('an outfit conflict marks the expression row and blocks binding while keepi
  row.click();await e.settle();
  assert.equal(e.calls.findLast(c=>c.method==='manualPreview').args[1].resource,'effect');
  assert(e.button('保存绑定').disabled);
+});
+
+test('word switch updates only the selected target and saves independently of its binding', async t => {
+ const e=await editor(t,false,{existing:true,words:{expressions:['happy','sad'],motions:[]}});
+ const control=e.doc.querySelector('[role=switch]');
+ const save=e.button('保存绑定');
+ assert.equal(control.getAttribute('aria-checked'),'true');
+ control.click();
+ assert.match(e.doc.querySelector('[data-target-word=happy]').textContent,/已停用/);
+ assert.match(e.doc.querySelector('[data-target-word=sad]').textContent,/通用/);
+ assert(!save.disabled);
+ control.click();
+ assert(save.disabled);
+ await e.dirty();
+ control.click();
+ assert.equal(e.doc.querySelector('.l2d-bind-effect-check').checked,true);
+ e.doc.querySelector('[role=tab]:last-child').click();
+ assert(control.hidden);
+ e.doc.querySelector('[role=tab]:first-child').click();
+ assert.equal(control.getAttribute('aria-checked'),'false');
+ save.click();
+ await e.settle();
+ const saved=e.calls.find(call=>call.method==='manualSave').args;
+ assert.deepEqual(saved[3],['happy']);
+ assert.equal(saved[1][0].resource,'smile');
 });

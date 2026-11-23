@@ -229,7 +229,7 @@ function createStudioPreview() {
       }] : [];
       send({
         t: 'preview-play', resource: wardrobe ? null : request.resource, word: wardrobe ? 'neutral' : request.word,
-        bindings: wardrobe ? [] : bindings, raw: wardrobe || request.raw,
+        bindings: wardrobe ? [] : bindings, raw: wardrobe || request.raw, interaction: request.interaction,
       });
       resume();
     },
@@ -407,7 +407,7 @@ async function startStudio() {
       if (method === 'manualSkipImages') return studioRequest('skip-images', {}, current.owner);
       if (method === 'manualSaveProgress') return studioRequest('save-progress', undefined, current.owner);
       if (method === 'manualSave') {
-        const value = { bindings: args[1], wardrobe: args[2] };
+        const value = { bindings: args[1], wardrobe: args[2], disabledWords: args[3], clickPool: args[4], grabReaction: args[5] };
         const fingerprint = JSON.stringify(value);
         if (submission?.fingerprint !== fingerprint) submission = { id: crypto.randomUUID(), fingerprint };
         const body = { ...value, id: submission.id };

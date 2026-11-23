@@ -23,10 +23,11 @@ export function readSavedActions(manifest, modelId) {
   return actions;
 }
 
-export function createPerformancePlayback({ asset, model, paramIndex, protectedIds, host, position }) {
+export function createPerformancePlayback({ asset, model, paramIndex, protectedIds, disabledWords, host, position }) {
   let active, waiting, disposed = false, request = false, nextPoll = 0, lastReply = 0;
   const used = new Map();
   const accepted = id => paramIndex.has(id) && !protectedIds.has(id);
+  const allowedFace = face => PERFORMANCE_FACES.includes(face) && !disabledWords?.has(face);
   function report(owner, by) {
     if (!owner) return;
     const { x, y } = position();
@@ -50,7 +51,8 @@ export function createPerformancePlayback({ asset, model, paramIndex, protectedI
         });
         if (!beats.length) return false;
       } else if (Array.isArray(order.cues)) {
-        cues = parsePerformanceCues(order.cues);
+        cues = parsePerformanceCues(order.cues).map(cue =>
+          cue.face && !allowedFace(cue.face) ? { ...cue, face: undefined } : cue);
         if (cues.some(cue => cue.pose && Object.keys(cue.pose).some(id => !accepted(id)))) return false;
         if (cues.some(cue => cue.resource)) {
           clips = createNativeActions({ bindings: [], resources: Array.isArray(order.resources) ? order.resources : [] });
@@ -68,7 +70,7 @@ export function createPerformancePlayback({ asset, model, paramIndex, protectedI
     const duration = beats ? Math.max(...beats.map(beat => beat.time + beat.duration))
       : Math.max(speechMs / 1000, ...(cues ?? []).map(cue => cue.at + cue.duration));
     const marks = Array.isArray(order.marks) ? order.marks.slice(0, 24).filter(mark =>
-      Number.isFinite(mark?.at) && mark.at >= 0 && PERFORMANCE_FACES.includes(mark.face)) : [];
+      Number.isFinite(mark?.at) && mark.at >= 0 && allowedFace(mark.face)) : [];
     active = { owner, ticket:order.ticket, start, activated, duration, cues, beats, clips, face: order.face, marks, speechMs, rendered: false,
       until: owner ? Date.now() + (duration + .4) * 1000 : order.expiresAt };
     return true;
@@ -139,7 +141,7 @@ export function createPerformancePlayback({ asset, model, paramIndex, protectedI
     const speech = elapsed * 1000 < active.speechMs ? {
       id: active.start, elapsed, durationMs: active.speechMs,
       face: active.marks.findLast(mark => mark.at <= elapsed)?.face ??
-        (PERFORMANCE_FACES.includes(active.face) ? active.face : undefined),
+        (allowedFace(active.face) ? active.face : undefined),
     } : undefined;
     if (active.beats) {
       if (!active.sequence) {

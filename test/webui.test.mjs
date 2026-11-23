@@ -998,8 +998,10 @@ test('framing edits share the bounded model dialog and save with the existing ca
   const card=root.querySelector('.l2d-card');
   button('编辑').click();
   await tick();
-  const dialog=root.querySelector('dialog.l2d-crop-modal[open]');
+  const dialog=root.querySelector('dialog.l2d-profile-modal[open]');
   assert(dialog);
+  assert.deepEqual([...dialog.querySelectorAll('[role="tab"]')].map(tab=>tab.textContent),
+    ['资料','动作与交互','立绘','取景']);
   assert.equal(calls.some(c=>c.method==='cropPreview'),false);
   const name=dialog.querySelector('#l2d-edit-name');
   name.value='保留草稿';
@@ -1025,9 +1027,11 @@ test('framing edits share the bounded model dialog and save with the existing ca
   const navigate = key => dialog.querySelector('[role="tab"][aria-selected="true"]')
     .dispatchEvent(new dom.window.KeyboardEvent('keydown', {key, bubbles:true}));
   navigate('ArrowRight');
-  assert.equal(button('视线').getAttribute('aria-selected'),'true');
+  assert.equal(button('资料').getAttribute('aria-selected'),'true');
   navigate('ArrowRight');
-  assert.equal(button('信息').getAttribute('aria-selected'),'true');
+  assert.equal(button('动作与交互').getAttribute('aria-selected'),'true');
+  navigate('ArrowRight');
+  assert.equal(button('立绘').getAttribute('aria-selected'),'true');
   assert.equal(name.value,'保留草稿');
   button('取景').click();
   await tick();
@@ -1041,12 +1045,15 @@ test('framing edits share the bounded model dialog and save with the existing ca
 });
 
 test('the model editor shows and saves the idle breathing switch next to body gain', async t => {
-  let idleBreath = true;
+  let idleBreath = true, breathingScale = true;
   const {root,button,calls}=await mount(t,{
     ack:true, builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1}],
     invoke:(method,args)=>{
-      if(method==='detail') return {nameZh:'Alpha',tunable:true,idleBreath};
-      if(method==='edit') idleBreath = args[1].idleBreath;
+      if(method==='detail') return {nameZh:'Alpha',tunable:true,idleBreath,breathingScale};
+      if(method==='edit') {
+        idleBreath=args[1].idleBreath ?? idleBreath;
+        breathingScale=args[1].breathingScale ?? breathingScale;
+      }
     },
   });
   for (const next of [false,true]) {
@@ -1054,13 +1061,22 @@ test('the model editor shows and saves the idle breathing switch next to body ga
     await tick();
     const input=root.querySelector('#l2d-edit-idle-breath');
     assert.equal(input.checked,!next);
-    assert(input.closest('label').previousElementSibling.querySelector('input[aria-label="身体幅度"]'));
+    assert(input.closest('.l2d-profile-switches'));
+    assert(root.querySelector('.l2d-profile-motion input[aria-label="身体幅度"]'));
     input.click();
     button('保存').click();
     await tick();
   }
   assert.deepEqual(calls.filter(call=>call.method==='edit').map(call=>call.args),
     [['a',{idleBreath:false}],['a',{idleBreath:true}]]);
+  button('编辑').click();
+  await tick();
+  const scale=[...root.querySelectorAll('label')].find(label=>label.textContent==='立绘呼吸缩放').querySelector('input');
+  scale.click();
+  button('保存').click();
+  await tick();
+  assert.deepEqual(calls.findLast(call=>call.method==='edit').args,['a',{breathingScale:false}]);
+  assert.equal(idleBreath,true);
 });
 
 test('the model gaze tab saves only changed settings and remembers speed while disabled', async t => {
@@ -1075,7 +1091,7 @@ test('the model gaze tab saves only changed settings and remembers speed while d
   const open = async () => {
     button('编辑').click();
     await tick();
-    button('视线').click();
+    button('立绘').click();
     const pane = root.querySelector('[role="tabpanel"]:not([hidden])');
     return [pane.querySelector('[role="switch"]'),pane.querySelector('input[type="range"]')];
   };
@@ -1129,7 +1145,7 @@ test('retrying a card edit keeps unavailable controls disabled and returns focus
   button('取景').click();
   assert.equal(button('圆口').disabled, true);
   assert.equal(dialog.querySelector('#l2d-crop-line').disabled, true);
-  button('视线').click();
+  button('立绘').click();
   assert.equal(dialog.querySelector('#l2d-edit-gaze-speed').disabled, true);
   fail = false;
   button('保存').click();
@@ -1357,7 +1373,8 @@ test('non-Live2D pack metadata can be saved without sending unsupported performa
   const {root,button,calls} = await mount(t,{ack:true,builds:[{id:'frames',at:1,bytes:5}],invoke:method=>method==='detail'?{nameZh:'图像形象',tunable:false}:undefined});
   button('编辑').click();await tick();
   const modal=root.querySelector('[role="dialog"]');assert(modal);
-  assert.equal(modal.querySelector('input[type="range"]').closest('.l2d-field').hidden,true);
+  assert.equal(modal.querySelector('input[type="range"]'),null);
+  assert.equal(modal.querySelector('[role="tablist"]'),null);
   modal.querySelector('input').value='新名字';
   button('保存').click();await tick();
   const patch=calls.find(call=>call.method==='edit').args[1];
@@ -1606,4 +1623,113 @@ test('a notice opened while the runtime request is pending receives the resolved
   await tick();
   assert.equal(root.querySelector('dialog[open]'), dialog);
   assert.match(runtime.textContent, /运行组件已就绪/);
+});
+
+test('the figure editor saves and reopens the three click reactions', async t => {
+  let clickReaction = 'native';
+  const {root,button,calls} = await mount(t,{
+    ack:true, builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1}],
+    invoke(method,args) {
+      if (method==='detail') return {nameZh:'Alpha',tunable:true,clickReaction};
+      if (method==='edit') clickReaction=args[1].clickReaction;
+    },
+  });
+  const values=['native','expression','none'];
+  for (const [index,next] of ['expression','none','native'].entries()) {
+    button('编辑').click();
+    await tick();
+    assert.equal(root.querySelector('input[name=l2d-click-reaction]:checked').value,values[index]);
+    root.querySelector('input[name=l2d-click-reaction][value='+next+']').click();
+    assert.equal(root.querySelector('input[name=l2d-click-reaction]:checked').value,next);
+    button('保存').click();
+    await tick();
+  }
+  assert.deepEqual(calls.filter(call=>call.method==='edit').map(call=>call.args),[
+    ['a',{clickReaction:'expression'}],['a',{clickReaction:'none'}],['a',{clickReaction:'native'}],
+  ]);
+});
+
+test('the pack editor saves horizontal flipping independently and a reinstall explains how to load it', async t => {
+ let allowFlip=true;
+ const {root,button,calls}=await mount(t,{
+   ack:true, builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1}],
+   invoke(method,args) {
+     if (method==='detail') return {nameZh:'Alpha',tunable:true,allowFlip};
+     if (method==='edit') allowFlip=args[1].allowFlip;
+     if (method==='install') return {figureId:'alpha',reinstalled:true};
+   },
+ });
+ button('编辑').click();
+ await tick();
+ const toggle=[...root.querySelectorAll('label')].find(label=>label.textContent==='允许左右翻面').querySelector('input');
+ assert(toggle.checked);
+ toggle.click();
+ button('保存').click();
+ await tick();
+ assert.deepEqual(calls.find(call=>call.method==='edit').args,['a',{allowFlip:false}]);
+ root.querySelector('.l2d-install').click();
+ await tick();
+ const receipt=root.querySelector('dialog[open] .l2d-install-next');
+ assert.equal(receipt.querySelector('a[href="#/dress"]').textContent,'前往装扮重新穿戴');
+ assert.match(receipt.parentElement.querySelector('.l2d-install-feedback').textContent,/先换另一只再换回来/);
+});
+
+test('drag feedback displays its bounds and saves zero independently', async t => {
+  const {root,button,calls,dom}=await mount(t,{
+    ack:true, builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1}],
+    invoke(method){if(method==='detail')return {nameZh:'Alpha',tunable:true,dragFeedback:1};},
+  });
+  button('编辑').click();
+  await tick();
+  const slider=root.querySelector('#l2d-edit-drag-feedback');
+  const section = slider.closest('[role="tabpanel"]');
+  assert(section.hidden);
+  button('动作与交互').click();
+  assert.equal(section.hidden,false);
+  assert.equal(root.querySelector('#'+section.getAttribute('aria-labelledby')).textContent,'动作与交互');
+  assert.equal(slider.getAttribute('aria-valuetext'),'100%');
+  assert.equal(slider.min,'0');
+  assert.equal(slider.max,'150');
+  slider.value='0';
+  slider.dispatchEvent(new dom.window.Event('input'));
+  assert.equal(slider.getAttribute('aria-valuetext'),'0%');
+  button('保存').click();
+  await tick();
+  assert.deepEqual(calls.find(call=>call.method==='edit').args,['a',{dragFeedback:0}]);
+});
+
+test('figure profile tabs keep one draft and save settings from different categories together', async t => {
+  const {root,button,calls}=await mount(t,{
+    ack:true, builds:[{id:'a',nameZh:'Alpha',at:1,bytes:1}],
+    invoke(method) {
+      if (method==='detail') return {
+        nameZh:'Alpha',tunable:true,dragFeedback:1,clickReaction:'native',
+        idleBreath:true,breathingScale:true,allowFlip:true,gaze:{enabled:true,speed:1},
+        crop:{mode:'full',edge:'flat',line:.6,feather:.05,transition:.24},
+      };
+    },
+  });
+  button('编辑').click();
+  await tick();
+  const active=()=>root.querySelector('[role="tabpanel"]:not([hidden])');
+  const save=button('保存');
+  active().querySelector('#l2d-edit-name').value='草稿名称';
+  button('动作与交互').click();
+  const drag=active().querySelector('#l2d-edit-drag-feedback');
+  assert(drag&&active().querySelector('[name="l2d-click-reaction"]'));
+  assert(!active().querySelector('#l2d-edit-idle-breath'));
+  drag.value='75';
+  button('立绘').click();
+  assert(active().querySelector('#l2d-edit-gaze-speed'));
+  active().querySelector('#l2d-edit-idle-breath').click();
+  button('取景').click();
+  assert(active().querySelector('#l2d-crop-line'));
+  button('动作与交互').click();
+  assert.equal(drag.value,'75');
+  assert.equal(button('保存'),save);
+  assert.equal(calls.filter(call=>call.method==='edit').length,0);
+  save.click();
+  await tick();
+  assert.deepEqual(calls.filter(call=>call.method==='edit').map(call=>call.args),
+    [['a',{nameZh:'草稿名称',dragFeedback:.75,idleBreath:false}]]);
 });

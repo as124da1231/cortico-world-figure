@@ -5,7 +5,7 @@ import { transform } from 'esbuild';
 const commonBackends = [
   'live2d.js', 'native-actions.js', 'native-combination.js', 'wardrobe.js', 'wardrobe-slots.js',
   'render-config.js', 'render-quality.js', 'role-values.js', 'soullink.js', 'voice-playback.js',
-  'body-crop.js', 'crop-config.js', 'gaze-config.js', 'performance-plan.js',
+  'body-crop.js', 'crop-config.js', 'gaze-config.js', 'click-reaction.js', 'figure-body.js', 'performance-plan.js',
 ];
 
 export function packBackends(format) {

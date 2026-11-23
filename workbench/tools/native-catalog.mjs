@@ -176,7 +176,7 @@ export async function inspectNative(model,{signal}={}){
  for(const r of resources)if(r.parameters.some(p=>appearanceChannels.has((p.target||'Parameter')+':'+p.id))){r.classification='appearance';r.suggestion=null;}
  // Pair transitions by their parameter channels and reversed endpoints, independent of model names.
  for(const a of resources.filter(r=>r.classification==='pose')){
-  const opposite=resources.filter(b=>reversePose(a,b));
+  const opposite=resources.filter(b=>b.classification!=='appearance'&&reversePose(a,b));
   if(opposite.length===1)a.release=opposite[0].id;
  }
  const assets=[],missingRequiredAssets=[];
@@ -208,7 +208,6 @@ export function validateBindings(catalog,bindings){
   if(b.release&&(!release||release.kind!=='motion'||r.kind!=='motion'))throw Error('复位动作无效');
   if(release?.classification==='appearance')throw Error('外观资源不能作为复位动作');
   if(release&&!reversePose(r,release))throw Error('复位动作的参数与原姿态不匹配');
-  if(r.classification==='pose'&&!release)throw Error('姿态切换必须包含复位动作，否则保留通用表现');
   return {word:b.word,resource:r.id,...(overlays.length?{overlays}:{}),...(release?{release:release.id}:{}),...(b.nativeOnly?{nativeOnly:true}:{}),reason:String(b.reason||r.suggestion?.reason||'按动作内容匹配').slice(0,200),confidence:Number.isFinite(b.confidence)?Math.max(0,Math.min(1,b.confidence)):.5};
  });
 }

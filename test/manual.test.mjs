@@ -237,3 +237,45 @@ test('custom groups and language labels survive a save, and replacement metachar
  const {default:runtime}=await import('data:text/javascript;base64,'+Buffer.from(profile).toString('base64'));
  assert.equal(runtime.wardrobe.groups[0].options[0].name,'Price $& tax');
 });
+
+test('saved word switches remove both generic and native words, preserve bindings, and reopen enabled', async t => {
+ const {world,token,pack}=await editableWorld(t);
+ const original=(await readPackManifest(pack)).vocab[0];
+ const bindings=[...binding,{word:'bow',resource:'wave'}];
+ await assert.rejects(world.saveManual(token,bindings,[],['happy','happy']),/重复/);
+ await world.saveManual(token,bindings,[],['happy','bow']);
+ const updated=world.state.builds[0].packDir;
+ assert.deepEqual((await readPackManifest(updated)).vocab,[]);
+ const profile=await readFile(join(updated,'models/sample/profile.js'),'utf8');
+ assert.match(profile,/"disabledWords":\["bow","happy"\]/);
+ const reopened=await world.openManual('manualOpenBuild',['existing']);
+ assert.deepEqual(reopened.disabledWords,['bow','happy']);
+ assert.deepEqual(reopened.bindings.map(({word,resource})=>[word,resource]),[['happy','smile'],['bow','wave']]);
+ const preview=await readFile(join(world.manual.get(reopened.token).copy,'models/sample/profile.js'),'utf8');
+ assert.doesNotMatch(preview,/"disabledWords"/);
+ await world.saveManual(reopened.token,reopened.bindings,[],[]);
+ const restored=world.state.builds[0].packDir;
+ assert.deepEqual((await readPackManifest(restored)).vocab.map(word=>word.id),['happy','bow']);
+ assert.deepEqual((await readPackManifest(restored)).vocab[0],original);
+ assert.equal(JSON.parse(await readFile(join(restored,LIBRARY),'utf8')).disabledWords,undefined);
+});
+
+test('click and grab persist by word through a rebind, independent of Coo vocabulary',async t=>{
+ const {world,token}=await editableWorld(t);
+ const grab={mode:'fixed',word:'happy',pool:['wink']};
+ await world.saveManual(token,[...binding,{word:'stretch',resource:'wave'}],[],['happy'],['happy','stretch'],grab);
+ const reopened=await world.openManual('manualOpenBuild',['existing']);
+ assert.deepEqual(reopened.clickPool,['happy','stretch']);
+ assert.deepEqual(reopened.grabReaction,grab);
+ assert(reopened.genericWords.includes('wink'));
+ assert(!reopened.genericWords.includes('stretch'));
+ const updated=world.state.builds[0].packDir;
+ const profile=await readFile(join(updated,'models/sample/profile.js'),'utf8');
+ assert.match(profile,/"clickPool":\["happy","stretch"\]/);
+ assert.match(profile,/"grabReaction":\{"mode":"fixed","word":"happy","pool":\["wink"\]\}/);
+ await world.saveManual(reopened.token,[{word:'happy',resource:'wave'}],[],['happy']);
+ const afterRebind=await world.openManual('manualOpenBuild',['existing']);
+ assert.deepEqual(afterRebind.clickPool,['happy']);
+ assert.deepEqual(afterRebind.grabReaction,{mode:'fixed',pool:['wink']});
+ assert.deepEqual(afterRebind.disabledWords,['happy']);
+});

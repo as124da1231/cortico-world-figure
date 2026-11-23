@@ -96,7 +96,7 @@ addEventListener('message', async (e) => {
       for (const fn of ['step', 'layout', 'do']) if (typeof body?.[fn] !== 'function') throw new Error(t('figure.missingMethod', { name: fn }));
       post({ t: 'ready', z: body.z ?? null, words: Array.isArray(body.words) ? body.words.filter((w) => typeof w === 'string') : null });
     } else if (m.t === 'preview-play' && body) {
-      globalThis.__l2dPreview?.play(m.resource,m.word,m.bindings,m.raw);
+      globalThis.__l2dPreview?.play(m.resource,m.word,m.bindings,m.raw,m.interaction);
     } else if (m.t === 'preview-stop' && body) {
       globalThis.__l2dPreview?.stop();
     } else if (m.t === 'preview-wardrobe' && body) {

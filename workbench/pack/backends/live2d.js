@@ -38,6 +38,8 @@ import * as emotionConfig from './emotion-style.js';
 import {bodyCropForScheme,normalizeBodyCrop} from './crop-config.js';
 import {createCropMask,cropPose,interpolateCrop} from './body-crop.js';
 import {normalizeGazeConfig} from './gaze-config.js';
+import {createGrabReaction,normalizeClickReaction,setClickReaction} from './click-reaction.js';
+import {createFigureBodyWithKit, DRAG_FEEDBACK_BASE, nextHandlingBlend, normalizeDragFeedback} from './figure-body.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
@@ -508,6 +510,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
   const wardrobe=createWardrobe(model._model,paramIndex,partIndex,{parts:{...profile.parts?.base,...profile.clean?.parts},params:profile.clean?.params});
   wardrobe.configure(profile.wardrobe);wardrobe.scheme(initialScheme);
   let previewState = null;
+  let clickExpression = false;
+  let handlingBlend = 0, bodyStepTime = 0;
+  const dragFeedback = normalizeDragFeedback(profile.dragFeedback);
+  const handlingStrength = DRAG_FEEDBACK_BASE * dragFeedback;
   const nativeParams = new Set(), nativeParts = new Map();
   for (const resource of profile.native?.resources ?? []) {
     for (const p of resource.kind === 'expression' ? (resource.data.Parameters ?? []).map(p => ({Id:p.Id,Target:'Parameter'})) : resource.data.Curves ?? []) {
@@ -629,7 +635,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   }
 
   // ---------- 每帧：base → 表演层 / 表情 → 程序动画 ----------
-  function applyFrame(face, frame, dt, neutralPose = false, speechLevel = null, layer = null) {
+  function applyFrame(face, frame, dt, neutralPose = false, speechLevel = null, layer = null, heldFace = null) {
     const t = frame.t ?? 0;
 
     // 1) 全部 role 回到默认（写默认 == 模型默认姿势，所以是幂等的）
@@ -644,21 +650,27 @@ export async function createLive2DBody(base, opts, entry, kit) {
         ? null
         : (profile.expression?.[frame.face ?? 'neutral'] ?? profile.expression?.neutral ?? {}));
     if (recipe) for (const [k, v] of Object.entries(recipe)) if (k !== 'fade') writeRole(k, v);
+    const heldRecipe = !neutralPose && heldFace ? profile.expression?.[heldFace.word] : null;
+    const heldWeight = !neutralPose ? heldFace?.weight ?? 0 : 0;
+    if (heldRecipe) for (const [k, v] of Object.entries(heldRecipe)) {
+      if (!['fade','eyeOpen','mouthOpen'].includes(k)) writeRole(k, v, heldWeight);
+    }
 
     // 3) 眼睛：形状 + 眨眼 + 困意（乘在表情之上，闭眼笑也能眨）
-    let shape = 1;
+    const eyeShape = eye => {
+      if (eye?.shape === 'down' || eye?.shape === 'up') return 0;
+      return eye?.shape === 'lid' ? clamp((eye.ry ?? 12) / 16, 0, 1) : 1;
+    };
     const eye = neutralPose ? null : face.eyes?.[0];
-    if (eye) {
-      if (eye.shape === 'down' || eye.shape === 'up') shape = 0;
-      else if (eye.shape === 'lid') shape = clamp((eye.ry ?? 12) / 16, 0, 1);
-    }
     const close = neutralPose ? 1 : 1 - clamp(frame.blink ?? 0, 0, 1);
     const squint = neutralPose ? 1 : 1 - clamp(frame.eyeClose ?? 0, 0, 1);
     const drowse = neutralPose ? 1 : 1 - 0.75 * clamp(frame.drowse ?? 0, 0, 1);
     const baseOpen = engine
       ? clamp(engine.eyeOpen ?? 1, 0, 1)
       : (recipe?.eyeOpen ?? roles.get('eyeOpen')?.def ?? 1);
-    const open = baseOpen * shape * close * squint * drowse;
+    const baseEye = baseOpen * eyeShape(eye);
+    const heldEye = (heldRecipe?.eyeOpen ?? baseOpen) * eyeShape(heldFace?.look?.eyes?.[0]);
+    const open = (baseEye + (heldEye - baseEye) * heldWeight) * close * squint * drowse;
     writeRole('eyeOpen', open);
     // 测试台在存图前读这个，确认「这一帧」到底算出了什么（不是换表情那一帧）
     globalThis.__l2dLast = {
@@ -669,14 +681,23 @@ export async function createLive2DBody(base, opts, entry, kit) {
 
     // 4) 表情给嘴部底形，气泡口型留到原生动作和物理之后。
     const expressionOpen = engine ? (engine.mouthOpen ?? 0) * 0.85 : (recipe?.mouthOpen ?? 0);
-    const mouth = neutralPose ? null : bubbleMouthPose(face.gap?.[0], frame.talk, expressionOpen, voicePlayback?.gain ?? 1);
+    const heldOpen = heldRecipe?.mouthOpen ?? expressionOpen;
+    const gap = face.gap?.[0];
+    const heldGap = heldFace?.look?.gap?.[0];
+    const mouthGap = Number.isFinite(heldGap) ? (gap ?? heldGap) + (heldGap - (gap ?? heldGap)) * heldWeight : gap;
+    const mouth = neutralPose ? null : bubbleMouthPose(mouthGap, frame.talk, expressionOpen + (heldOpen - expressionOpen) * heldWeight, voicePlayback?.gain ?? 1);
     writeRole('mouthOpen', mouth?.base ?? 0);
 
     // 5) 视线 + 头身跟随（表演层的待机动作叠在宿主跟随之上）
     const look = neutralPose ? [0, 0] : (Array.isArray(frame.look) ? frame.look : [0, 0]);
     const eyeLook = customGaze && !neutralPose && !previewState ? eyeLookForFrame(look, face, frame, dt) : look;
-    const tilt = neutralPose ? 0 : (frame.tilt ?? 0);
-    const lean = neutralPose ? 0 : (frame.lean ?? 0);
+    // Kit sends degrees. Convert them to the normalized model input before blending.
+    const tilt = neutralPose ? 0 : (frame.tilt ?? 0) / (bongoInput ? 1 : 30);
+    const lean = neutralPose ? 0 : (frame.lean ?? 0) / (bongoInput ? 1 : 20);
+    const followGain = 1 + (handlingStrength - 1) * handlingBlend;
+    const follow = value => clamp(clamp(value, -1, 1) * followGain, -1, 1);
+    const headLimit = layer?.emotion || bongoInput ? 1 : .75 + (.44 * dragFeedback - .75) * handlingBlend;
+    const head = value => clamp(value, -headLimit, headLimit);
     const ax = engine?.angleX ?? 0;
     const ay = engine?.angleY ?? 0;
     const az = engine?.angleZ ?? 0;
@@ -686,10 +707,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
     if (engine) {
       writeRole('eyeBallX', clamp(ex * 0.6 + (eyeLook[0] ?? 0) * 0.55, -1, 1));
       writeRole('eyeBallY', clamp(ey * 0.6 - (eyeLook[1] ?? 0) * 0.45, -1, 1));
-      writeRole('angleX', clamp(ax * 0.75 + (look[0] ?? 0) * 0.4, -1, 1));
-      writeRole('angleY', clamp(ay * 0.75 - (look[1] ?? 0) * 0.35, -1, 1));
-      writeRole('angleZ', clamp(az + tilt * 0.4, -1, 1));
-      writeRole('bodyX', clamp(bx + lean * 0.35, -1, 1));
+      writeRole('angleX', head(ax * 0.75 + follow((look[0] ?? 0) * 0.4)));
+      writeRole('angleY', head(ay * 0.75 - follow((look[1] ?? 0) * 0.35)));
+      writeRole('angleZ', head(az + follow(tilt * 0.4)));
+      writeRole('bodyX', clamp(bx + follow(lean * 0.35), -1, 1));
       // 表情通道：引擎/配方已经算好，之前漏写，导致只有眼/嘴/头在动
       for (const k of ['eyeSmile', 'mouthForm', 'browY', 'browAngle', 'cheek']) {
         if (Number.isFinite(engine[k])) writeRole(k, engine[k]);
@@ -697,10 +718,10 @@ export async function createLive2DBody(base, opts, entry, kit) {
     } else {
       writeRole('eyeBallX', clamp(eyeLook[0] ?? 0, -1, 1));
       writeRole('eyeBallY', clamp(-(eyeLook[1] ?? 0), -1, 1));
-      writeRole('angleX', clamp((look[0] ?? 0) * 0.73, -1, 1));
-      writeRole('angleY', clamp(-(look[1] ?? 0) * 0.6, -1, 1));
-      writeRole('angleZ', clamp(tilt * 0.67, -1, 1));
-      writeRole('bodyX', clamp(lean * 0.6, -1, 1));
+      writeRole('angleX', head(follow((look[0] ?? 0) * 0.73)));
+      writeRole('angleY', head(follow(-(look[1] ?? 0) * 0.6)));
+      writeRole('angleZ', head(follow(tilt * 0.67)));
+      writeRole('bodyX', follow(lean * 0.6));
     }
     if (idleBreath) {
       const breath = Number.isFinite(engine?.breath) ? engine.breath : neutralPose ? 0.5 : 0.5 + 0.5 * Math.sin(t * 1.6);
@@ -1245,7 +1266,13 @@ export async function createLive2DBody(base, opts, entry, kit) {
     };
   };
 
+  const fixedFacing = !bongoInput && profile.allowFlip === false;
   const figure = {
+    directionalFrames: fixedFacing,
+    ...(!bongoInput && { groupTilt(mode, tilt, lean) {
+      handlingBlend = nextHandlingBlend(mode, handlingBlend, bodyStepTime);
+      return (tilt + lean) * (1 + (handlingStrength - 1) * handlingBlend);
+    } }),
     get extent() { return currentExtent(); },
     get hits() { return currentHits(); },
     get anchors() { return currentAnchors(); },
@@ -1347,13 +1374,23 @@ export async function createLive2DBody(base, opts, entry, kit) {
       if (!texturesReady || renderFailure) return;
       settleWardrobe();
 
-      if (opts.preview && previewState) frame = {...frame,face:previewState.word,gesture:null,talk:0,look:[0,0]};
+      if (fixedFacing && (figure.kitFacing ?? frame.facing) < 0 && frame.look) {
+        frame = {...frame,look:[-frame.look[0], frame.look[1]],facing:1};
+      }
+      if (opts.preview && previewState && !previewState.interaction) frame = {...frame,face:previewState.word,gesture:null,talk:0,look:[0,0]};
       const dt = clamp(frame.dt ?? (elapsedBetweenDraws || 1 / 60), 0.001, 0.1);
+      const heldFace = previewState?.interaction === 'grab'
+        ? {word:previewState.word, weight:1, age:frame.t, held:true}
+        : grabReaction?.frame(dt);
+      if (heldFace) heldFace.look = kit.FACES?.[heldFace.word]?.f(heldFace.age ?? 0);
       elapsedBetweenDraws = 0;
       const layer = performancePlayback?.frame();
       let nativeValues = [];
       if (native && extent) {
-        try { nativeValues = native.update(frame, dt); }
+        try {
+          if (frame.face !== 'happy') clickExpression = false;
+          nativeValues = native.update(frame, dt, clickExpression, heldFace?.held ? heldFace.word : frame.face);
+        }
         catch (error) { console.warn('[l2d] Native update failed; generic behavior retained', error); }
       }
       const motionTracks = nativeValues.filter(value => value.nativeOnly && (value.target==='PartOpacity' ? partIndex : paramIndex).has(value.id));
@@ -1370,7 +1407,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
       const neutralPose = !extent || animationOnly;
       const speech = neutralPose ? null : voicePlayback?.level();
       const spokenMouth = voicePlayback && voiceMouth.update(speech, voicePlayback.gain, dt);
-      const mouth = applyFrame(face, layer?.face ? {...frame,face:layer.face} : frame, dt, neutralPose, speech, layer);
+      const mouth = applyFrame(face, layer?.face ? {...frame,face:layer.face} : frame, dt, neutralPose, speech, layer, heldFace);
       if (!animationOnly) {
         stepMotion(frame, dt);
         if (!idleBreath && idlePlaying && !Number.isFinite(roleOverrides.breath) && !authoredBreath(frame, layer)) {
@@ -1472,7 +1509,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
   for (const binding of profile.native?.bindings ?? []) {
     const resource = profile.native.resources.find(r => r.id === binding.resource);
     if (resource) words[binding.word] = resource.kind === 'expression' ? { expression: {} }
-      : { motion: { seconds: (resource.seconds || 1) + (resource.classification === 'pose' ? 2 : .25) } };
+      : { motion: { seconds: (resource.seconds || 1) + (resource.classification === 'pose' && binding.release ? 2 : .25) } };
   }
 
   publishInfo();
@@ -1493,7 +1530,15 @@ export async function createLive2DBody(base, opts, entry, kit) {
   globalThis.__l2dPreviewReady=()=>texturesReady&&!!extent&&!renderFailure;
   globalThis.__l2dExpr = figure.__expr;
 
-  const bodyHost = bongoInput ? { ...host, start: { ...host.start, facing: 1 } } : host;
+  const motionWords = new Set((profile.native?.bindings ?? []).filter(binding =>
+    profile.native.resources.find(resource => resource.id === binding.resource)?.kind === 'motion').map(binding => binding.word));
+  const grabReaction = opts.preview ? null : createGrabReaction(profile.native?.grabReaction,
+    word => kit.KIT_EXPRESSIONS.includes(word) && !motionWords.has(word));
+  const bodyHost = bongoInput ? { ...host, start: { ...host.start, facing: 1 } }
+    : grabReaction ? { ...host, emit(kind, detail) {
+      grabReaction.event(kind, detail);
+      host.emit?.(kind, detail);
+    } } : host;
   // The kit mounts its stage-coordinate particles after the transformed art group.
   const hideNativeEffects = 'svg.kit.figure-custom-effects > ellipse.shadow + g + g,'
     + 'svg.kit.figure-motion-only > ellipse.shadow + g + g{display:none}';
@@ -1506,7 +1551,19 @@ export async function createLive2DBody(base, opts, entry, kit) {
       for (const [id, action] of savedActions) words[id] = {motion:{seconds:action.seconds}};
     } catch (error) { console.warn('[l2d] Figure performance unavailable', error); }
   }
-  const body = kit.createBody(bodyHost, { figure, words, css: 'foreignObject{pointer-events:none}' + hideNativeEffects });
+  const bodyOptions = { figure, words, css: 'foreignObject{pointer-events:none}' + hideNativeEffects };
+  const body = createFigureBodyWithKit(kit, bodyHost, bodyOptions, {
+    fixedFacing, breathingScale: bongoInput || profile.breathingScale !== false,
+    dragFeedback: bongoInput ? undefined : dragFeedback,
+  });
+  const doLocalWord = body.do.bind(body);
+  const configuredPool = profile.native?.clickPool;
+  const clickPool = Array.isArray(configuredPool) ? configuredPool.filter(word => body.words.includes(word)) : [];
+  const disabledWords = new Set(opts.preview ? [] : profile.native?.disabledWords ?? []);
+  if (disabledWords.size) {
+    body.words = body.words.filter(word => !disabledWords.has(word));
+    body.do = word => !disabledWords.has(word) && doLocalWord(word);
+  }
   kitSvg = host.root.querySelector('svg.kit');
   setEmotionEffectsEnabled(emotionEffectsEnabled);
   if (customGaze) {
@@ -1525,6 +1582,20 @@ export async function createLive2DBody(base, opts, entry, kit) {
   }
   const cueBase = body.cue.bind(body);
   body.cue = (kind) => { cueBase(kind); triggerEmotionEffect(kind); };
+  if (!opts.preview) setClickReaction(body, normalizeClickReaction(profile.clickReaction), () => {
+    clickExpression = true;
+    cueBase('cheer');
+  }, { words: clickPool, play(word) {
+    clickExpression = false;
+    return finishWord(word, doLocalWord(word));
+  } });
+  if (grabReaction) {
+    const pointer = body.pointer.bind(body);
+    body.pointer = (type, point) => {
+      if (type === 'cancel') grabReaction.release();
+      return pointer(type, point);
+    };
+  }
   if (!opts.preview) voicePlayback = createFigureVoicePlayback(doc, resolveAsset);
   if (performanceModule) {
     try {
@@ -1534,7 +1605,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
         ...[...paramIndex.keys()].filter(id => PROTECTED_PARAMETER.test(id)),
         ...(profile.wardrobe?.resources ?? []).flatMap(resource => (resource.tracks ?? []).filter(track => track.target !== 'PartOpacity').map(track => track.id)),
       ]);
-      performancePlayback=createPerformancePlayback({asset:resolveAsset,model:model._model,paramIndex,protectedIds,host,position:()=>body.layout()});
+      performancePlayback=createPerformancePlayback({asset:resolveAsset,model:model._model,paramIndex,protectedIds,disabledWords,host,position:()=>body.layout()});
       const move = body.move?.bind(body), stop = body.stopWalk?.bind(body);
       body.move=(args,id)=>performancePlayback.direct(args,id) || (move?.(args,id) ?? false);
       body.stopWalk=id=>performancePlayback.cancel(id) || stop?.(id);
@@ -1579,6 +1650,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     if (!renderFailure) {
       if (draw && texturesReady) performancePlayback?.poll();
       const delta = Number.isFinite(dt) && dt > 0 ? dt : 0;
+      bodyStepTime = delta;
       elapsedBetweenDraws = Math.min(0.1, elapsedBetweenDraws + delta);
       if (texturesReady && draw) settleWardrobe();
       updateCrop(delta);
@@ -1607,15 +1679,15 @@ export async function createLive2DBody(base, opts, entry, kit) {
   };
   globalThis.__l2dWardrobe=()=>wardrobe.state();
   if(opts.preview)globalThis.__l2dWardrobeValues=()=>wardrobe.inspect();
-  const doBase = body.do.bind(body);
-  body.do = (word) => {
-    const accepted = doBase(word);
+  function finishWord(word, accepted) {
     if (accepted !== false) {
       native?.trigger(word);
       triggerEmotionEffect(word);
     }
     return accepted;
-  };
+  }
+  const doBase = body.do.bind(body);
+  body.do = word => finishWord(word, doBase(word));
   if (native) {
     globalThis.__l2dNativeSample = (id, time, word, generic = false, size = 384, overlays = [], nativeOnly = false) => {
       if (!texturesReady) return null;
@@ -1648,9 +1720,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
     wardrobe(groups,picks){
       changeWardrobe(()=>{wardrobe.configure(wardrobeConfig({resources:(profile.native?.resources||[]).map(r=>({...r,raw:r.data}))},groups||[]));wardrobe.select(picks||{});});
     },
-    play(resource,word,bindings=[],raw=false) {
+    play(resource,word,bindings=[],raw=false,interaction=false) {
       performance?.dispose(); performance=performanceFactory?.(profile,console.warn) || null;
-      previewState={word:word || 'neutral',raw};
+      previewState={word:word || 'neutral',raw,interaction};
       const selected=bindings.filter(b=>b.word!==word);
       if(resource){
         const binding=bindings.find(b=>b.word===word&&b.resource===resource);
@@ -1658,7 +1730,20 @@ export async function createLive2DBody(base, opts, entry, kit) {
         selected.push({...binding,word:word || 'neutral',resource,...(motion&&raw?{nativeOnly:true}:{})});
       }
       native=createNativeActions({...profile.native,bindings:selected});
-      body.do?.(word || 'neutral');
+      if (interaction === 'grab') {
+        body.do('neutral');
+        return;
+      }
+      if (interaction === 'click') {
+        if (body.layout().mode === 'sit') body.do('stand');
+        const motion = profile.native?.resources?.find(item=>item.id===resource && item.kind==='motion');
+        if (motion && !words[word]) {
+          words[word]={motion:{seconds:motion.seconds || 1}};
+          try { body.do(word); } finally { delete words[word]; }
+          return;
+        }
+      }
+      body.do(word || 'neutral');
     },
     stop(){previewState=null;native=createNativeActions({...profile.native,bindings:[]});body.do?.('neutral');},
   };
@@ -1673,7 +1758,7 @@ export async function createLive2DBody(base, opts, entry, kit) {
     const setBase = body.set.bind(body);
     body.set = (s) => setBase({ ...(s || {}), roam: 'off' });
     try { setBase({ roam: 'off' }); } catch { /* ignore */ }
-    if (bongoInput || profile.facing !== 'mirror') {
+    if (bongoInput || (!fixedFacing && profile.facing !== 'mirror')) {
       const placeBase = body.place.bind(body);
       body.place = (x, facing, y) => placeBase(x, 1, y);
       try { placeBase(body.layout?.().x ?? 0, 1); } catch { /* ignore */ }

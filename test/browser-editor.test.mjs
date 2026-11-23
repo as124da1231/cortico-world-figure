@@ -23,8 +23,8 @@ test('a browser editor can save its own draft, while its isolated preview and ot
     workbench: fileURLToPath(new URL('../workbench/', import.meta.url)),
     setDraft(value) { staged = value; },
     keepAlive() {},
-    async save(bindings, wardrobe) {
-      saves.push({ bindings, wardrobe });
+    async save(bindings, wardrobe, disabledWords, clickPool, grabReaction) {
+      saves.push({ bindings, wardrobe, disabledWords, clickPool, grabReaction });
       return new Promise(resolve => { complete = () => resolve({ buildId: 'figure' }); });
     },
     async skipImages() { return { ok: true }; },
@@ -61,7 +61,8 @@ test('a browser editor can save its own draft, while its isolated preview and ot
   assert.equal(model.headers.get('access-control-allow-origin'), 'null');
   assert.equal(await model.text(), 'export default {}');
   assert.equal((await get('scene/pack/models/..%2fnative-library.json')).status, 404);
-  const draft = { bindings: [{ word: 'happy', resource: 'smile', overlays: ['blush'] }], wardrobe: [] };
+  const draft = { bindings: [{ word: 'happy', resource: 'smile', overlays: ['blush'] }], wardrobe: [], disabledWords: ['happy'], clickPool:['happy','wink'],
+    grabReaction:{mode:'fixed',word:'happy',pool:['wink']} };
   assert.equal((await send('save', 'null', draft)).status, 403);
   assert.equal((await send('save', 'https://example.invalid', draft)).status, 403);
   assert.equal((await send('draft', base.origin, { revision: 2, draft }, first.owner)).status, 200);
@@ -86,7 +87,7 @@ test('a browser editor can save its own draft, while its isolated preview and ot
   assert(editor.isSaving());
   assert.equal((await send('close', base.origin, {}, resumed.owner)).status, 409);
   const retry = send('save', base.origin, body, resumed.owner);
-  assert.equal((await send('save', base.origin, { ...body, bindings: [] }, resumed.owner)).status, 409);
+  assert.equal((await send('save', base.origin, { ...body, clickPool: [] }, resumed.owner)).status, 409);
   complete();
   assert.deepEqual(await (await pending).json(), { buildId: 'figure' });
   assert.deepEqual(await (await retry).json(), { buildId: 'figure' });

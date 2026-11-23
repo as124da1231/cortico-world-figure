@@ -27,7 +27,7 @@ import { captureCover, captureWardrobeThumbnails, type CoverResult } from './cov
 import { readClipboardPaths } from './clipboard.ts';
 import { FigureAutomation, automationMode } from './automation.mjs';
 import {adaptationMode,aiEnabled} from './adaptation.mjs';
-import {ManualSessions,LIBRARY,writeNativePack} from './manual.ts';
+import {ManualSessions,LIBRARY,validateDisabledWords,writeNativePack} from './manual.ts';
 import { openEditorInBrowser, serveBrowserEditor, type BrowserDraft, type BrowserEditor } from './browser-editor.ts';
 import { FigurePerformance, preserveSavedActions, writePerformanceMove, type PerformanceConfig } from './performance.ts';
 import { PERFORMANCE_ASSET } from '../workbench/pack/backends/performance-plan.js';
@@ -507,11 +507,11 @@ export class Live2dWorld implements World {
       return { status: 'closed' };
     }
     if (method === 'manualSave') {
-      const [token, bindings, wardrobe] = args;
+      const [token, bindings, wardrobe, disabledWords, clickPool, grabReaction] = args;
       if (typeof token !== 'string' || !token || !Array.isArray(bindings)
           || wardrobe != null && !Array.isArray(wardrobe)) throw Error('绑定保存参数无效');
       if (this.browserEditors.has(token)) throw Error('请在当前浏览器编辑页保存。');
-      return this.saveManual(token, bindings, wardrobe ?? undefined);
+      return this.saveManual(token, bindings, wardrobe ?? undefined, disabledWords, clickPool, grabReaction);
     }
     if (method === 'assistState') return { ...automationMode(this.opts.getConfig()), plans: this.automation.pending(), submissions: this.automation.submissions() };
     if (method === 'importDesktopSource') return this.importDesktopSource(packId(args[0]));
@@ -826,7 +826,7 @@ export class Live2dWorld implements World {
     }
   }
 
-  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; wardrobe?:any[]; modelFile?: string; fingerprint?: string; sourceFingerprint?: string; signal?: AbortSignal; skipImages?: AbortSignal; onSaveStage?: (stage: ManualSaveStage) => void } = {}) {
+  private async doBuild(dir: string, opts: { remember?: boolean; native?: unknown; wardrobe?:any[]; disabledWords?:string[]; clickPool?:unknown; grabReaction?:unknown; modelFile?: string; fingerprint?: string; sourceFingerprint?: string; signal?: AbortSignal; skipImages?: AbortSignal; onSaveStage?: (stage: ManualSaveStage) => void } = {}) {
     opts.signal?.throwIfAborted();
     this.guard(dir);
     this.requireNotice();
@@ -916,7 +916,7 @@ export class Live2dWorld implements World {
         if(model) catalog.model=model;
         const bindings=(opts.native as any)?.bindings||[];
         await writeFile(join(finalDir,LIBRARY),JSON.stringify({version:1,catalog,bindings}));
-        if(opts.wardrobe)await writeNativePack(finalDir,catalog,bindings,false,opts.wardrobe);
+        if(opts.wardrobe)await writeNativePack(finalDir,catalog,bindings,false,opts.wardrobe,opts.disabledWords,opts.clickPool,opts.grabReaction);
         await enablePackPerformance(finalDir);
       }
       if (!opts.skipImages?.aborted && opts.wardrobe?.some(group => group.options.length)) opts.onSaveStage?.('images');
@@ -1001,8 +1001,13 @@ export class Live2dWorld implements World {
       const warnings: string[] = [];
       const figures = await this.installDirectory();
       resumeVoice = await this.voice.suspend();
+      let reinstalled = false;
       const target = await this.installPrepared(chosen.packDir, figures, {
-        signal, beforeSwap, keepPackThemes: chosen.imported, onWarning: message => warnings.push(message),
+        signal, keepPackThemes: chosen.imported, onWarning: message => warnings.push(message),
+        beforeSwap: (replacesOtherPack, alreadyInstalled) => {
+          beforeSwap?.(replacesOtherPack);
+          reinstalled = alreadyInstalled;
+        },
       });
       const figureId = basename(target);
       this.steps.install = { phase: 'done', hint: target, at: Date.now() };
@@ -1019,7 +1024,7 @@ export class Live2dWorld implements World {
       const saveWarning = await this.saveOutcome('形象已安装，但安装记录保存失败');
       const warn = [...warnings, saveWarning].filter(Boolean).join('。') || undefined;
       this.say(`安装完成 · ${target}`);
-      return { figureId, state: this.snapshot(), log: [`安装到 ${target}`], warn };
+      return { figureId, reinstalled, state: this.snapshot(), log: [`安装到 ${target}`], warn };
     } catch (e) {
       this.steps.install = { phase: 'error', hint: errText(e) };
       this.say(`安装失败 · ${errText(e)}`);
@@ -1036,7 +1041,7 @@ export class Live2dWorld implements World {
       const rec=this.state.builds?.find(b=>b.id===String(args[0]));
       if(!rec?.manualAvailable)throw Error('请重新导入模型以编辑原生动作');
       const library=JSON.parse(await readFile(join(rec.packDir,LIBRARY),'utf8'));
-      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id,requestedToken,library.wardrobe||[],this.opts.getConfig().previewSize);
+      return this.manual.open(rec.packDir,library.catalog,library.bindings||[],undefined,rec.id,requestedToken,library.wardrobe||[],this.opts.getConfig().previewSize,validateDisabledWords(library.disabledWords??[]),library.clickPool??[],library.grabReaction);
     }
     const token=String(args[0]),dir=String(args[1]);
     const paths=await this.importer.preserveForAutomation(token,join(this.workRoot(),'automation-inputs'),this.retainedImportPaths());
@@ -1078,8 +1083,8 @@ export class Live2dWorld implements World {
           while (this.browserDrafts.size > 16) this.browserDrafts.delete(this.browserDrafts.keys().next().value!);
         },
         keepAlive: () => { this.manual.get(token); },
-        save: async (bindings, wardrobe) => {
-          const result = await this.exclusive(() => this.saveManual(token, bindings, wardrobe)) as {buildId?: string; warn?: string};
+        save: async (bindings, wardrobe, disabledWords, clickPool, grabReaction) => {
+          const result = await this.exclusive(() => this.saveManual(token, bindings, wardrobe, disabledWords, clickPool, grabReaction)) as {buildId?: string; warn?: string};
           return { buildId: result.buildId, warn: result.warn };
         },
         skipImages: () => this.invoke('workbench', 'manualSkipImages', [token]),
@@ -1110,7 +1115,7 @@ export class Live2dWorld implements World {
     return { stage: pending?.kind === 'manual' && pending.token === token ? pending.stage : null };
   }
 
-  private async saveManual(token:string,values:any[],groups?:any[]) {
+  private async saveManual(token:string,values:any[],groups?:any[],disabledWords?:unknown,clickPool?:unknown,grabReaction?:unknown) {
     const receipt=this.manual.saved(token);if(receipt)return receipt;
     this.requireNotice();
     const session = this.manual.get(token);
@@ -1119,6 +1124,7 @@ export class Live2dWorld implements World {
     this.pendingImages = pending;
     session.saving = true;
     try{
+    const disabled = disabledWords === undefined ? undefined : validateDisabledWords(disabledWords);
     const {bindings}=await this.manual.validate(token,values);
     const previous=await readFile(join(session.pack,LIBRARY),'utf8').then(s=>JSON.parse(s).wardrobe||[]).catch(()=>[]);
     const wardrobe=wardrobeConfig(session.catalog,groups??previous,bindings).groups;
@@ -1130,7 +1136,7 @@ export class Live2dWorld implements World {
       const current=await inspectNative(session.source);
       if(current.fingerprint!==session.catalog.fingerprint)throw Error('模型素材已变化，请重新打开编辑');
       const result=await this.doBuild(session.source.dir,{
-        remember:false,modelFile:session.source.file,native:nativeConfig(current,bindings),wardrobe,
+        remember:false,modelFile:session.source.file,native:nativeConfig(current,bindings),wardrobe,disabledWords:disabled,clickPool,grabReaction,
         fingerprint:current.fingerprint,skipImages:controller.signal,onSaveStage:stage=>{pending.stage=stage;},
       });
       this.manual.complete(token,result);return result;
@@ -1142,7 +1148,7 @@ export class Live2dWorld implements World {
       await mkdir(parent,{recursive:true});await cp(session.pack,target,{recursive:true});
       await refreshPackRuntime(RUNTIME_DIR, target);
       await setPackAppearance(target);
-      await writeNativePack(target,session.catalog,bindings,false,wardrobe);
+      await writeNativePack(target,session.catalog,bindings,false,wardrobe,disabled,clickPool,grabReaction);
       await enablePackPerformance(target);
       if (!controller.signal.aborted && wardrobe.some(group=>group.options.length)) pending.stage='images';
       const warn = await this.captureWardrobe(target, undefined, controller.signal);
@@ -1607,6 +1613,8 @@ async function prepareFigureRuntime(dir: string, cfg: Live2dSection, immediate: 
       || !existsSync(join(dir, 'vendor', 'soullink', 'chunk-OPVA6SRP.js'))
       || !existsSync(join(dir, 'backends', 'body-crop.js'))
       || !existsSync(join(dir, 'backends', 'gaze-config.js'))
+      || !existsSync(join(dir, 'backends', 'click-reaction.js'))
+      || !existsSync(join(dir, 'backends', 'figure-body.js'))
       || !installedVoice?.equals(await readFile(join(RUNTIME_DIR, voiceBackend)))
       || !installedCrop?.equals(await readFile(join(RUNTIME_DIR, cropConfig)))
       || !installedBody?.equals(await readFile(join(RUNTIME_DIR, bodyBackend)))

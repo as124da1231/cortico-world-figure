@@ -424,3 +424,14 @@ test('a staged parameter action becomes a persistent ordinary vocabulary word', 
   assert(playback.playSaved(action));
   playback.dispose();
 });
+
+test('an opted-out face cannot be invoked through the performance tools', async t => {
+ const {service, dir}=await fixture(t,'direct');
+ const file=join(dir,'native-library.json');
+ const library=JSON.parse(await readFile(file,'utf8'));
+ await writeFile(file,JSON.stringify({...library,disabledWords:['happy']}));
+ const target=await service.target();
+ assert.throws(()=>service.check(target,[{face:'happy',at:0,duration:1}]),/已停用/);
+ assert.equal(service.check(target,[{face:'sad',at:0,duration:1}])[0].face,'sad');
+ assert.deepEqual(service.speechMarks(target,undefined,[{text:'你好',mood:{id:'happy'}}],1000),[]);
+});

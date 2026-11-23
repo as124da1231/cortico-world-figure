@@ -18,6 +18,8 @@ import { writePackThemes } from '../workbench/tools/pack-themes.mjs';
 import { packBackends, writePackSoulLink } from '../workbench/tools/pack-runtime.mjs';
 import { BODY_CROP_AXIS, BODY_CROP_OPTIONS, normalizeBodyCrop } from '../workbench/pack/backends/crop-config.js';
 import { normalizeGazeConfig } from '../workbench/pack/backends/gaze-config.js';
+import { normalizeClickReaction } from '../workbench/pack/backends/click-reaction.js';
+import { normalizeDragFeedback } from '../workbench/pack/backends/figure-body.js';
 
 /** Imported packages may not redirect copying or editing outside their own directory. */
 export async function assertRegularTree(root: string): Promise<void> {
@@ -111,13 +113,15 @@ function setCropAxis(manifest: any, mode: string) {
   }
 }
 
-function readProfileSetting(profile: string, key: 'crop' | 'gaze' | 'idleBreath') {
-  const line = new RegExp(`^  ${key}: (\\{[^\\r\\n]*\\}|true|false),\\r?$`, 'm').exec(profile);
+type ProfileSetting = 'crop' | 'gaze' | 'idleBreath' | 'clickReaction' | 'allowFlip' | 'breathingScale' | 'dragFeedback';
+
+function readProfileSetting(profile: string, key: ProfileSetting) {
+  const line = new RegExp(`^  ${key}: (\\{[^\\r\\n]*\\}|true|false|"[a-z-]+"|[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?),\\r?$`, 'm').exec(profile);
   try { return line ? parseFigureJson(line[1]) : undefined; }
   catch { return undefined; }
 }
 
-function writeProfileSetting(profile: string, key: 'crop' | 'gaze' | 'idleBreath', value: object | boolean) {
+function writeProfileSetting(profile: string, key: ProfileSetting, value: object | boolean | string | number) {
   return profile.replace(new RegExp(`^  ${key}: [^\\r\\n]*\\r?\\n`, 'gm'), '')
     .replace(/\r?\n};\s*$/, () => `\n  ${key}: ${JSON.stringify(value)},\n};\n`);
 }
@@ -141,6 +145,10 @@ export async function packDetail(root: string) {
     crop: normalizeBodyCrop(readProfileSetting(profile.text, 'crop')),
     gaze: normalizeGazeConfig(readProfileSetting(profile.text, 'gaze')),
     idleBreath: readProfileSetting(profile.text, 'idleBreath') !== false,
+    breathingScale: readProfileSetting(profile.text, 'breathingScale') !== false,
+    clickReaction: normalizeClickReaction(readProfileSetting(profile.text, 'clickReaction')),
+    allowFlip: readProfileSetting(profile.text, 'allowFlip') !== false,
+    dragFeedback: normalizeDragFeedback(readProfileSetting(profile.text, 'dragFeedback')),
   } : {};
   return {nameZh:string(manifest.name?.zh),nameEn:string(manifest.name?.en),aboutZh:about(manifest.about?.zh),aboutEn:about(manifest.about?.en),bodyGain,style,tunable,...presentation};
 }
@@ -292,7 +300,7 @@ export async function findInstalledTargets(figuresDir: string, id: string, ignor
 export async function installPack(
   packDir: string,
   figuresDir: string,
-  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal; expectedFingerprint?: string; beforeSwap?: (replacesOtherPack: boolean) => void; prepare?: (pending: string) => Promise<void> } = {},
+  opts: { backupRoot?: string; keep?: number; onWarning?: (message: string) => void; signal?: AbortSignal; expectedFingerprint?: string; beforeSwap?: (replacesOtherPack: boolean, alreadyInstalled: boolean) => void; prepare?: (pending: string) => Promise<void> } = {},
 ): Promise<string> {
   opts.signal?.throwIfAborted();
   await assertRegularTree(packDir);
@@ -333,7 +341,7 @@ export async function installPack(
         approvedHash = installedHash;
       }
     }
-    opts.beforeSwap?.(replacesOtherPack);
+    opts.beforeSwap?.(replacesOtherPack, occupied.length > 0);
     if (opts.backupRoot && occupied.length) {
       const backupRoot = await canonicalPath(opts.backupRoot);
       if (occupied.some(path => containsPath(path, backupRoot))) throw new Error('备份目录不能位于安装目标内部');
@@ -347,7 +355,7 @@ export async function installPack(
     if (JSON.stringify(current) !== JSON.stringify(occupied)) throw new Error('安装目标已改变，请重新确认');
     if (approvedHash && await packFingerprint(occupied[0], opts.signal).catch(() => undefined) !== approvedHash) replacesOtherPack = true;
     opts.signal?.throwIfAborted();
-    opts.beforeSwap?.(replacesOtherPack);
+    opts.beforeSwap?.(replacesOtherPack, occupied.length > 0);
     for (const [index, path] of occupied.entries()) {
       const previous = childPath(figuresDir, `.${id}-previous-${nonce}-${index}`);
       await rename(path, previous);
@@ -391,6 +399,10 @@ export interface PackEdit {
   aboutEn?: string;
   bodyGain?: number;
   idleBreath?: boolean;
+  breathingScale?: boolean;
+  clickReaction?: 'native' | 'expression' | 'none';
+  allowFlip?: boolean;
+  dragFeedback?: number;
   style?: string;
   crop?: Omit<BodyCrop, 'curve'> & { curve?: number };
   gaze?: ReturnType<typeof normalizeGazeConfig>;
@@ -412,6 +424,14 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
   if (patch.style !== undefined && !['natural', 'lively', 'calm', 'shy'].includes(patch.style)) throw new Error('动作风格无效');
   const idleBreath = patch.idleBreath;
   if (idleBreath !== undefined && typeof idleBreath !== 'boolean') throw Error('待机呼吸设置无效');
+  const breathingScale = patch.breathingScale;
+  if (breathingScale !== undefined && typeof breathingScale !== 'boolean') throw Error('呼吸缩放设置无效');
+  const clickReaction = patch.clickReaction;
+  if (clickReaction !== undefined && normalizeClickReaction(clickReaction) !== clickReaction) throw Error('单击反应选项无效');
+  const allowFlip = patch.allowFlip;
+  if (allowFlip !== undefined && typeof allowFlip !== 'boolean') throw Error('左右翻面设置无效');
+  const dragFeedback = patch.dragFeedback;
+  if (dragFeedback !== undefined && normalizeDragFeedback(dragFeedback) !== dragFeedback) throw Error('拖动反馈应为 0%–150%');
   const cropPatch = patch.crop;
   const crop = cropPatch === undefined ? undefined : normalizeBodyCrop(cropPatch);
   if (crop && (!cropPatch || Object.entries(crop).some(([key,value]) =>
@@ -446,12 +466,18 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
     if (patch.nameZh) opt.name.zh = patch.nameZh;
     if (patch.nameEn) opt.name.en = patch.nameEn;
   }
-  if (Number.isFinite(patch.bodyGain) || patch.style || crop || gaze || idleBreath !== undefined) {
+  const editPresentation = crop || gaze || idleBreath !== undefined || breathingScale !== undefined
+    || clickReaction !== undefined || allowFlip !== undefined || dragFeedback !== undefined;
+  if (Number.isFinite(patch.bodyGain) || patch.style || editPresentation) {
     const profiles = await profileFiles(packDir);
-    const live2dProfile = (crop || gaze || idleBreath !== undefined) && await editableLive2dProfile(packDir, profiles);
+    const live2dProfile = editPresentation && await editableLive2dProfile(packDir, profiles);
     if (crop && !live2dProfile) throw Error('这份形象包不支持上半身取景');
     if (gaze && !live2dProfile) throw Error('这份形象包不支持视线跟随设置');
     if (idleBreath !== undefined && !live2dProfile) throw Error('这份形象包不支持待机呼吸设置');
+    if (breathingScale !== undefined && !live2dProfile) throw Error('这份形象包不支持呼吸缩放设置');
+    if (clickReaction !== undefined && !live2dProfile) throw Error('这份形象包不支持单击反应设置');
+    if (allowFlip !== undefined && !live2dProfile) throw Error('这份形象包不支持左右翻面设置');
+    if (dragFeedback !== undefined && !live2dProfile) throw Error('这份形象包不支持拖动反馈设置');
     if ((patch.bodyGain !== undefined && !profiles.some(p => /"bodyGain":\s*[-\d.]+/.test(p.text)))
       || (patch.style !== undefined && !profiles.some(p => /"style":\s*"[^"]*"/.test(p.text)))) throw new Error('这个形象包不支持通用表演配置');
     for (const {file:prof,text:before} of profiles) {
@@ -470,6 +496,10 @@ export async function editPack(packDir: string, patch: PackEdit): Promise<void> 
         }
         if (gaze) s = writeProfileSetting(s, 'gaze', gaze);
         if (idleBreath !== undefined) s = writeProfileSetting(s, 'idleBreath', idleBreath);
+        if (breathingScale !== undefined) s = writeProfileSetting(s, 'breathingScale', breathingScale);
+        if (clickReaction !== undefined) s = writeProfileSetting(s, 'clickReaction', clickReaction);
+        if (allowFlip !== undefined) s = writeProfileSetting(s, 'allowFlip', allowFlip);
+        if (dragFeedback !== undefined) s = writeProfileSetting(s, 'dragFeedback', dragFeedback);
       }
       if (s !== before) writes.push({ file: prof, before, after: s });
     }

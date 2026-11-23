@@ -300,9 +300,9 @@ test('resources escaping the model root and directory links are never followed',
  try{await symlink(f.dir,join(f.root,'link'),'junction');}catch(e){if(e.code==='EPERM')return;throw e;}
  assert.equal((await findModels(join(f.root,'link'))).models.length,0);
 });
-test('pose mappings require a real reset and generated configuration contains only selected resources',async t=>{
+test('pose mappings can finish directly and validate a supplied reset',async t=>{
  const f=await fixture(t),pose=f.catalog.resources.find(r=>r.title.includes('打开'));
- assert.throws(()=>validateBindings(f.catalog,[{word:'wave',resource:pose.id}]),/复位/);
+ assert.equal(validateBindings(f.catalog,[{word:'wave',resource:pose.id}])[0].release,undefined);
  assert.throws(()=>validateBindings(f.catalog,[{word:'wave',resource:'invented'}]),/不存在/);
  const native=nativeConfig(f.catalog,[{word:'wave',resource:pose.id,release:pose.release,reason:'测试成对姿态',confidence:.8}]);assert.equal(native.resources.length,2);
  assert(native.resources.every(r=>r.data.Curves));
@@ -419,6 +419,16 @@ test('native motion priority is explicit and preemption crossfades shared channe
  close(arm(interrupted).weight,1);
 });
 
+test('a pose without a reset clip fades out after its original duration',()=>{
+ const player=createNativeActions({resources:[{id:'pose',kind:'motion',classification:'pose',seconds:.2,data:motion(.8,.8)}],
+  bindings:[{word:'wave',resource:'pose'}]});
+ player.trigger('wave');
+ let tracks=player.update({mode:'idle'},.1);
+ assert(tracks.length);
+ for(let i=0;i<6;i++)tracks=player.update({mode:'idle'},.1);
+ assert.deepEqual(tracks,[]);
+ assert.equal(player.state().motion,null);
+});
 test('native idle eases in and a held pose crossfades into its release', () => {
  const player = createNativeActions({ resources:[
   {id:'idle',kind:'motion',seconds:1,data:motion(.2,.2)},

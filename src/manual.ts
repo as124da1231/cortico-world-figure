@@ -11,13 +11,54 @@ import {wardrobeConfig,wardrobeTracks,wardrobeChannels} from '../workbench/pack/
 import {fixedWardrobeGroups} from '../workbench/pack/backends/wardrobe-slots.js';
 import {BODY_CROP_AXIS} from '../workbench/pack/backends/crop-config.js';
 import {EMOTION_EFFECT_AXIS} from '../workbench/tools/emotion-effect.mjs';
+import {KIT_EXPRESSIONS,KIT_MOTIONS} from '../workbench/vendor/coo-kit/kit/body.js';
 import {FIGURE_THEME_AXIS} from '../workbench/tools/theme-palette.mjs';
 
 export const LIBRARY = 'native-library.json';
-export async function writeNativePack(root:string,catalog:any,bindings:any[],preview=false,groups:any[]=[]) {
-  const native=nativeConfig(catalog,bindings,{includeAll:preview});
+const ACTION_WORDS = new Set([...FACE_WORDS, ...MOTION_WORDS]);
+
+export function validateDisabledWords(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > ACTION_WORDS.size
+      || value.some(word => !ACTION_WORDS.has(word)) || new Set(value).size !== value.length) {
+    throw Error('停用词条无效或重复');
+  }
+  return [...value].sort();
+}
+
+const GENERIC_WORDS = [...FACE_WORDS.filter(word => KIT_EXPRESSIONS.includes(word)),
+  ...MOTION_WORDS.filter(word => KIT_MOTIONS.includes(word))];
+const GENERIC_WORD_SET = new Set(GENERIC_WORDS);
+
+function resolveClickPool(value: unknown, bindings: {word:string}[]): string[] {
+  if (!Array.isArray(value) || value.length > ACTION_WORDS.size
+      || value.some(word => !ACTION_WORDS.has(word)) || new Set(value).size !== value.length) {
+    throw Error('单击播放池包含无效或重复的词条');
+  }
+  const bound = new Set(bindings.map(binding => binding.word));
+  return value.filter(word => GENERIC_WORD_SET.has(word) || bound.has(word)).sort();
+}
+
+function resolveGrabReaction(value: any, catalog: any, bindings: any[]) {
+  if (value == null) return {mode:'native',pool:[]};
+  if (!['native','fixed','random'].includes(value.mode)) throw Error('拎起反应模式无效');
+  if (value.word !== undefined && !FACE_WORDS.includes(value.word)) throw Error('拎起表情无效');
+  const pool = resolveClickPool(value.pool ?? [], bindings);
+  if (pool.some(word => !FACE_WORDS.includes(word))) throw Error('拎起反应池只接受表情词条');
+  const motions = new Set(catalog.resources.filter((resource:any) => resource.kind === 'motion').map((resource:any) => resource.id));
+  const unavailable = new Set(bindings.filter(binding => motions.has(binding.resource)).map(binding => binding.word));
+  const word = !unavailable.has(value.word) ? value.word : undefined;
+  return {mode:value.mode, ...(word ? {word} : {}), pool:pool.filter(word => !unavailable.has(word))};
+}
+
+export async function writeNativePack(root:string,catalog:any,bindings:any[],preview=false,groups:any[]=[],disabledWords?:string[],clickPool?:unknown,grabReaction?:unknown) {
+  const config=nativeConfig(catalog,bindings,{includeAll:preview});
   const manifestFile=join(root,'figure.json'),manifest=parseFigureJson(await readFile(manifestFile,'utf8'));
   const previousLibrary=await readFile(join(root,LIBRARY),'utf8').then(s=>JSON.parse(s)).catch(()=>({}));
+  const disabled = new Set(preview ? [] : validateDisabledWords(disabledWords ?? previousLibrary.disabledWords ?? []));
+  const pool = preview ? [] : resolveClickPool(clickPool === undefined ? previousLibrary.clickPool ?? [] : clickPool, bindings);
+  const grab = preview ? undefined : resolveGrabReaction(grabReaction === undefined ? previousLibrary.grabReaction : grabReaction, catalog, bindings);
+  const savedGrab = grab && (grab.mode !== 'native' || grab.word || grab.pool.length) ? {grabReaction:grab} : {};
+  const native = { ...config, ...savedGrab, ...(disabled.size ? { disabledWords: [...disabled] } : {}), ...(pool.length ? { clickPool: pool } : {}) };
   const previousGroups:any[]=previousLibrary.wardrobe||[];
   const previousAxes=new Set(previousGroups.map(g=>g.id));
   const reservedAxes=new Set([BODY_CROP_AXIS,EMOTION_EFFECT_AXIS,FIGURE_THEME_AXIS]);
@@ -41,10 +82,20 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
   }
   if(count!==1)throw Error('请为单个 Live2D 模型编辑动作');
   if(!preview){
-    const previous=await readFile(join(root,LIBRARY),'utf8').then(s=>JSON.parse(s).bindings||[]).catch(()=>[]);
-    const removed=new Set(previous.map((b:any)=>b.word).filter((w:string)=>MOTION_WORDS.includes(w)));
-    manifest.vocab=(manifest.vocab||[]).filter((v:any)=>!removed.has(v.id));
-    appendNativeVocab(manifest.vocab,bindings,catalog.resources);
+    const vocab = [...manifest.vocab];
+    const visibleIds = new Set(vocab.map(word => word.id));
+    for (const { index, entry } of previousLibrary.hiddenVocab ?? []) {
+      if (ACTION_WORDS.has(entry?.id) && !visibleIds.has(entry.id)) {
+        vocab.splice(index, 0, entry);
+        visibleIds.add(entry.id);
+      }
+    }
+    const previousBindings: any[] = previousLibrary.bindings ?? [];
+    const removed = new Set(previousBindings.map(binding => binding.word).filter(word => MOTION_WORDS.includes(word)));
+    const updatedVocab = vocab.filter(word => !removed.has(word.id));
+    appendNativeVocab(updatedVocab,bindings,catalog.resources);
+    const hiddenVocab = updatedVocab.flatMap((entry, index) => disabled.has(entry.id) ? [{ index, entry }] : []);
+    manifest.vocab = updatedVocab.filter(word => !disabled.has(word.id));
     const wardrobeAxes=runtimeGroups.map(group=>{
       const previous=previousGroups.find(g=>g.id===group.id);
       const previousAxis=(manifest.axes||[]).find((axis:any)=>axis.id===group.id);
@@ -63,7 +114,11 @@ export async function writeNativePack(root:string,catalog:any,bindings:any[],pre
     manifest.presets=(manifest.presets||[]).map((p:any)=>({...p,pick:Object.fromEntries(manifest.axes.map((a:any)=>[a.id,a.options.some((o:any)=>o.id===p.pick?.[a.id])?p.pick[a.id]:a.options[0].id]))}));
     // Empty groups are editor drafts only; runtime offsets follow the actual emitted axes.
     await writeFile(manifestFile,JSON.stringify(manifest,null,2)+'\n');
-    await writeFile(join(root,LIBRARY),JSON.stringify({version:1,catalog,bindings,wardrobe:wardrobe.groups}));
+    await writeFile(join(root,LIBRARY),JSON.stringify({
+      version:1,catalog,bindings,wardrobe:wardrobe.groups,
+      ...(disabled.size ? { disabledWords:[...disabled], hiddenVocab } : {}),
+      ...(pool.length ? { clickPool:pool } : {}), ...savedGrab,
+    }));
   }
 }
 
@@ -77,7 +132,7 @@ export class ManualSessions {
   private cancelled=new Set<string>();
   private createRenderer:(pack:string,workbench:string)=>PreviewWorker;
   constructor(root:string,workbench:string,createRenderer=(pack:string,bench:string):PreviewWorker=>new StaticPreviewRenderer(pack,bench)){this.root=root;this.workbench=workbench;this.createRenderer=createRenderer;}
-  async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string,requestedToken?:string,groups:any[]=[],resolution?:unknown){
+  async open(pack:string,catalog:any,bindings:any[]=[],source?:any,buildId?:string,requestedToken?:string,groups:any[]=[],resolution?:unknown,disabledWords:string[]=[],clickPool:unknown=[],grabReaction?:unknown){
     const fixed=fixedWardrobeGroups(groups),wardrobeNeedsSave=groups.some(g=>g.options.length)&&JSON.stringify(fixed)!==JSON.stringify(groups);groups=fixed;
     await this.prune();
     if(this.sessions.size>=3)throw Error('请先关闭已有动作编辑窗口');
@@ -108,9 +163,9 @@ export class ManualSessions {
       this.sessions.set(token,value);
       if(!this.reaper){this.reaper=setInterval(()=>void this.prune().catch(()=>{}),60000);this.reaper.unref();}
       if(pending.cancelled||!this.sessions.has(token))throw Error('这次编辑已取消');
-      return {token,buildId,previewSize:previewSize(resolution),wardrobe:groups,wardrobeNeedsSave,title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,nativeMotionMode:true,
+      return {token,buildId,previewSize:previewSize(resolution),wardrobe:groups,wardrobeNeedsSave,title:catalog.model.title,fingerprint:catalog.fingerprint,bindings,disabledWords,clickPool:resolveClickPool(clickPool,bindings),genericWords:GENERIC_WORDS,grabReaction:resolveGrabReaction(grabReaction,catalog,bindings),nativeMotionMode:true,
         words:{expressions:FACE_WORDS,motions:MOTION_WORDS},
-        resources:catalog.resources.map((r:any)=>{const channels=wardrobeChannels(r);let wardrobeError='';try{wardrobeTracks(r);}catch(e){wardrobeError=String((e as Error).message);}const {id,title,kind,classification,seconds,release}=r;return {id,title,kind,classification,seconds,release,channels,wardrobeError,...(kind==='expression'?{parameters:r.parameters}: {})};}),warnings:catalog.warnings||[],truncated:catalog.truncated};
+        resources:catalog.resources.map((r:any)=>{const channels=wardrobeChannels(r);let wardrobeError='';try{wardrobeTracks(r);}catch(e){wardrobeError=String((e as Error).message);}const {id,title,kind,classification,seconds,release,file}=r;return {id,title,kind,classification,seconds,release,file,channels,wardrobeError,...(kind==='expression'?{parameters:r.parameters}: {})};}),warnings:catalog.warnings||[],truncated:catalog.truncated};
     }catch(e){this.sessions.delete(token);if(!this.sessions.size){if(this.reaper)clearInterval(this.reaper);this.reaper=null;}await rm(dir,{recursive:true,force:true});throw e;}
     finally{this.openingTokens.delete(token);}
   }

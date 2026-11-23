@@ -9,18 +9,20 @@ function createWorkbenchPopups({ctx, shell, el, t, resultButton, resultBody, res
     current = handle;
     return handle;
   }
-  function reportResult(heading, lines = [], bad = false, figureId) {
+  function reportResult(heading, lines = [], bad = false, figureId, reinstalled = false) {
     resultFeedback.replaceChildren();
     if (heading) resultFeedback.append(el('strong', null, heading));
     for (const line of lines) if (line) resultFeedback.append(el('p', null, line));
     if (figureId) {
       const row = el('div', 'l2d-install-next');
-      const dress = wardrobeLink(el, t('前往装扮穿戴', 'Wear in Dress up'), 'l2d-btn sm primary');
+      const dress = wardrobeLink(el, reinstalled ? t('前往装扮重新穿戴', 'Rewear in Dress up') : t('前往装扮穿戴', 'Wear in Dress up'), 'l2d-btn sm primary');
       const configure = el('a', 'l2d-btn sm', t('打开模型设置', 'Open Model settings'));
       configure.href = '#/provider/world%3Afigure/settings';
       const feedback = el('p', 'l2d-install-feedback');
       feedback.setAttribute('role', 'status');
-      feedback.textContent = t('穿戴后可在模型设置选择该形象，启用编排或语音口型。', 'Once worn, select the figure in Model settings to enable planning or audio lip sync.');
+      feedback.textContent = reinstalled
+        ? t('如果桌面正在穿戴这只形象，先换另一只再换回来，桌面才会加载改动。', 'If this figure is already worn, switch to another figure and back to load the changes.')
+        : t('穿戴后可在模型设置选择该形象，启用编排或语音口型。', 'Once worn, select the figure in Model settings to enable planning or audio lip sync.');
       row.append(dress, configure);
       resultFeedback.append(row, feedback);
     }

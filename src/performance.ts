@@ -46,8 +46,10 @@ type Resource = { id: string; title: string; kind: string; classification: strin
 type Word = { id: string; names?: Record<string, string[]> };
 const wordKey = (value: string) => value.normalize('NFC').toLowerCase();
 const wordNames = (word: Word) => [word.id, ...Object.values(word.names ?? {}).flat()].map(wordKey);
+const hiddenWords = (library: { hiddenVocab?: { entry: Word }[] } | null): Word[] =>
+  Array.isArray(library?.hiddenVocab) ? library.hiddenVocab.flatMap(({ entry }) => entry ? [entry] : []) : [];
 const runtimeBackends = join(import.meta.dirname, '..', 'workbench', 'pack', 'backends');
-type Target = { id: string; model: string; body?: DesktopBodyId; name: string; words: Word[]; dir: string; revision: string; immediate: boolean; limited: boolean; resources: Resource[]; parameters: Map<string, string> };
+type Target = { id: string; model: string; body?: DesktopBodyId; name: string; words: Word[]; disabledWords: Set<string>; reservedWords: Word[]; dir: string; revision: string; immediate: boolean; limited: boolean; resources: Resource[]; parameters: Map<string, string> };
 type PlannerConnection = NonNullable<ReturnType<PlannerServices['connection']>>;
 type VoicePlayback = (first: Buffer, onStarted: VoiceStarted) => Promise<void>;
 type CoordinatedReply = { body: DesktopBodyId; text: string; after: number; startedAt?: number };
@@ -137,7 +139,8 @@ export async function preserveSavedActions(pending: string, previous: string) {
   await updateManifest(pending, async manifest => {
     const actions = Array.isArray(manifest.figureActions) ? manifest.figureActions : [];
     const words: Word[] = manifest.vocab;
-    const used = new Set(words.flatMap(wordNames));
+    const library = await readJson(join(pending, 'native-library.json')).catch(() => null);
+    const used = new Set([...words, ...hiddenWords(library)].flatMap(wordNames));
     for (const action of old.figureActions) {
       if (typeof action?.id !== 'string' || !action.id.startsWith(SAVED_ACTION_PREFIX) || action.model !== incoming.model?.id) continue;
       const word = (old.vocab as Word[]).find(item => item.id === action.id);
@@ -437,8 +440,11 @@ export class FigurePerformance {
       && Number.isFinite(r.seconds) && r.seconds <= 18 && !wardrobeIds.has(r.id)
       && parameterNames(r).some(parameter => parameters.has(parameter.id)));
     const name = manifest.name?.zh || manifest.name?.en || id;
+    const disabledWords = new Set<string>(Array.isArray(library?.disabledWords) ? library.disabledWords : []);
+    const words = Array.isArray(manifest.vocab) ? manifest.vocab : [];
     return { id, model: typeof model === 'string' ? model : '', body: body?.id, name: typeof name === 'string' ? name.slice(0, 80) : id,
-      words: Array.isArray(manifest.vocab) ? manifest.vocab : [], dir, revision: String(library?.catalog?.fingerprint ?? build.sourceHash),
+      words, disabledWords, reservedWords: hiddenWords(library), dir,
+      revision: [library?.catalog?.fingerprint ?? build.sourceHash, ...disabledWords].join(':'),
       limited,
       immediate: !!manifest.moves?.some((move: {id: string}) => move.id === PERFORMANCE_MOVE), resources, parameters };
   }
@@ -450,6 +456,7 @@ export class FigurePerformance {
     const resources = target.resources.filter(r => matches(r.id, r.title));
     const parameters = [...target.parameters].filter(([id, title]) => matches(id, title));
     return { figure: target.id, immediate: target.immediate, ...(target.limited ? { limited: true } : {}), next: offset + 24 < Math.max(resources.length, parameters.length) ? offset + 24 : null,
+      ...(target.disabledWords.size ? { disabledWords: [...target.disabledWords] } : {}),
       resources: resources.slice(offset, offset + 24).map(({id,title,kind,seconds}) => ({id,title,kind,seconds})),
       parameters: parameters.slice(offset, offset + 24).map(([id, name]) => ({id,name,min:-1,default:0,max:1})) };
   }
@@ -457,6 +464,7 @@ export class FigurePerformance {
   private check(target: Target, input: unknown) {
     const cues = parsePerformanceCues(input);
     for (const cue of cues) {
+      if (cue.face && target.disabledWords.has(cue.face)) throw Error('当前形象已停用这个表情词');
       if (cue.resource && !target.resources.some(r => r.id === cue.resource)) throw Error('当前形象没有这项可用原生资源');
       if (cue.pose && Object.keys(cue.pose).some(id => !target.parameters.has(id))) throw Error('姿态引用了当前形象不支持的参数');
     }
@@ -516,7 +524,7 @@ export class FigurePerformance {
       const resources = this.clips(current, cues);
       const actions: SavedAction[] = Array.isArray(manifest.figureActions) ? manifest.figureActions : [];
       const vocab: Word[] = manifest.vocab;
-      const taken = vocab.some(word => wordNames(word).includes(wordKey(name)));
+      const taken = [...vocab, ...current.reservedWords].some(word => wordNames(word).includes(wordKey(name)));
       if (taken) {
         const word = vocab.find(word => word.names?.zh?.includes(name));
         const previous = actions.find(action => action.id === word?.id);
@@ -702,7 +710,7 @@ export class FigurePerformance {
     return beats.slice(0, 24).flatMap(beat => {
       const at = Math.min(.98, offset / Math.max(1, length)) * durationMs / 1000;
       if (typeof beat?.text === 'string') offset += normalizeText(beat.text).length;
-      return PERFORMANCE_FACES.includes(beat?.mood?.id) ? [{ at, face: beat.mood.id }] : [];
+      return PERFORMANCE_FACES.includes(beat?.mood?.id) && !target.disabledWords.has(beat.mood.id) ? [{ at, face: beat.mood.id }] : [];
     });
   }
 

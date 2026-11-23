@@ -58,7 +58,7 @@ export function createNativeActions(config,{warn=console.warn, suppressedIdlePar
    resources.set(resource.id,{...resource,tracks,seconds:clamp(Number(resource.seconds)||1,.05,60)});
   }catch(error){failures.push(resource.id);warn('[l2d] Native resource skipped; generic behavior retained',resource.id,error.message);}
  }
- let active=null,expression=null,visibleExpression=[],expressionFrom=[],expressionAge=0,elapsed=0,lastFace=null,lastGesture=null,manual=null;
+ let active=null,expression=null,visibleExpression=[],expressionFrom=[],expressionAge=0,elapsed=0,lastFace=null,lastExpressionFace=null,lastGesture=null,manual=null;
  let visibleMotion=[], outgoing=null, transitionAge=0, idleWeight=0;
  const expressionResource=(id,overlays=[])=>{
   const list=[id,...overlays].map(id=>resources.get(id)).filter(Boolean);
@@ -107,7 +107,7 @@ export function createNativeActions(config,{warn=console.warn, suppressedIdlePar
   const values = [];
   if (active) {
    active.age += dt;
-   const hold = active.resource.classification === 'pose' && !active.release ? POSE_HOLD : 0;
+   const hold = active.resource.classification === 'pose' && active.binding.release && !active.release ? POSE_HOLD : 0;
    const release = hold > 0 && active.age >= active.resource.seconds + hold
      ? resources.get(active.binding.release) : null;
    if (release?.kind === 'motion') {
@@ -143,14 +143,18 @@ export function createNativeActions(config,{warn=console.warn, suppressedIdlePar
   resources:()=>[...resources.keys()],
   sample(id,time,overlays=[]){const r=expressionResource(id,overlays);if(!r)throw Error('Unknown native resource');manual={resource:r,time:clamp(Number(time)||0,0,r.seconds)};},
   clearSample(){manual=null;},
-  update(frame={},dt=.016){
+  update(frame={},dt=.016,expressionOnly=false,expressionWord=frame.face){
    dt=clamp(Number(dt)||0,0,.1);elapsed+=dt;const out=[];
    if(manual){sample(manual.resource,manual.time,1,out);return out;}
+   if (expressionWord !== lastExpressionFace) {
+    lastExpressionFace = expressionWord;
+    const next = get(expressionWord);
+    setExpression(next?.resource.kind === 'expression' ? next : null);
+   }
    if (frame.face !== lastFace) {
     lastFace = frame.face;
     const next = get(frame.face);
-    setExpression(next?.resource.kind === 'expression' ? next : null);
-    if (next?.resource.kind === 'motion' && active?.binding.word !== frame.face) trigger(frame.face, PRIORITY.face);
+    if (!expressionOnly && next?.resource.kind === 'motion' && active?.binding.word !== frame.face) trigger(frame.face, PRIORITY.face);
    }
    const gesture=frame.gesture?.kind||null;
    if (gesture !== lastGesture) {
