@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PlannerServices } from '../src/planner-services.ts';
-import { FigurePerformance } from '../src/performance.ts';
+import { FigurePerformance, preserveSavedActions } from '../src/performance.ts';
 import { DesktopSelection } from '../src/desktop-body.ts';
 import { PERFORMANCE_ASSET, PERFORMANCE_MOVE, PERFORMANCE_TARGET, parsePerformanceCues } from '../workbench/pack/backends/performance-plan.js';
-import { createPerformancePlayback } from '../workbench/pack/backends/performance-playback.js';
+import { createPerformancePlayback, readSavedActions } from '../workbench/pack/backends/performance-playback.js';
 import { ParameterPlanSequencer } from '../workbench/pack/vendor/soullink/chunk-OPVA6SRP.js';
 
 async function fixture(t, mode, activeBody) {
@@ -22,7 +22,7 @@ async function fixture(t, mode, activeBody) {
     vocab:[{id:'happy',names:{zh:['开心']}},{id:'sad',names:{zh:['难过']}}] });
   await json('build.json', { tool: 'cortico-live2d-pack', model: { id: 'demo' } });
   await mkdir(join(dir, 'models', 'demo'), {recursive:true});
-  await writeFile(join(dir, 'models', 'demo', 'cdi3.js'), 'export default '+JSON.stringify({Parameters:[{Id:'ParamAngleY',Name:'点头'},{Id:'Toggle01',Name:'衣服'}]})+';\n');
+  await writeFile(join(dir, 'models', 'demo', 'cdi3.js'), 'export default '+JSON.stringify({Parameters:[{Id:'ParamAngleY',Name:'点头'},{Id:'ParamLegL',Name:'左腿'},{Id:'Toggle01',Name:'衣服'}]})+';\n');
   await json(PERFORMANCE_ASSET, { version: 1, orders: [] });
   await json('native-library.json', { catalog: { fingerprint: 'demo-1', resources: [
     { id: 'nod', title: '点头', kind: 'motion', classification: 'gesture', seconds: 1,
@@ -47,7 +47,7 @@ async function fixture(t, mode, activeBody) {
   const source = activeBody ?? 'desktop-pet';
   const say = (text, at = Date.now(), body = source) => events.push({cursor:events.length+1, ts:new Date(at).toISOString(), source:body, type:body+'.self', text, meta:{kind:'say',beats:[{text,mood:{id:'happy'}}]} });
   const sayUser = text => events.push({cursor:events.length+1, ts:new Date().toISOString(),source,type:source+'.message',meta:{text}});
-  return { service, root, cfg, usage, orders, say, sayUser, manifest: async () => JSON.parse(await readFile(join(dir, 'figure.json'), 'utf8')) };
+  return { service, root, dir, cfg, usage, orders, say, sayUser, manifest: async () => JSON.parse(await readFile(join(dir, 'figure.json'), 'utf8')) };
 }
 
 test('readiness can follow a Live2D pet receipt without relying on the deployment configuration', async t => {
@@ -98,7 +98,7 @@ test('direct tools stage a real host ticket and pair only with committed matchin
   assert.deepEqual(await service.readiness(),{state:'ready',body:'desktop-pet',figure:'demo'});
   const capabilities = JSON.parse(await call('figure_body', {}));
   assert.deepEqual(capabilities.resources.map(resource => resource.id), ['nod']);
-  assert.deepEqual(capabilities.parameters.map(parameter => parameter.id), ['ParamAngleX','ParamAngleY']);
+  assert.deepEqual(capabilities.parameters.map(parameter => parameter.id), ['ParamAngleX','ParamAngleY','ParamLegL']);
   const staged = JSON.parse(await call('figure_perform', { cues: [{ at: 0, duration: 1, resource: 'nod' }] }));
   assert.equal(staged.to, PERFORMANCE_MOVE);
   assert.equal((await orders())[0].ticket, staged.params[0]);
@@ -365,4 +365,62 @@ test('planner services keep credentials scoped to their address and preserve the
   assert.equal(services.connection().apiKey,'');
   await services.test(local.services.find(item=>item.id===local.selectedId));
   assert.equal(payloads.at(-1).init.headers.has('Authorization'),false);
+});
+
+test('a staged parameter action becomes a persistent ordinary vocabulary word', async t => {
+  const { service, root, dir, cfg, manifest, orders } = await fixture(t, 'direct');
+  const call = (name, args, role = 'main') => service.tools().find(tool => tool.name === name).handler(args, {role});
+  const cues = [{ at: 0, duration: .8, pose: {ParamLegL:.8} },
+    { at: .8, duration: .8, pose: {ParamLegL:0} }];
+  const staged = JSON.parse(await call('figure_perform', {cues}));
+  assert.equal(staged.draft, (await orders())[0].ticket);
+  const args = {draft:staged.draft, name:'抬脚'};
+  assert.equal((await call('figure_save_action', args, 'other')).failed, true);
+  assert.match((await call('figure_save_action', args)).text, /重新安装/);
+  await mkdir(join(dir, 'backends'));
+  for (const file of ['live2d.js', 'performance-playback.js']) {
+    await copyFile(new URL('../workbench/pack/backends/' + file, import.meta.url), join(dir, 'backends', file));
+  }
+  assert.match((await call('figure_save_action', {...args, name:'开心'})).text, /同名/);
+  const saved = JSON.parse(await call('figure_save_action', args));
+  assert.equal(saved.status, 'saved');
+  assert.equal(saved.rewear, true);
+  assert.equal(JSON.parse(await call('figure_save_action', args)).word, saved.word);
+  cfg.performanceMode = 'vocab';
+  await service.syncMode();
+  await service.writes;
+  assert.deepEqual(service.tools(), []);
+  const persisted = await manifest();
+  assert.equal(persisted.vocab.find(word => word.id === saved.word).names.zh[0], '抬脚');
+  assert.deepEqual(persisted.moves, []);
+  assert.equal(readSavedActions(persisted, 'other-model').size, 0);
+
+  const changed = join(root, 'new-install');
+  await mkdir(changed);
+  const build = {tool:'cortico-live2d-pack', sourceHash:'same-rig', model:{id:'demo'}};
+  await Promise.all([
+    writeFile(join(dir, 'build.json'), JSON.stringify(build)),
+    writeFile(join(changed, 'build.json'), JSON.stringify(build)),
+    writeFile(join(changed, 'figure.json'), JSON.stringify({vocab:[]})),
+  ]);
+  await preserveSavedActions(changed, dir);
+  const newManifest = JSON.parse(await readFile(join(changed, 'figure.json'), 'utf8'));
+  const action = readSavedActions(newManifest, 'demo').get(saved.word);
+  assert(action);
+
+  const now = Date.now();
+  const clock = t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'fetch', async () => Response.json({version:1,orders:[]}));
+  const model = {getParameterDefaultValue:()=>0,getParameterValueByIndex:()=>0,getParameterMinimumValue:()=>-1,getParameterMaximumValue:()=>1};
+  const playback = createPerformancePlayback({asset:name=>name, model, paramIndex:new Map([['ParamLegL',0]]),
+    protectedIds:new Set(), host:{emit(){}}, position:()=>({x:0,y:0})});
+  assert(playback.playSaved(action));
+  clock.mock.mockImplementation(() => now + 400);
+  playback.poll();
+  await delay(0);
+  assert(Math.abs(playback.frame().tracks[0].value - .4) < .001);
+  clock.mock.mockImplementation(() => now + 2000);
+  assert.equal(playback.frame(), null);
+  assert(playback.playSaved(action));
+  playback.dispose();
 });

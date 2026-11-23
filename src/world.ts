@@ -10,8 +10,7 @@
  */
 import { existsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile,
+import { lstat, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile,
 } from 'node:fs/promises';
 import { dirname, join, basename, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +29,7 @@ import { FigureAutomation, automationMode } from './automation.mjs';
 import {adaptationMode,aiEnabled} from './adaptation.mjs';
 import {ManualSessions,LIBRARY,writeNativePack} from './manual.ts';
 import { openEditorInBrowser, serveBrowserEditor, type BrowserDraft, type BrowserEditor } from './browser-editor.ts';
-import { FigurePerformance, writePerformanceMove, type PerformanceConfig } from './performance.ts';
+import { FigurePerformance, preserveSavedActions, writePerformanceMove, type PerformanceConfig } from './performance.ts';
 import { PERFORMANCE_ASSET } from '../workbench/pack/backends/performance-plan.js';
 import {findModels,inspectNative,nativeConfig} from '../workbench/tools/native-catalog.mjs';
 import {packFingerprint} from './pack-fingerprint.ts';
@@ -1314,6 +1313,10 @@ export class Live2dWorld implements World {
       prepare: async pending => {
         await prepareFigureRuntime(pending, cfg, this.performance.mode() === 'direct', themePalettes);
         const manifest = await readPackManifest(pending);
+        const previous = join(figures, manifest.id);
+        if (await lstat(previous).then(info => info.isDirectory() && !info.isSymbolicLink()).catch(() => false)) {
+          await preserveSavedActions(pending, previous);
+        }
         installed = await this.performance.beforeInstall(manifest.id);
       },
     });

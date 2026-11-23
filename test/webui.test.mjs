@@ -90,7 +90,9 @@ test('Figure panels and version headers wait for their stylesheet inside the ass
 
 test('the FFA Hub link belongs to its own Figure panel and local import stays separate', async t => {
   const {root,dom,calls,handle} = await mount(t, {workshop:true, providerHeader:true, fetch:() => { throw new Error('offline'); }});
-  const link = root.querySelector('.l2d-workshop-page a.l2d-workshop-link');
+  const panel = root.querySelector('.l2d-workshop-page');
+  const link = panel.querySelector('a.l2d-workshop-link');
+  assert.ok([...panel.querySelectorAll('.sh-desc')].some(node => node.textContent === '投稿包不得包含 Cubism Core、Cubism Framework、着色器及其打包副本。'));
   assert.equal(link.textContent, '在浏览器打开工坊');
   assert.equal(link.href, 'https://8.148.13.225:8443/?page=figure');
   assert.equal(link.target, '_blank');

@@ -1,4 +1,6 @@
 export const PERFORMANCE_ASSET = 'figure-performance.json';
+export const SAVED_ACTION_PREFIX = 'figure-act-';
+export const SAVED_ACTION_LIMIT = 24;
 export const PERFORMANCE_MOVE = 'figure-performance';
 export const PERFORMANCE_TARGET = {
   id: PERFORMANCE_MOVE,

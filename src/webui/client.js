@@ -450,7 +450,10 @@ const workshop = {
     note.className = 'sh-desc';
     note.textContent = t('使用 FFA Hub 账号登录。下载后可回到工作台导入。', 'Sign in with FFA Hub. Import downloaded models from the Workbench.');
     actions.append(launch, note);
-    card.body.append(actions);
+    const submissionRule = doc.createElement('p');
+    submissionRule.className = 'sh-desc';
+    submissionRule.textContent = t('投稿包不得包含 Cubism Core、Cubism Framework、着色器及其打包副本。', 'Submissions must exclude Cubism Core, Cubism Framework, shaders, and bundled copies of these components.');
+    card.body.append(actions, submissionRule);
     page.append(card.el);
     ctx.root.append(page);
     return {dispose() { page.remove(); }};

@@ -565,6 +565,35 @@
       }
     },
     {
+      "name": "figure_save_action",
+      "description": "Only when the user explicitly asks to save: name a trial action from figure_perform and register it in the worn figure vocabulary. Rewearing the figure loads the new word. Never overwrite an existing word.",
+      "tags": [
+        "write"
+      ],
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "draft": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "The draft returned by figure_perform."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "description": "A single trigger name without spaces, commas or brackets."
+          }
+        },
+        "required": [
+          "draft",
+          "name"
+        ]
+      }
+    },
+    {
       "name": "figure_speak",
       "description": "Speak the plain text of a desktop pet reply. In the same response call figure_speak first, then the available pet speech tool (pet_say or live2d_pet_say) immediately with the same spoken text. The pet speech tool still displays the text if voice is unavailable. Use once per reply.",
       "parameters": {

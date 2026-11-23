@@ -1,10 +1,26 @@
 import { ParameterPlanSequencer } from '../vendor/soullink/chunk-OPVA6SRP.js';
 import { createNativeActions } from './native-actions.js';
-import { PERFORMANCE_ASSET, PERFORMANCE_FACES, PERFORMANCE_MOVE, parsePerformanceCues } from './performance-plan.js';
+import { PERFORMANCE_ASSET, PERFORMANCE_FACES, PERFORMANCE_MOVE, SAVED_ACTION_LIMIT, SAVED_ACTION_PREFIX, parsePerformanceCues } from './performance-plan.js';
 
 const bounded = (value, min, max) => Math.max(min, Math.min(max, value));
 class QuietSequencer extends ParameterPlanSequencer {
   logActiveBeatChange() {}
+}
+
+export function readSavedActions(manifest, modelId) {
+  const actions = new Map();
+  if (!Array.isArray(manifest?.figureActions) || !Array.isArray(manifest?.vocab)) return actions;
+  const words = new Map(manifest.vocab.filter(word => word?.kind === 'motion').map(word => [word.id, word]));
+  for (const action of manifest.figureActions.slice(0, SAVED_ACTION_LIMIT)) {
+    if (typeof action?.id !== 'string' || !action.id.startsWith(SAVED_ACTION_PREFIX) || action.model !== modelId || !words.has(action.id)) continue;
+    try {
+      const cues = parsePerformanceCues(action.cues);
+      const seconds = Math.max(...cues.map(cue => cue.at + cue.duration)) + .2;
+      const resources = Array.isArray(action.resources) ? action.resources : [];
+      actions.set(action.id, { cues, resources, seconds });
+    } catch { /* An invalid saved timeline does not affect the other words. */ }
+  }
+  return actions;
 }
 
 export function createPerformancePlayback({ asset, model, paramIndex, protectedIds, host, position }) {
@@ -22,7 +38,7 @@ export function createPerformancePlayback({ asset, model, paramIndex, protectedI
     if (previous) report(previous.owner, by ?? (previous.rendered ? undefined : 'figure-no-render'));
   }
   function collect(order, owner) {
-    if (disposed || !order || used.has(order.ticket) || order.expiresAt <= Date.now()) return false;
+    if (disposed || !order || (order.ticket !== undefined && used.has(order.ticket)) || order.expiresAt <= Date.now()) return false;
     const speechMs = Number.isFinite(order.speechMs) && order.speechMs > 0 && order.speechMs <= 18000 ? order.speechMs : 0;
     let cues, beats, clips;
     if (!order.stop) {
@@ -43,7 +59,7 @@ export function createPerformancePlayback({ asset, model, paramIndex, protectedI
         }
       } else if (!speechMs) return false;
     }
-    used.set(order.ticket, order.expiresAt);
+    if (order.ticket !== undefined) used.set(order.ticket, order.expiresAt);
     if (order.startedAt) lastReply = order.ticket;
     if (order.stop) { release('figure-stop'); report(owner); return true; }
     release('figure-replaced');
@@ -70,12 +86,12 @@ export function createPerformancePlayback({ asset, model, paramIndex, protectedI
     for (const [ticket, deadline] of used) if (deadline < Date.now()) used.delete(ticket);
     void load().then(orders => {
       if (disposed || waiting) return;
-      if (active?.owner) return;
+      if (active && (active.owner || active.ticket === undefined)) return;
       const now = Date.now();
       const reply = orders.filter(order => order?.startedAt && order.startedAt <= now && order.expiresAt > now)
         .reduce((latest, order) => !latest || latest.startedAt <= order.startedAt ? order : latest, null);
       if (reply && reply.ticket !== lastReply) collect(reply);
-      else if (active && !orders.some(order => order.ticket === active.ticket)) release('figure-cancelled');
+      else if (active?.ticket !== undefined && !orders.some(order => order.ticket === active.ticket)) release('figure-cancelled');
     }).catch(() => { nextPoll = Date.now() + 1500; }).finally(() => { request = false; });
   }
   function direct(move, owner) {
@@ -168,6 +184,9 @@ export function createPerformancePlayback({ asset, model, paramIndex, protectedI
   }
   return {
     poll, frame, direct, cancel,
+    playSaved(action) {
+      return collect({ cues: action.cues, resources: action.resources, expiresAt: Date.now() + action.seconds * 1000 });
+    },
     rendered(layer) { if (active && (layer?.face || layer?.tracks.length || layer?.emotion?.facs || layer?.emotion?.actionUnits || layer?.emotion?.vad)) active.rendered = true; },
     dispose() { disposed = true; release('figure-closed'); if (waiting) report(waiting, 'figure-closed'); waiting = undefined; },
   };

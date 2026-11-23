@@ -147,9 +147,12 @@ export async function createLive2DBody(base, opts, entry, kit) {
     return new URL(rel, base);
   };
 
+  const manifest = (!opts.preview && !profile.bongo) || emotionConfig.hasNamedPresets
+    ? await fetch(resolveAsset('figure.json'), {cache:'no-store', signal:AbortSignal.timeout(2500)})
+      .then(response => response.ok ? response.json() : null).catch(() => null)
+    : null;
   const presetSchemes = new Map();
   if (emotionConfig.hasNamedPresets) {
-    const manifest = await fetch(resolveAsset('figure.json')).then(response => response.json()).catch(() => null);
     for (const preset of manifest?.presets ?? []) {
       const scheme = manifest.axes.map(axis => preset.pick[axis.id]).join('-');
       presetSchemes.set(preset.id, scheme);
@@ -1473,6 +1476,15 @@ export async function createLive2DBody(base, opts, entry, kit) {
   // The kit mounts its stage-coordinate particles after the transformed art group.
   const hideNativeEffects = 'svg.kit.figure-custom-effects > ellipse.shadow + g + g,'
     + 'svg.kit.figure-motion-only > ellipse.shadow + g + g{display:none}';
+  let savedActions;
+  let performanceModule;
+  if (!opts.preview && !profile.bongo) {
+    try {
+      performanceModule = await import('./performance-playback.js');
+      savedActions = performanceModule.readSavedActions(manifest, entry.id);
+      for (const [id, action] of savedActions) words[id] = {motion:{seconds:action.seconds}};
+    } catch (error) { console.warn('[l2d] Figure performance unavailable', error); }
+  }
   const body = kit.createBody(bodyHost, { figure, words, css: 'foreignObject{pointer-events:none}' + hideNativeEffects });
   kitSvg = host.root.querySelector('svg.kit');
   setEmotionEffectsEnabled(emotionEffectsEnabled);
@@ -1493,9 +1505,9 @@ export async function createLive2DBody(base, opts, entry, kit) {
   const cueBase = body.cue.bind(body);
   body.cue = (kind) => { cueBase(kind); triggerEmotionEffect(kind); };
   if (!opts.preview) voicePlayback = createFigureVoicePlayback(doc, resolveAsset);
-  if (!opts.preview && !profile.bongo) {
+  if (performanceModule) {
     try {
-      const {createPerformancePlayback}=await import('./performance-playback.js');
+      const {createPerformancePlayback} = performanceModule;
       const protectedIds = new Set([...nativePhysicsOutputs, ...Object.keys(profile.clean?.params ?? {}),
         ...(roles.get('mouthOpen')?.items ?? []).map(item => item.handle.getString()),
         ...[...paramIndex.keys()].filter(id => PROTECTED_PARAMETER.test(id)),
@@ -1505,6 +1517,14 @@ export async function createLive2DBody(base, opts, entry, kit) {
       const move = body.move?.bind(body), stop = body.stopWalk?.bind(body);
       body.move=(args,id)=>performancePlayback.direct(args,id) || (move?.(args,id) ?? false);
       body.stopWalk=id=>performancePlayback.cancel(id) || stop?.(id);
+      if (savedActions.size) {
+        const doWord = body.do.bind(body);
+        body.do = word => {
+          const accepted = doWord(word);
+          const action = savedActions.get(word);
+          return accepted && action ? performancePlayback.playSaved(action) : accepted;
+        };
+      }
     } catch (error) { console.warn('[l2d] Figure performance unavailable', error); }
   }
   const shadow = host.root.querySelector('svg.kit > ellipse.shadow');
